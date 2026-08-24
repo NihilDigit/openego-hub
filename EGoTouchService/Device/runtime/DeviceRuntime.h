@@ -379,6 +379,10 @@ private:
     void SubmitPenAfeCommandLocked(command cmd, const char* reason);
     void BeginPenReplayInitCycle();
     void ReplayPenStateAfterChipInit();
+
+    // 硬件校准不在 Chip::Init 里发,理由见 MaybeCalibrateAfterInit 的注释。
+    void ArmPostInitCalibration();
+    void MaybeCalibrateAfterInit(const Solvers::HeatmapFrame& frame);
     void DispatchPenButtonAction(const PenButtonAction& action, const char* source);
     // 橡皮擦开关的唯一状态源，硬件事件与 ToggleEraser 双击共用。
     bool IsEraserActive() const;
@@ -463,6 +467,13 @@ private:
     uint64_t m_lastCmdId = 0;
     std::string m_lastNote;
     std::atomic<uint64_t> m_nextCmdId{1};
+
+    // Init 之后待发的那一次硬件校准。只在 worker 线程读写,不需要同步。
+    // 见 MaybeCalibrateAfterInit。
+    bool m_calibrationPending = false;
+    bool m_calibrationSawContact = false;
+    uint32_t m_calibrationIdleFrames = 0;
+
     mutable std::mutex m_framePushCbMu;
     FramePushCallback m_framePushCb;
 

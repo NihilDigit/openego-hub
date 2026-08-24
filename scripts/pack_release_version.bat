@@ -7,7 +7,7 @@ cd /d "%~dp0\.."
 
 set "BUILD_VERSION=%~1"
 if "%BUILD_VERSION%"=="" (
-    set "BUILD_VERSION=0.1.0"
+    set "BUILD_VERSION=0.1.1"
 )
 
 echo.

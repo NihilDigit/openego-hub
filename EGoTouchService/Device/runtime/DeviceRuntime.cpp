@@ -1203,6 +1203,102 @@ ThreadResult DeviceRuntime::WorkerMain() {
   return ThreadResult();
 }
 
+// ----------- Init 之后的一次性硬件校准 -----------
+
+namespace {
+
+// 帧内最大的正向偏离。格子是 uint16(见 BaselineTracker::RawCell),零点落在 32768
+// 附近而不是 0,所以参考量取全帧均值,不能用绝对阈值。
+int32_t FramePeakDeviation(const Solvers::HeatmapFrame& frame) {
+  const int16_t* const cells = &frame.heatmapMatrix[0][0];
+
+  int64_t sum = 0;
+  for (int i = 0; i < Frame::kMatrixCells; ++i) {
+    sum += static_cast<uint16_t>(cells[i]);
+  }
+  const auto mean = static_cast<int32_t>(sum / Frame::kMatrixCells);
+
+  int32_t peak = 0;
+  for (int i = 0; i < Frame::kMatrixCells; ++i) {
+    peak = std::max(peak,
+                    static_cast<int32_t>(static_cast<uint16_t>(cells[i])) - mean);
+  }
+  return peak;
+}
+
+// 实测:屏面空着时峰值偏离 70~160 且位置逐帧随机,单指按住时 2200 上下、位置恒定。
+// 门槛取两者之间。
+constexpr int32_t kCalibrationIdleMaxDeviation = 600;
+
+// 接触归零之后还要连续这么多帧维持空闲才校准。抬手那一瞬间热图尚未落定,120Hz 下
+// 这是四分之一秒。
+constexpr uint32_t kCalibrationIdleFramesRequired = 30;
+
+} // namespace
+
+void DeviceRuntime::ArmPostInitCalibration() {
+  m_calibrationPending = true;
+  m_calibrationSawContact = false;
+  m_calibrationIdleFrames = 0;
+}
+
+// 硬件校准把此刻屏面上的一切当作零点。压着的手指会被烙进硬件基线,抬手之后那块区域
+// 恒定偏移,变成一个位置固定、反复触发的假触点,而且只有下一次校准解得开——开机自启
+// 撞上用户扶着屏就是这个后果。
+//
+// 校准原先跟在 Chip::Init 末尾,那一刻既不该取零点,也判不出屏面是空是满。真机数据:
+//
+//   手指按住穿过 Init,整段 streaming 里 hasFinger 恒为 0、峰值偏离恒在 70~160,
+//   与屏面空着的数据完全一样;同一根手指在服务稳定之后按下去,则是 hasFinger=1、
+//   峰值偏离 2200、位置恒定。
+//
+// 也就是说手指若在 Init 之前就压着,芯片把它当成背景,它在固件标志和热图里双双隐形。
+// 任何「此刻有没有手指」的判据在这个场景下都必然判成空闲,于是校准照发、手指照烙——
+// 污染让判据失效,判据失效又导致污染。
+//
+// 所以不去判此刻,而是等一次完整的触摸交互结束:接触点出现过、又归零,那一刻手指确实
+// 离开了屏面。手指压着穿过 Init 的场景不会触发它,于是不校准——实测这条路径本身不产生
+// 污染(不发校准时压着穿过 Init 再抬手,没有假触点),芯片沿用自己的零点即可。
+//
+// 因此这里没有超时兜底。等不到就不校准是安全的;而超时之后照发的那一次,恰恰就是要
+// 避免的那一发。
+void DeviceRuntime::MaybeCalibrateAfterInit(const Solvers::HeatmapFrame& frame) {
+  if (!m_calibrationPending) return;
+
+  // 跳过 master 的那些帧带的是上一帧的后缀和上一帧的图,判不了此刻。
+  if (!frame.masterWasRead || !frame.masterSuffixValid) return;
+
+  if (!frame.touch.output.contacts.empty()) {
+    m_calibrationSawContact = true;
+    m_calibrationIdleFrames = 0;
+    return;
+  }
+
+  // 还没见过接触:屏面是真空着,还是压着一根已被芯片吸收的手指,分不出来。不校准。
+  if (!m_calibrationSawContact) return;
+
+  // 固件标志单独已经够用,热图那一条防的是固件没认出来的接触(掌、轻触)。
+  const bool idle = !frame.masterSuffix.hasFinger() &&
+                    FramePeakDeviation(frame) < kCalibrationIdleMaxDeviation;
+  if (!idle) {
+    m_calibrationIdleFrames = 0;
+    return;
+  }
+
+  if (++m_calibrationIdleFrames < kCalibrationIdleFramesRequired) return;
+
+  m_calibrationPending = false;
+
+  if (auto res = m_chip.SendAfeCommand({AFE_Command::StartCalibration, 0}); !res) {
+    LOG_WARN("Runtime", __func__, "Streaming",
+             "Post-init calibration failed; the chip keeps its previous zero point.");
+    return;
+  }
+
+  LOG_INFO("Runtime", __func__, "Streaming",
+           "Post-init calibration sent after the surface cleared.");
+}
+
 // ----------- 状态处理 -----------
 
 void DeviceRuntime::OnReady() {
@@ -1212,6 +1308,7 @@ void DeviceRuntime::OnReady() {
       SetState(workerState::recover);
       return;
     }
+    ArmPostInitCalibration();
     ReplayPenStateAfterChipInit();
     SetState(workerState::streaming);
   } else {
@@ -1309,6 +1406,8 @@ void DeviceRuntime::OnStreaming() {
       }
     }
   }
+
+  MaybeCalibrateAfterInit(touchFrame);
 
   // VHF dispatch can block on device I/O; keep it outside m_pipelineMu.
   // touchFrame owns processed stylus/contact vectors, and rawPtr references the
@@ -1753,6 +1852,7 @@ void DeviceRuntime::OnRecover() {
   BeginPenReplayInitCycle();
   if (auto res = m_chip.Init(); !res)
     return;
+  ArmPostInitCalibration();
   ReplayPenStateAfterChipInit();
 
   LOG_INFO("Runtime", __func__, "Recover",

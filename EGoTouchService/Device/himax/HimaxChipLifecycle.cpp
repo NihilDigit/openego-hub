@@ -332,11 +332,14 @@ ChipResult<> Chip::Init(void) {
 
     m_afe.ResetStylusState();
 
-    if (auto res = m_afe.StartCalibration(); !res) {
-        LOG_WARN("HimaxChip", __func__, GetStateStr(), "start_calibration failed (non-fatal), chip may use default rate");
-    } else {
-        LOG_INFO("HimaxChip", __func__, GetStateStr(), "start_calibration success.");
-    }
+    // 校准不在这里发。它把此刻屏面上的一切当作零点,而这一刻正是最不该取零点的时候:
+    // 开机自启撞上用户扶着屏,手指就被烙进硬件基线,抬手之后那块区域恒定偏移,变成一个
+    // 位置固定、反复触发的假触点。
+    //
+    // 而且这一刻也判不出屏面是空是满。实测(手指全程按住):固件的触摸坐标恒为
+    // 0x00FF/0x00FF,热图的峰值偏离只有 70~130 且位置逐帧随机——与屏面空着时的数据
+    // 无法区分。进入 streaming 之后同样的量是 hasFinger=1、峰值偏离 2200 上下、位置
+    // 恒定,判据这才成立。所以校准交给 DeviceRuntime 在帧流里择机发出。
 
     if (auto res = m_afe.ForceToScanRate(0x00); !res) {
         LOG_WARN("HimaxChip", __func__, GetStateStr(), "force_to_scan_rate(120Hz) failed (non-fatal), chip may use default rate");
