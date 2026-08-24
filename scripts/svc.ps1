@@ -26,8 +26,8 @@ param(
 
     [string]$Service = 'OpenEGoHubServiceDebug',
 
-    # 一并结束工作台与托盘。它们锁 OpenEGoHubApp.exe / 托盘 exe，
-    # 而服务只锁 OpenEGoHubService.exe，全量构建三个都要让开。
+    # 一并结束工作台、托盘与设置窗口。它们各锁自己的 exe，而服务只锁
+    # OpenEGoHubService.exe，全量构建这几个都要让开。
     [switch]$KillApps,
 
     [int]$TimeoutSeconds = 30,
@@ -38,6 +38,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 锁住构建产物的进程，名字取自输出文件名。列表只此一份：status 与 stop 两处都读它，
+# 早先各写各的，设置窗口只加进了其中一处都没有，于是 -KillApps 之后链接仍然 LNK1104。
+# EGoTouchApp 是改名前的工作台名，留着以便在旧构建树上也管用。
+$script:LockingProcesses = @(
+    'OpenEGoHubApp',
+    'OpenEGoHubTray',
+    'OpenEGoHubSettings',
+    'EGoTouchApp'
+)
 
 function Test-Elevated {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -63,8 +73,8 @@ function Wait-ServiceState {
 }
 
 function Stop-LockingApps {
-    # 名字取自构建产物；托盘可能以提权身份运行，所以这一步也放在提权分支里做。
-    foreach ($proc in 'OpenEGoHubApp', 'OpenEGoHubTray', 'EGoTouchApp') {
+    # 托盘可能以提权身份运行，所以这一步也放在提权分支里做。
+    foreach ($proc in $script:LockingProcesses) {
         $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
         if (-not $running) { continue }
         Write-Host "killing $proc (pid $($running.Id -join ','))"
@@ -76,9 +86,9 @@ function Invoke-Action {
     switch ($Action) {
         'status' {
             Write-Host "$Service : $(Get-ServiceStatus -Name $Service)"
-            foreach ($proc in 'OpenEGoHubApp', 'OpenEGoHubTray', 'EGoTouchApp') {
+            foreach ($proc in $script:LockingProcesses) {
                 $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
-                Write-Host ("{0,-16} : {1}" -f $proc, $(if ($running) { "running (pid $($running.Id -join ','))" } else { 'not running' }))
+                Write-Host ("{0,-18} : {1}" -f $proc, $(if ($running) { "running (pid $($running.Id -join ','))" } else { 'not running' }))
             }
         }
         'stop' {

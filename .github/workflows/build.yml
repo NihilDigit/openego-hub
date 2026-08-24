@@ -1,4 +1,4 @@
-name: Native ARM64 Build Verification (clang-cl)
+name: Native ARM64 Build Verification
 
 on:
   push:
@@ -27,54 +27,27 @@ jobs:
         with:
           arch: arm64
 
-      - name: Install Latest LLVM (ARM64)
-        shell: pwsh
-        run: |
-          $release = Invoke-RestMethod `
-            -Headers @{ "User-Agent" = "GitHubActions" } `
-            -Uri "https://api.github.com/repos/llvm/llvm-project/releases/latest"
-          $asset = $release.assets |
-            Where-Object { $_.name -match '^LLVM-.*-woa64\.exe$' } |
-            Select-Object -First 1
-
-          if (-not $asset) {
-            throw "No Windows ARM64 LLVM installer asset found in latest llvm-project release."
-          }
-
-          $installer = Join-Path $env:RUNNER_TEMP $asset.name
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "/S" -Wait -NoNewWindow
-
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          if (-not (Test-Path (Join-Path $llvmBin "clang++.exe"))) {
-            throw "LLVM installation did not provide clang++.exe at $llvmBin."
-          }
-
-          $llvmBin >> $env:GITHUB_PATH
-          & (Join-Path $llvmBin "clang++.exe") --version
-
-      - name: CMake Configure (clang/clang++)
-        # On a native ARM64 host, we can use the ARM64-native clang/clang++.
+      # cl.exe, not clang: the settings window is gated on MSVC (it is built by MSBuild
+      # from a .vcxproj), so a clang configuration silently drops it and CI would verify
+      # something other than what ships. Do not pass CMAKE_*_COMPILER_TARGET here either
+      # -- it is clang-only, and it makes CMake emit GNU-style link flags cl.exe cannot
+      # parse.
+      - name: CMake Configure
         run: |
           cmake -G "Ninja" -S . -B build `
                 -DCMAKE_BUILD_TYPE=Release `
-                -DCMAKE_C_COMPILER=clang `
-                -DCMAKE_CXX_COMPILER=clang++ `
-                -DCMAKE_C_COMPILER_TARGET=arm64-pc-windows-msvc `
-                -DCMAKE_CXX_COMPILER_TARGET=arm64-pc-windows-msvc `
+                -DCMAKE_C_COMPILER=cl `
+                -DCMAKE_CXX_COMPILER=cl `
                 -DHIMAX_ENABLE_NEON=ON `
                 -DEGO_BUILD_TESTS=ON
 
       - name: CMake Build
         run: cmake --build build --config Release --parallel
 
-      - name: Run Unit Tests (Native)
-        # Since we are on an ARM64 host, we can run hardware-independent tests.
+      # The runner has no touch controller, so only the tests that declare themselves
+      # device-free are run. The admin label is excluded on top of that: the IPC control
+      # pipe carries an administrator-only ACL, and its loopback test cannot connect
+      # under the runner's token.
+      - name: Run device-free tests
         working-directory: build
-        run: |
-          # Only running HostSystemStateMonitorTest as it doesn't require hardware.
-          if (Test-Path "HostSystemStateMonitorTest.exe") {
-            .\HostSystemStateMonitorTest.exe
-          } else {
-            Write-Host "HostSystemStateMonitorTest.exe not found; skipping smoke test."
-          }
+        run: ctest --output-on-failure -L device-free -LE admin

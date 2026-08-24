@@ -1,8 +1,9 @@
 name: Publish ARM64 MSI Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -55,41 +56,18 @@ jobs:
         with:
           arch: arm64
 
-      - name: Install Latest LLVM (ARM64)
-        shell: pwsh
-        run: |
-          $release = Invoke-RestMethod `
-            -Headers @{ "User-Agent" = "GitHubActions" } `
-            -Uri "https://api.github.com/repos/llvm/llvm-project/releases/latest"
-          $asset = $release.assets |
-            Where-Object { $_.name -match '^LLVM-.*-woa64\.exe$' } |
-            Select-Object -First 1
-
-          if (-not $asset) {
-            throw "No Windows ARM64 LLVM installer asset found in latest llvm-project release."
-          }
-
-          $installer = Join-Path $env:RUNNER_TEMP $asset.name
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "/S" -Wait -NoNewWindow
-
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          if (-not (Test-Path (Join-Path $llvmBin "clang++.exe"))) {
-            throw "LLVM installation did not provide clang++.exe at $llvmBin."
-          }
-
-          $llvmBin >> $env:GITHUB_PATH
-          & (Join-Path $llvmBin "clang++.exe") --version
-
-      - name: CMake Configure (clang/clang++)
-        # On a native ARM64 host, we can use the ARM64-native clang/clang++.
+      # cl.exe, not clang: the settings window is built by MSBuild from a .vcxproj and is
+      # gated on MSVC, so a clang configuration produces no OpenEGoHubSettings.exe and the
+      # installer below fails on a missing file. Do not pass CMAKE_*_COMPILER_TARGET here
+      # either -- it is clang-only, and it makes CMake emit GNU-style link flags cl.exe
+      # cannot parse. The build directory stays "build" because that is what the .wxs
+      # files default BuildOutputDir to.
+      - name: CMake Configure
         run: |
           cmake -G "Ninja" -S . -B build `
                 -DCMAKE_BUILD_TYPE=Release `
-                -DCMAKE_C_COMPILER=clang `
-                -DCMAKE_CXX_COMPILER=clang++ `
-                -DCMAKE_C_COMPILER_TARGET=arm64-pc-windows-msvc `
-                -DCMAKE_CXX_COMPILER_TARGET=arm64-windows-msvc `
+                -DCMAKE_C_COMPILER=cl `
+                -DCMAKE_CXX_COMPILER=cl `
                 -DHIMAX_ENABLE_NEON=ON `
                 -DEGO_BUILD_TESTS=OFF `
                 -DEGO_BUILD_TOOLS=OFF
@@ -108,13 +86,13 @@ jobs:
           $assetDir = "build\release-assets"
           New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
 
-          wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=$env:MSI_VERSION scripts\EGoTouchSetup.wxs -loc scripts\zh-CN.wxl -out "$assetDir\EGoTouchSetup_arm64_$($env:RELEASE_TAG).msi"
+          wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=$env:MSI_VERSION scripts\EGoTouchSetup.wxs -loc scripts\zh-CN.wxl -out "$assetDir\OpenEGoHubSetup_arm64_$($env:RELEASE_TAG).msi"
 
       - name: Generate SHA256 checksums
         run: |
           $assetDir = "build\release-assets"
           $installers = @(
-            "$assetDir\EGoTouchSetup_arm64_$($env:RELEASE_TAG).msi"
+            "$assetDir\OpenEGoHubSetup_arm64_$($env:RELEASE_TAG).msi"
           )
 
           $checksumLines = foreach ($installer in $installers) {
@@ -125,13 +103,13 @@ jobs:
             "$($hash.Hash)  $(Split-Path -Leaf $installer)"
           }
 
-          $checksumFile = "$assetDir\EGoTouch_arm64_$($env:RELEASE_TAG)_SHA256SUMS.txt"
+          $checksumFile = "$assetDir\OpenEGoHub_arm64_$($env:RELEASE_TAG)_SHA256SUMS.txt"
           $checksumLines | Set-Content -Path $checksumFile -Encoding UTF8
 
       - name: Upload release assets artifact
         uses: actions/upload-artifact@v4
         with:
-          name: egotouch-arm64-${{ github.ref_name }}
+          name: openego-hub-arm64-${{ github.ref_name }}
           path: build/release-assets/*
           if-no-files-found: error
           retention-days: 7
@@ -144,15 +122,16 @@ jobs:
       - name: Download release assets artifact
         uses: actions/download-artifact@v4
         with:
-          name: egotouch-arm64-${{ needs.build-arm64-release.outputs.release_tag }}
+          name: openego-hub-arm64-${{ needs.build-arm64-release.outputs.release_tag }}
           path: release-assets
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.build-arm64-release.outputs.release_tag }}
-          name: EGoTouch ${{ needs.build-arm64-release.outputs.release_tag }}
+          name: OpenEGo Hub ${{ needs.build-arm64-release.outputs.release_tag }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             release-assets/*.msi
+            release-assets/*_SHA256SUMS.txt

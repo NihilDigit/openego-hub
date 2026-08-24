@@ -464,12 +464,10 @@ bool DeviceRuntime::IsShutdownRequested() const {
   return m_stopReason.load() == StopReason::Shutdown;
 }
 
-#ifdef _DEBUG
 void DeviceRuntime::SetFramePushCallback(DeviceRuntime::FramePushCallback cb) {
   std::lock_guard<std::mutex> lk(m_framePushCbMu);
   m_framePushCb = std::move(cb);
 }
-#endif
 
 void DeviceRuntime::SetVhfEnabled(bool enabled) {
   m_vhfReporter.SetEnabled(enabled);

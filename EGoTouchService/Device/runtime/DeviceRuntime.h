@@ -332,9 +332,9 @@ public:
 
     // Frame push callback for IPC (called after pipeline+VHF in worker loop)
     using FramePushCallback = std::function<void(const Solvers::HeatmapFrame&)>;
-#ifdef _DEBUG
+    // 不按 _DEBUG 编译掉：装没装回调本身就是开关,理由见 DeviceRuntime.cpp 的推送点。
+    // 声明与推送点必须同时无条件,否则 Release(_DEBUG 未定义)编译不过。
     void SetFramePushCallback(FramePushCallback cb);
-#endif
 
     void IngestPolicyEvent(const RuntimePolicyEvent& ev);
     bool SubmitExternalAfeCommand(AFE_Command type, uint8_t param);
@@ -463,10 +463,8 @@ private:
     uint64_t m_lastCmdId = 0;
     std::string m_lastNote;
     std::atomic<uint64_t> m_nextCmdId{1};
-#ifdef _DEBUG
     mutable std::mutex m_framePushCbMu;
     FramePushCallback m_framePushCb;
-#endif
 
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopped{false};
