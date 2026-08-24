@@ -12,17 +12,31 @@ public:
     bool m_enabled = true;
 
     // ── IIR coefficient selection (GetIIRCoef equivalent) ──
+    //
+    // These values mirror the original TSACore flash parameters named in the trailing
+    // comments, and are asserted by SolversUnit_StylusPipelineConfigRoundTrip. They had
+    // drifted away from both the comments and that test: commit 8726a2b ("Append main
+    // worktree updates") weakened writing-mode smoothing from (6,18) to (18,26) and
+    // pulled m_speedMax from 140 down to 60 without touching the comments, and the hover
+    // pair had earlier been swapped to (10,6) — inverting the intended direction, since
+    // a LOWER coefficient means MORE smoothing. Net effect while writing: speedValue
+    // saturates past m_speedMax almost immediately, so the filter sat permanently at the
+    // weakest setting (26/32 = 81% raw passthrough) and strokes came out jagged.
+    //
+    // Larger coefficient = more of the new sample = less smoothing (see ApplyIIR).
+    // Keep in sync with StylusPipeline::registerBindings()/applyConfig().
+
     // Hover mode params (no pressure)
-    int32_t m_coefLowHover = 10;     // asa[0xA5E]
-    int32_t m_coefHighHover = 6;     // asa[0xA5F]
-    int32_t m_speedTholdHover = 10;  // 0x14
+    int32_t m_coefLowHover = 2;      // asa[0xA5E]
+    int32_t m_coefHighHover = 16;    // asa[0xA5F]
+    int32_t m_speedTholdHover = 20;  // 0x14
 
     // Writing mode params (has pressure)
-    int32_t m_coefLowWriting = 18;        // asa[0xA5C]
-    int32_t m_coefHighWriting = 26;      // asa[0xA5D]
+    int32_t m_coefLowWriting = 6;        // asa[0xA5C]
+    int32_t m_coefHighWriting = 18;      // asa[0xA5D]
     int32_t m_speedTholdWriting = 10;    // 0x0A
 
-    int32_t m_speedMax = 60;  // 0xCD — speed value at which high coef is fully engaged
+    int32_t m_speedMax = 205;  // 0xCD — speed value at which high coef is fully engaged
     int32_t m_maxCoef = 32;    // asa[0xA60] — denominator in IIR formula
 
     // ── Output ──
@@ -47,7 +61,6 @@ public:
         const bool inRange = coor.valid;  // stylus detected (hover OR touch)
 
         if (!m_enabled || !inRange) {
-            runtime.post.postIirCoor = coor;
             Reset();
             return;
         }
@@ -90,7 +103,6 @@ public:
             m_prevFiltY = coor.dim2;
         }
 
-        runtime.post.postIirCoor = coor;
         m_prevInRange = inRange;
         ++m_frameCount;
     }

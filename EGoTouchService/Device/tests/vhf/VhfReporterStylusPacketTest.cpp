@@ -68,10 +68,12 @@ void TestStylusPacketHelperBuildsValidPacketFromOutput() {
             "VHF-built stylus packet should map output X into HID Y");
     Require(ReadU16Le(packet, 7) == 321,
             "VHF-built stylus packet should encode output pressure");
-    Require(ReadI16Le(packet, 9) == 7,
-            "VHF-built stylus packet should encode output tiltX in degrees (scaled down by 100)");
-    Require(ReadI16Le(packet, 11) == -3,
-            "VHF-built stylus packet should encode output tiltY in degrees (scaled down by 100)");
+    // 描述符 logical ±9000 的单位是百分之一度;轴映射与坐标一致(HID X 对应
+    // 面板 dim2、HID Y 为反向 dim1),符号推导见 VhfReporterStylusPacketHelper.h。
+    Require(ReadI16Le(packet, 9) == 300,
+            "VHF-built stylus packet should encode HID X tilt as -tiltY centidegrees");
+    Require(ReadI16Le(packet, 11) == 700,
+            "VHF-built stylus packet should encode HID Y tilt as +tiltX centidegrees");
     Require(VhfStylusPacket::ExtractPenState(packet) == 0x21,
             "helper pen state extraction should match raw packet");
 }
@@ -135,7 +137,7 @@ void TestPressureCoordinateAndTiltClamps() {
     frame.stylus.output.point.x = -10.0f * 1024.0f;
     frame.stylus.output.point.y = 99.0f * 1024.0f;
     frame.stylus.output.point.tiltX = 12000;
-    frame.stylus.output.point.tiltY = -12000;
+    frame.stylus.output.point.tiltY = 12000;
 
     const auto packet = VhfStylusPacket::Build(frame.stylus, MakeDefaultStylusPacketConfig());
     Require(ReadU16Le(packet, 3) == 16000,
@@ -144,10 +146,84 @@ void TestPressureCoordinateAndTiltClamps() {
             "negative X should clamp HID Y to max because X is inverted");
     Require(ReadU16Le(packet, 7) == 4095,
             "pressure should clamp to HID max 4095");
-    Require(ReadI16Le(packet, 9) == 9000,
-            "tiltX should clamp to +9000");
-    Require(ReadI16Le(packet, 11) == -9000,
-            "tiltY should clamp to -9000");
+    Require(ReadI16Le(packet, 9) == -9000,
+            "positive tiltY should clamp HID X tilt to -9000 after sign flip");
+    Require(ReadI16Le(packet, 11) == 9000,
+            "positive tiltX should clamp HID Y tilt to +9000");
+}
+
+Solvers::StylusPacket MakeRawStylusPacket(uint8_t penState, uint16_t pressure = 0) {
+    Solvers::StylusPacket packet{};
+    packet.valid = true;
+    packet.reportId = 0x08;
+    packet.length = 13;
+    packet.bytes[0] = packet.reportId;
+    packet.bytes[1] = penState;
+    packet.bytes[3] = 0x34;
+    packet.bytes[4] = 0x12;
+    packet.bytes[5] = 0x78;
+    packet.bytes[6] = 0x56;
+    packet.bytes[7] = static_cast<uint8_t>(pressure & 0xFFu);
+    packet.bytes[8] = static_cast<uint8_t>((pressure >> 8) & 0xFFu);
+    return packet;
+}
+
+void TestEraserHoverAndContactUseValidSwitchCombinations() {
+    const auto hover = VhfStylusPacket::ApplyEraserToolState(
+        MakeRawStylusPacket(0x20), true, false);
+    Require(hover.prependOutOfRange,
+            "switching from pen hover to eraser hover must prepend out-of-range");
+    Require(hover.transitionBytes[1] == 0,
+            "tool transition report must clear all pen switches");
+    Require(hover.bytes[1] == 0x24,
+            "eraser hover must report InRange+Invert without Eraser");
+    Require(hover.eraserApplied,
+            "eraser mode should become applied after the transition");
+
+    const auto contact = VhfStylusPacket::ApplyEraserToolState(
+        MakeRawStylusPacket(0x21, 321), true, hover.eraserApplied);
+    Require(!contact.prependOutOfRange,
+            "hover-to-contact within eraser mode must not leave range");
+    Require(contact.bytes[1] == 0x28,
+            "button eraser contact must report InRange+Eraser without Tip or Invert");
+    Require(contact.bytes[7] == 0x41 && contact.bytes[8] == 0x01,
+            "eraser contact should preserve measured pressure");
+}
+
+void TestToolSwitchIsDeferredUntilContactEnds() {
+    const auto contact = VhfStylusPacket::ApplyEraserToolState(
+        MakeRawStylusPacket(0x21, 123), true, false);
+    Require(!contact.prependOutOfRange,
+            "a tool switch requested during contact must not inject a transition");
+    Require(!contact.eraserApplied && contact.bytes[1] == 0x21,
+            "a tool switch requested during contact must keep the current pen tool");
+
+    const auto lifted = VhfStylusPacket::ApplyEraserToolState(
+        MakeRawStylusPacket(0x20), true, contact.eraserApplied);
+    Require(lifted.prependOutOfRange,
+            "the deferred tool switch should apply on the first hover frame");
+    Require(lifted.bytes[1] == 0x24 && lifted.eraserApplied,
+            "lifting after a deferred switch should enter eraser hover");
+}
+
+void TestSwitchingBackToPenAlsoTraversesOutOfRange() {
+    const auto pen = VhfStylusPacket::ApplyEraserToolState(
+        MakeRawStylusPacket(0x20), false, true);
+    Require(pen.prependOutOfRange,
+            "switching from eraser hover to pen hover must prepend out-of-range");
+    Require(pen.transitionBytes[1] == 0 && pen.bytes[1] == 0x20,
+            "eraser-to-pen transition must be neutral before normal pen hover");
+    Require(!pen.eraserApplied,
+            "pen mode should become applied after the reverse transition");
+}
+
+void TestOutOfRangeAppliesRequestedToolWithoutSyntheticTransition() {
+    const auto update = VhfStylusPacket::ApplyEraserToolState(
+        MakeRawStylusPacket(0x00), true, false);
+    Require(!update.prependOutOfRange,
+            "an already out-of-range pen does not need another transition report");
+    Require(update.bytes[1] == 0 && update.eraserApplied,
+            "out-of-range state stays neutral while arming eraser for the next hover");
 }
 
 } // namespace
@@ -159,6 +235,10 @@ int main() {
         TestStylusPacketHelperSuppressesInvalidPacketFromInvalidOutputWhenDisabled();
         TestBarrelButtonAndInRangeBits();
         TestPressureCoordinateAndTiltClamps();
+        TestEraserHoverAndContactUseValidSwitchCombinations();
+        TestToolSwitchIsDeferredUntilContactEnds();
+        TestSwitchingBackToPenAlsoTraversesOutOfRange();
+        TestOutOfRangeAppliesRequestedToolWithoutSyntheticTransition();
         std::cout << "[TEST] Device VHF reporter stylus packet tests passed.\n";
         return 0;
     } catch (const std::exception& ex) {

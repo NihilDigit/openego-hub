@@ -6,12 +6,25 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 
 namespace Solvers::Stylus::Hpp3 {
 
 class TiltProcess {
 public:
     bool m_enabled = true;
+
+    // 倾角标定:2026-08-23 用平放整机、量角器标定的三个锚点(与垂直方向夹角
+    // 30/45/60 度)对 TX1-TX2 投影差幅值做最小二乘,|d| = offset + scale·sin(θ),
+    // 残差 < 11 单位。scale ≈ 4.33 mm 等效线圈间距,offset ≈ 2.3 mm 是沿倾斜
+    // 方向的固有投影偏移(锚点方位角一致证实其随笔转动,不是面板系常量)。
+    // 原实现 asin(diff/lenLimit 钳位) 不可用:三段锚点录制里 diff 均值与
+    // lenLimit 逐段完全重合,即永远贴着钳位,输出实为信号比的函数而非几何量。
+    int32_t m_calibOffsetUnits = 523;
+    int32_t m_calibScaleUnits = 985;
+    // 近竖直时 TX2 信号弱,投影差单帧可跳出上千单位的野值(锚点重放数据里
+    // 有相邻帧 -1125 → 0 的样本),超过该步长的跳变按 1/8 权重混入。
+    int32_t m_maxDiffJumpPerFrame = 400;
 
     inline void Reset() {
         m_signalRatioBuf.fill(0);
@@ -103,28 +116,12 @@ public:
         int32_t diffDim2 = rawDiffDim2;
         bool anomalyDamped = false;
 
-        if (m_coorDifBufCnt == 0) {
-            if (diffDim1 > static_cast<int32_t>(lenLimit)) {
-                diffDim1 = static_cast<int32_t>(lenLimit);
-                anomalyDamped = true;
-            } else if (diffDim1 < -static_cast<int32_t>(lenLimit)) {
-                diffDim1 = -static_cast<int32_t>(lenLimit);
-                anomalyDamped = true;
-            }
-            if (diffDim2 > static_cast<int32_t>(lenLimit)) {
-                diffDim2 = static_cast<int32_t>(lenLimit);
-                anomalyDamped = true;
-            } else if (diffDim2 < -static_cast<int32_t>(lenLimit)) {
-                diffDim2 = -static_cast<int32_t>(lenLimit);
-                anomalyDamped = true;
-            }
-        } else {
-            if (rawDiffDim1 > static_cast<int32_t>(lenLimit) || rawDiffDim1 < -static_cast<int32_t>(lenLimit) ||
-                rawDiffDim2 > static_cast<int32_t>(lenLimit) || rawDiffDim2 < -static_cast<int32_t>(lenLimit)) {
-                diffDim1 = (rawDiffDim1 + m_lastCoordDiffDim1 * 7) / 8;
-                diffDim2 = (rawDiffDim2 + m_lastCoordDiffDim2 * 7) / 8;
-                anomalyDamped = true;
-            }
+        if (m_coorDifBufCnt != 0 &&
+            (std::abs(rawDiffDim1 - m_lastCoordDiffDim1) > m_maxDiffJumpPerFrame ||
+             std::abs(rawDiffDim2 - m_lastCoordDiffDim2) > m_maxDiffJumpPerFrame)) {
+            diffDim1 = (rawDiffDim1 + m_lastCoordDiffDim1 * 7) / 8;
+            diffDim2 = (rawDiffDim2 + m_lastCoordDiffDim2 * 7) / 8;
+            anomalyDamped = true;
         }
 
         PushCoordinateDiff(diffDim1, diffDim2);
@@ -133,37 +130,26 @@ public:
         m_lastCoordDiffDim1 = diffDim1;
         m_lastCoordDiffDim2 = diffDim2;
 
-        int16_t preTiltDim1 = GetTiltByCoorDif(diffDim1, 0);
-        int16_t preTiltDim2 = GetTiltByCoorDif(diffDim2, 1);
-
-        if (diffDim1 > static_cast<int32_t>(lenLimit) || diffDim1 < -static_cast<int32_t>(lenLimit) ||
-            diffDim2 > static_cast<int32_t>(lenLimit) || diffDim2 < -static_cast<int32_t>(lenLimit)) {
-            diffDim1 = m_coordDifDim1Buf[0];
-            diffDim2 = m_coordDifDim2Buf[0];
-            preTiltDim1 = GetTiltByCoorDif(diffDim1, 0);
-            preTiltDim2 = GetTiltByCoorDif(diffDim2, 1);
-            anomalyDamped = true;
-        }
-
-        // Circular clamp: scale the 2D diff vector so its Euclidean magnitude does not exceed lenLimit.
-        // Per-axis clamping alone allows √2× overshoot on the diagonal; this prevents it.
-        {
-            const int32_t sqMag = diffDim1 * diffDim1 + diffDim2 * diffDim2;
-            int32_t magnitude = IntSqrtU32(static_cast<uint32_t>(sqMag));
-            if (magnitude == 0) magnitude = 1;
-            if (static_cast<int32_t>(lenLimit) < magnitude) {
-                diffDim1 = (static_cast<int32_t>(lenLimit) * diffDim1) / magnitude;
-                diffDim2 = (static_cast<int32_t>(lenLimit) * diffDim2) / magnitude;
-                preTiltDim1 = GetTiltByCoorDif(diffDim1, 0);
-                preTiltDim2 = GetTiltByCoorDif(diffDim2, 1);
-#if EGOTOUCH_DIAG
-                tilt.circularClamped = true;
-#endif
-            }
+        // 幅值过标定曲线反解倾角,方向沿平滑后的投影差向量分解到两轴。
+        // |d| 低于 offset 视为竖直;asin 输入钳到 1 即 90 度封顶。
+        const double mag = std::sqrt(static_cast<double>(diffDim1) * diffDim1 +
+                                     static_cast<double>(diffDim2) * diffDim2);
+        double sinTheta = (mag - static_cast<double>(m_calibOffsetUnits)) /
+                          static_cast<double>(std::max(m_calibScaleUnits, 1));
+        sinTheta = std::clamp(sinTheta, 0.0, 1.0);
+        const double thetaDeg = std::asin(sinTheta) * 180.0 / 3.14159265358979;
+        int16_t preTiltDim1 = 0;
+        int16_t preTiltDim2 = 0;
+        if (mag > 1.0) {
+            preTiltDim1 = static_cast<int16_t>(std::lround(thetaDeg * diffDim1 / mag));
+            preTiltDim2 = static_cast<int16_t>(std::lround(thetaDeg * diffDim2 / mag));
         }
 
         tilt.signalRatio = signalRatioAvg;
         tilt.lenLimit = lenLimit;
+#if EGOTOUCH_DIAG
+        tilt.circularClamped = false;
+#endif
         tilt.diffDim1 = diffDim1;
         tilt.diffDim2 = diffDim2;
         tilt.preTiltDim1 = preTiltDim1;
@@ -309,46 +295,6 @@ private:
                                : m_coordDifDim2Buf[static_cast<std::size_t>(i)];
         }
         return static_cast<int32_t>(sum / n);
-    }
-
-    inline int16_t GetTiltByCoorDif(int32_t diff, int axis) const {
-        const int len = GetTiltAxisLength(axis);
-        if (-len < diff && diff < len) {
-            const double angle = std::asin(static_cast<double>(diff) / static_cast<double>(len));
-            return static_cast<int16_t>(static_cast<int>((angle * 180.0) / 3.141592657));
-        }
-        if (diff < len) {
-            return static_cast<int16_t>(-90);
-        }
-        return static_cast<int16_t>(90);
-    }
-
-    inline int GetTiltAxisLength(int axis) const {
-        if (!kAxisRotated) {
-            if (axis == 0) {
-                return (kTxPitch * kStylusTiltParam * Asa::kCoorUnit) / kDim1PitchSize;
-            }
-            return (kRxPitch * kStylusTiltParam * Asa::kCoorUnit) / kDim2PitchSize;
-        }
-        if (axis == 0) {
-            return (kTxPitch * kStylusTiltParam * Asa::kCoorUnit) / kDim2PitchSize;
-        }
-        return (kRxPitch * kStylusTiltParam * Asa::kCoorUnit) / kDim1PitchSize;
-    }
-
-    static inline int32_t IntSqrtU32(uint32_t x) {
-        int32_t result = 0;
-        int32_t bit = 0x8000;
-        while (x < static_cast<uint32_t>(bit)) {
-            bit >>= 1;
-        }
-        for (; bit != 0; bit >>= 1) {
-            result += bit;
-            if (x < static_cast<uint32_t>(result * result)) {
-                result -= bit;
-            }
-        }
-        return result;
     }
 
     inline void PushTilt(int16_t dim1, int16_t dim2) {
