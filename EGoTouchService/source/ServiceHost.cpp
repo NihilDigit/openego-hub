@@ -105,9 +105,6 @@ struct ServiceHost::Impl {
     uint16_t m_debugSchemaVersion = 0;
     uint32_t m_debugSchemaHash = 0;
     std::mutex m_debugFrameMutex;
-    // 最后一次唤醒类系统事件,用于运行时起来之后补投。见 ReplayLastWakeEvent。
-    std::mutex m_lastWakeEventMutex;
-    std::optional<Host::SystemStateEvent> m_lastWakeEvent;
     Solvers::HeatmapFrame m_latestDebugFrame;
     Solvers::HeatmapFrame m_latestMasterTouchFrame;
     Ipc::SharedFrameData m_latestMasterSharedFrame{};
@@ -116,6 +113,11 @@ struct ServiceHost::Impl {
     bool m_hasLatestMasterSharedFrame = false;
 #endif
 
+    // 最后一次唤醒类系统事件,用于运行时起来之后补投。见 ReplayLastWakeEvent。
+    // 不在 IPC 守卫内:补投是生命周期修复,Release(IPC 关闭)同样需要,而使用点本来
+    // 就是无条件的。放进去会让 Release 编译不过。
+    std::mutex m_lastWakeEventMutex;
+    std::optional<Host::SystemStateEvent> m_lastWakeEvent;
 };
 
 // ── 设备路径 ──

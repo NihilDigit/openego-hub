@@ -1,114 +1,86 @@
-<img src="Assets/brand/openego-hub-256.png" alt="" width="72" align="left" hspace="4" vspace="6">
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/brand/openego-hub-256.png" alt="" width="96">
+</p>
 
-# OpenEGo Hub
+<h1 align="center">OpenEGo Hub</h1>
 
-<br clear="left">
+<p align="center">
+  <a href="https://github.com/NihilDigit/openego-hub/releases/latest"><img src="https://img.shields.io/github/v/release/NihilDigit/openego-hub?display_name=tag&label=release" alt="Release"></a>
+  <a href="https://github.com/NihilDigit/openego-hub/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/NihilDigit/openego-hub/build.yml?branch=main&label=build" alt="Build"></a>
+  <a href="https://github.com/NihilDigit/openego-hub/releases"><img src="https://img.shields.io/github/downloads/NihilDigit/openego-hub/total?label=downloads" alt="Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/NihilDigit/openego-hub" alt="License"></a>
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows_11_ARM64-lightgrey.svg)]()
-[![Build](https://github.com/NihilDigit/openego-hub/actions/workflows/build.yml/badge.svg)](https://github.com/NihilDigit/openego-hub/actions/workflows/build.yml)
+<p align="center">中文 | <a href="README.en.md">English</a></p>
 
-A native ARM64 control centre and driver stack for the HUAWEI MateBook E Go, covering
-touch, pen and the detachable keyboard. It replaces the vendor touch service, along with
-the accessory status and pen settings that PC Manager provides. Every component targets
-ARM64; nothing in the deployment runs under WOW64 emulation.
+HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为触控服务，以及 PC Manager 的配件状态与笔设置。全部为 ARM64 原生。
 
-This project is a fork of [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev),
-which contributed the touch stack it is built on. See [Credits](#credits).
-
----
-
-## What it does
-
-**Touch.** A `LocalSystem` service acquires capacitive heatmap frames from the Himax
-controller, runs them through a processing pipeline (anti-jitter, anti-bounce, 1 Euro
-filtering, palm and stylus arbitration) and injects HID reports through a virtual
-device.
-
-**Pen.** BT-MCU protocol integration for the M-Pencil: pressure, battery, attach and
-charge state, and a configurable side-button double-click that either follows the
-system pen setting or toggles between writing and erasing.
-
-**Keyboard.** The detachable keyboard's wireless-on-detach setting, read from and
-written to the MCU rather than remembered locally, so the displayed state is the real
-one.
-
-**Interface.** A tray panel showing accessory status, and a WinUI 3 settings window for
-everything configurable. Both run unelevated; the service exposes them a read-only
-status channel and a narrow command channel rather than an administrative pipe.
+本项目 fork 自 [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)，触控栈源自该项目，此后经过修改。
 
 ---
 
-## Compatibility
+## 功能
 
-Windows 11 on ARM64, on the HUAWEI MateBook E Go. Nothing here is portable to another
-device: the touch pipeline is written against this panel's Himax controller, and the pen
-and keyboard protocols against the MCU this tablet exposes.
+- **触控**：多指触控。写字时手掌压在屏幕上不会误触，用笔时忽略手指。
+- **手写笔**：M-Pencil 的压力与倾斜。侧键双击可设为遵循系统笔设置，或切换书写与橡皮擦（后者可启用 OneNote 兼容）。
+- **键盘**：可开关「分离后保持无线连接」。
+- **设备信息**：笔与键盘的电量、充电与吸附状态、固件版本、硬件版本、序列号。
 
-The pen module identifies itself over the MCU, and CD52, CD54, CD54R and CD54S are
-recognised — the M-Pencil first through third generations. Development and measurement
-were done on a CD54R, so the other modules are handled but untested.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/devices.png" alt="设备页" width="720">
+</p>
 
-The detachable keyboard is identified by whether it answers on the MCU's keyboard
-subsystem at all, which third-party keyboards do not register for. An unrecognised
-keyboard is reported as unknown rather than guessed at.
+托盘常驻显示配件状态，笔或键盘接入时弹出提示。设置窗口集中全部开关。
 
----
-
-## Non-goals
-
-Reverse engineering the vendor stack reveals more than is worth reimplementing. The
-following are deliberately out of scope:
-
-- **Firmware update.** Requires vendor-signed images, and a failure bricks hardware.
-- **Voice assistant integration.** Vendor-specific, tied to services this project does
-  not replace.
-- **Global annotation.** A vendor feature that was unreliable in its original form.
-
-The rule this project applies: implement the functions that are genuinely general and
-that the hardware supports directly. Reproducing a vendor gimmick that never worked
-well is not an improvement.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/settings.png" alt="设置窗口" width="720">
+</p>
 
 ---
 
-## Installation
+## 支持的设备
 
-Pure ARM64 MSI installers, packaged with WiX Toolset v4. Commit and PR builds only
-compile and run smoke tests; release installers are built from `vMAJOR.MINOR.PATCH`
-tags and attached to GitHub Releases.
+- HUAWEI MateBook E Go，Windows 11 ARM64。
+- 手写笔：M-Pencil 一代至三代（CD52、CD54、CD54R、CD54S），仅在 CD54R 上实测。
+- 键盘：华为智能磁吸键盘，不支持第三方键盘。
 
-1. Download the latest `OpenEGoHubSetup_arm64_vX.Y.Z.msi` from the Releases page.
-   - `OpenEGoHubSetup_arm64_vX.Y.Z.msi` — service, tray and settings.
-   - `OpenEGoHubTestSetup_arm64_vX.Y.Z.msi` — the above plus diagnostic tools.
-2. Run the setup wizard. Administrator rights are required to register the service.
-3. The installer registers `OpenEGoHubService` to start with Windows and adds a Start
-   menu entry.
+---
 
-The vendor touch service and this one drive the same hardware and must not run at the
-same time. The installer handles the handover; the tray can give control back to
-HUAWEI's driver without uninstalling.
+## 不在范围内
 
-### Build from source
+- **固件升级**：需要厂商签名的镜像，刷写失败会导致设备变砖。
+- **语音助手集成**
+- **全局批注**
 
-Requires **CMake**, **Ninja**, the ARM64 MSVC toolchain, and **WiX v4** for packaging.
+---
 
-The `arm64-*` presets resolve `cl.exe` from `PATH`, so the ARM64 developer environment
-has to be in the shell first. `scripts\build.ps1` imports it and pins the repository
-root, which makes it the shorter path:
+## 安装
+
+从 Releases 下载 `OpenEGoHubSetup_arm64_vX.Y.Z.msi` 并运行，注册服务需要管理员权限。安装后服务随 Windows 启动，开始菜单中有入口。`OpenEGoHubTestSetup_arm64_*.msi` 在此基础上附带诊断工具。
+
+安装时华为触控服务会被停用，两者不能同时驱动同一块硬件。切换回华为驱动无需卸载，在设置窗口中退出即可。
+
+---
+
+## 从源码构建
+
+需要 CMake、Ninja、ARM64 MSVC 工具链，打包还需要 WiX v4。
+
+`arm64-*` preset 从 `PATH` 解析 `cl.exe`，shell 中需先具备 ARM64 开发者环境。`scripts\build.ps1` 会自行导入：
 
 ```powershell
-.\scripts\build.ps1 -Config Release           # configure and build
-.\scripts\build.ps1 -Config Debug -Test       # build, then run ctest
+.\scripts\build.ps1 -Config Release           # 配置并构建
+.\scripts\build.ps1 -Config Debug -Test       # 构建后跑 ctest
 ```
 
-After `vcvarsarm64.bat`, the presets also work directly:
+执行过 `vcvarsarm64.bat` 之后也可直接用 preset：
 
 ```powershell
 cmake --preset arm64-Release
 cmake --build --preset arm64-Release
 ```
 
-Packaging:
+打包：
 
 ```powershell
 dotnet tool install --global wix
@@ -118,66 +90,46 @@ wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
     -out build\OpenEGoHubSetup_arm64_v1.2.3.msi
 ```
 
-Two scripts cover the development loop, both from an elevated shell.
-`scripts\dev-cycle.ps1` stops the debug service, rebuilds, restarts it, and relaunches
-the tray and settings window unelevated. `scripts\verify.ps1` builds, runs the tests,
-and replays the recorded corpora against the previous results.
+`scripts\dev-cycle.ps1` 停服务、重新构建、再启动，`scripts\verify.ps1` 构建后跑测试并重放录制语料。两者都需要提权 shell。
 
 ---
 
-## Layout
+## 目录结构
 
-- `EGoTouchService/` — the service.
-  - `Device/` — hardware abstraction: Himax controller, BT-MCU pen and keyboard protocols.
-  - `Solvers/` — the touch and stylus pipelines.
-  - `Host/` — OS interfaces: HID injection, power and lid monitoring.
-- `Common/` — cross-process channels and shared configuration.
-- `Tools/EGoTouchTray/` — tray panel and accessory status.
-- `Tools/EGoTouchSettings/` — WinUI 3 settings window.
-- `Tools/EGoTouchApp/` — diagnostics workbench.
-- `docs/` — reverse-engineered protocol documentation.
-- `scripts/` — build, packaging and development scripts.
+- `EGoTouchService/`：服务。`Device/` 硬件抽象，`Solvers/` 触控与手写笔管线，`Host/` 系统接口。
+- `Common/`：跨进程通道与共享配置。
+- `Tools/`：托盘、设置窗口、诊断工作台。
+- `docs/`：逆向所得的协议文档。
+- `scripts/`：构建、打包与开发脚本。
 
 ---
 
-## Credits
+## 致谢
 
-This project is a fork of
-**[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)** (MIT, © Detach2233), whose
-touch stack it is built on. That notice is preserved in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233），触控栈源自该项目，此后经过修改。其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
-It was also influenced by, and developed with reference to, three projects that worked
-on this device before it:
+触控管线以 Chromium 的 ChromeOS 触控栈为对照做过测量，掌抑制阈值即由此重新标定。
 
-- **[MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)** by eiyooooo
-- **[goodies](https://github.com/matebook-e-go/goodies)** by dantmnf
-- **[EgoTools](https://github.com/SaKongA/EgoTools)** by SaKongA
+另有三个更早在这台设备上做过工作的项目，本项目参考过它们：
+
+- **[MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)**，作者 eiyooooo
+- **[goodies](https://github.com/matebook-e-go/goodies)**，作者 dantmnf
+- **[EgoTools](https://github.com/SaKongA/EgoTools)**，作者 SaKongA
 
 ---
 
-## Licence
+## 许可
 
-MIT, the same terms as the project this one is forked from, so that improvements to the
-touch stack can go back upstream as easily as they came down. See [LICENSE](LICENSE).
+MIT。见 [LICENSE](LICENSE)。
 
-The upstream copyright notice and the vendored Dear ImGui notice are preserved in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and must accompany any redistribution,
-source or binary.
+上游的版权声明与内置 Dear ImGui 的声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，任何形式的再分发（源码或二进制）都须随附该文件。
 
 ---
 
-## Disclaimers
+## 声明
 
-This project is not affiliated with, authorised by, or connected to HUAWEI, Himax, or
-any other trademark holder. All product and company names belong to their owners. It
-was developed through reverse engineering for interoperability, research and
-educational purposes.
+本项目与 HUAWEI、Himax 及任何其他商标持有者均无隶属、授权或关联关系。所有产品名与公司名归各自所有者。本项目通过逆向工程开发，用于互操作、研究与教学。
 
-The tray reads pen artwork and battery icons from an existing PC Manager installation
-at runtime and falls back to drawing its own when PC Manager is absent. Those images
-are HUAWEI's and are never redistributed with this project.
+托盘在运行时从已安装的 PC Manager 读取笔的图片与电量图标，PC Manager 不存在时回退到自绘。那些图片属于 HUAWEI，不随本项目分发。
 
-**Use at your own risk.** This replaces a low-level hardware driver. The authors and
-contributors accept no liability for hardware damage, data loss, system instability, or
-any violation of third-party terms of service arising from its use.
+**风险自负。** 本项目替换的是底层硬件驱动。对于由此产生的硬件损坏、数据丢失、系统不稳定，或对第三方服务条款的违反，作者与贡献者不承担任何责任。
