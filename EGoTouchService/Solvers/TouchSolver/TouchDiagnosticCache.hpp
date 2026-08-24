@@ -41,7 +41,7 @@ public:
                 box.zoneId = colorId;
                 box.zoneIndex = static_cast<uint8_t>(std::min<size_t>(i, 255));
                 box.bbox = {zone.minR, zone.maxR, zone.minC, zone.maxC};
-                box.area = zone.area;
+                box.areaCells = zone.areaCells;
                 box.signalSum = zone.signalSum;
                 frame.touch.debug.zoneBoxes.push_back(box);
             }

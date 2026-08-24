@@ -104,16 +104,16 @@ private:
                                          int zoneIndex) const {
         MacroZoneFeature feature;
         feature.zoneIndex = zoneIndex;
-        feature.area = zone.area;
+        feature.areaCells = zone.areaCells;
         feature.signalSum = zone.signalSum;
         feature.bboxW = std::max(0, zone.maxC - zone.minC + 1);
         feature.bboxH = std::max(0, zone.maxR - zone.minR + 1);
         feature.bboxArea = feature.bboxW * feature.bboxH;
         feature.fillRatio = feature.bboxArea > 0
-            ? static_cast<float>(zone.area) / static_cast<float>(feature.bboxArea)
+            ? static_cast<float>(zone.areaCells) / static_cast<float>(feature.bboxArea)
             : 0.0f;
-        feature.meanSignal = zone.area > 0
-            ? static_cast<float>(zone.signalSum) / static_cast<float>(zone.area)
+        feature.meanSignal = zone.areaCells > 0
+            ? static_cast<float>(zone.signalSum) / static_cast<float>(zone.areaCells)
             : 0.0f;
         feature.density = feature.meanSignal;
 
@@ -127,7 +127,7 @@ private:
         for (int idx : zone.pixels) {
             const int r = idx / kCols;
             const int c = idx % kCols;
-            const int sig = frame.heatmapMatrix[r][c];
+            const int sig = frame.touch.conditioned[r][c];
             feature.maxSignal = std::max(feature.maxSignal, sig);
             const double delta = static_cast<double>(sig) - feature.meanSignal;
             varianceSum += delta * delta;
@@ -136,24 +136,24 @@ private:
             if (c == 0) feature.edgeTouchMask |= 0x04;
             if (c == kCols - 1) feature.edgeTouchMask |= 0x08;
         }
-        feature.signalVariance = zone.area > 0
-            ? static_cast<float>(varianceSum / static_cast<double>(zone.area))
+        feature.signalVariance = zone.areaCells > 0
+            ? static_cast<float>(varianceSum / static_cast<double>(zone.areaCells))
             : 0.0f;
         const float macroProminence = static_cast<float>(feature.maxSignal) - feature.meanSignal;
         const float macroSharpness = static_cast<float>(feature.maxSignal) / std::max(1.0f, feature.meanSignal);
         if (macroSharpness <= m_flatSharpnessThreshold) feature.reasonFlags |= PalmReasonFlatSignalShape;
         if (macroProminence >= static_cast<float>(m_strongPeakProminence)) feature.reasonFlags |= PalmReasonStrongSharpPeakPresent;
 
-        if (zone.area >= m_candidateAreaThreshold) feature.reasonFlags |= PalmReasonLargeArea;
+        if (zone.areaCells >= m_candidateAreaThreshold) feature.reasonFlags |= PalmReasonLargeArea;
         if (zone.signalSum >= m_candidateSignalThreshold) feature.reasonFlags |= PalmReasonLargeSignalSum;
-        if (zone.area >= m_areaMinForDensity && feature.density < m_densityThresholdLow) feature.reasonFlags |= PalmReasonLowDensity;
-        if (m_elongatedEnabled && zone.area >= m_elongatedMinArea && feature.aspectRatio >= m_elongatedAspectRatio) feature.reasonFlags |= PalmReasonElongated;
-        if (feature.fillRatio >= m_fillRatioThreshold && zone.area >= m_candidateAreaThreshold) feature.reasonFlags |= PalmReasonHighFillRatio;
+        if (zone.areaCells >= m_areaMinForDensity && feature.density < m_densityThresholdLow) feature.reasonFlags |= PalmReasonLowDensity;
+        if (m_elongatedEnabled && zone.areaCells >= m_elongatedMinArea && feature.aspectRatio >= m_elongatedAspectRatio) feature.reasonFlags |= PalmReasonElongated;
+        if (feature.fillRatio >= m_fillRatioThreshold && zone.areaCells >= m_candidateAreaThreshold) feature.reasonFlags |= PalmReasonHighFillRatio;
         if (feature.edgeTouchMask != 0 && longSide >= 5) feature.reasonFlags |= PalmReasonEdgeWideContact;
 
         float palmScore = 0.0f;
-        if (zone.area >= m_areaThreshold) palmScore += 0.35f;
-        else if (zone.area >= m_candidateAreaThreshold) palmScore += 0.20f;
+        if (zone.areaCells >= m_areaThreshold) palmScore += 0.35f;
+        else if (zone.areaCells >= m_candidateAreaThreshold) palmScore += 0.20f;
         if (zone.signalSum >= m_signalSumThreshold) palmScore += 0.25f;
         if (feature.reasonFlags & PalmReasonLowDensity) palmScore += 0.15f;
         if (feature.reasonFlags & PalmReasonElongated) palmScore += 0.15f;
@@ -164,14 +164,14 @@ private:
         feature.palmScore = std::clamp(palmScore, 0.0f, 1.0f);
 
         float fingerScore = 0.0f;
-        if (zone.area < m_candidateAreaThreshold) fingerScore += 0.45f;
+        if (zone.areaCells < m_candidateAreaThreshold) fingerScore += 0.45f;
         if (longSide <= 5) fingerScore += 0.25f;
         if (feature.aspectRatio < 2.5f) fingerScore += 0.15f;
         if (feature.density >= m_densityThresholdLow) fingerScore += 0.15f;
         if (feature.reasonFlags & PalmReasonStrongSharpPeakPresent) fingerScore += 0.20f;
         feature.fingerScore = std::clamp(fingerScore, 0.0f, 1.0f);
 
-        if (zone.area >= m_likelyAreaThreshold && feature.palmScore >= 0.55f) {
+        if (zone.areaCells >= m_likelyAreaThreshold && feature.palmScore >= 0.55f) {
             feature.palmClass = PalmClass::PalmLikely;
         } else if (feature.palmScore >= 0.35f) {
             feature.palmClass = PalmClass::PalmCandidate;
@@ -246,7 +246,7 @@ private:
                 const int r = row + dr;
                 const int c = col + dc;
                 if (r < 0 || r >= kRows || c < 0 || c >= kCols) continue;
-                sum += frame.heatmapMatrix[r][c];
+                sum += frame.touch.conditioned[r][c];
                 ++count;
             }
         }

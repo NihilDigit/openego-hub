@@ -27,7 +27,13 @@ public:
     int  m_tholdScaleNumer = 0x40; // ~50%  (TSACore DAT)
     int  m_tholdScaleShift = 7;    // >>7
     bool m_dilateErode = true;
-    int  m_maxTouches = 10;
+    // 区提取之后保留的接触点上限,按 signalSum 排序留前 N 个。
+    //
+    // 曾经是 10,而跟踪级的上限是 20、厂商的 TSA_MAX_TOUCH_NUM 也是 20——我们这一级
+    // 自己更紧,且淘汰方式是**按信号强弱排名**。掌整个搭在屏幕上时区数会越过 10,
+    // 于是被淘汰的正是最弱的那个,而实测真手指常常比掌的碎片还弱(掌碎片峰值可到
+    // 1012,真轻触低到 554)。表现就是「掌搭着时另一只手的触摸随掌的面积忽有忽无」。
+    int  m_maxTouches = 20;
     bool m_palmAwareExpansionEnabled = true;
     float m_fingerInPalmThresholdRatio = 0.70f;
     int m_fingerInPalmMaxRadius = 3;
@@ -55,9 +61,6 @@ public:
             int16_t zoneThold = CalcZoneThold(sigThold, pk.z, evaluations, pi);
             const int maxRadius = CalcMaxRadius(evaluations, pi);
             m_units[pi] = {};
-            m_units[pi].peakCol = pk.c;
-            m_units[pi].peakRow = pk.r;
-            m_units[pi].peakSig = pk.z;
             m_units[pi].zoneThold = zoneThold;
             m_units[pi].peakCount = 0;
             m_units[pi].addPeakIndex(pi);
@@ -117,13 +120,8 @@ private:
         int weightedColSum = 0; // For centroid X (col)
         int weightedRowSum = 0; // For centroid Y (row)
         int weightTotal = 0;    // Weight denominator
-        int area = 0;           // Core pixel count
-        int edgeArea = 0;       // Edge pixel count (below zoneThold)
-        int edgeSignalSum = 0;  // Edge signal sum
-        uint32_t flags = 0;     // Zone flags (0x4000 = overlap)
+        int areaCells = 0;           // Core pixel count
         ZoneType type = NF;     // TZ_GetType result
-        int peakCol = 0, peakRow = 0;
-        int16_t peakSig = 0;
         int16_t zoneThold = 0;
         static constexpr int kMaxPeaksPerZone = 16;
         int peakIndices[kMaxPeaksPerZone];
@@ -143,7 +141,7 @@ private:
 
     struct MfAccum {
         int peakIndex = -1;
-        int area = 0;
+        int areaCells = 0;
         int signalSum = 0;
         int64_t weightedColSum = 0;
         int64_t weightedRowSum = 0;
@@ -256,7 +254,7 @@ private:
 
         auto& unit = m_units[peakIdx];
         auto addPixel = [&](int r, int c, int16_t sig) {
-            unit.area++;
+            unit.areaCells++;
             unit.signalSum += sig;
             if (sig > 0) {
                 unit.weightedColSum += c * 128 * sig;
@@ -283,15 +281,9 @@ private:
                     if (std::max(rowDist, colDist) > maxRadius) continue;
                 }
                 int ni = nr * kCols + nc;
-                int16_t sig = frame.heatmapMatrix[nr][nc];
+                int16_t sig = frame.touch.conditioned[nr][nc];
 
-                if (m_touchZones[ni] != 0) {
-                    uint8_t otherZone = m_touchZones[ni];
-                    if (otherZone != zoneId) {
-                        unit.flags |= 0x4000;
-                    }
-                    continue;
-                }
+                if (m_touchZones[ni] != 0) continue;
 
                 if (sig >= zoneThold) {
                     m_touchZones[ni] = zoneId;
@@ -303,15 +295,13 @@ private:
                 } else if (sig > 0) {
                     m_touchZones[ni] = zoneId;
                     RecordZoneCell(ni);
-                    unit.edgeArea++;
-                    unit.edgeSignalSum += sig;
                     TZ_UpdateEdgeInfo(m_edgeInfos[peakIdx], sig,
                         nc, nr, 4);
                 }
             }
         }
         TZ_GetEdgeTouchedFlag(m_edgeInfos[peakIdx]);
-        TZ_GetEdgeWidth(m_edgeInfos[peakIdx], frame.heatmapMatrix,
+        TZ_GetEdgeWidth(m_edgeInfos[peakIdx], frame.touch.conditioned,
                         static_cast<int16_t>(m_edgeWidthThreshold));
     }
 
@@ -415,7 +405,7 @@ private:
         std::array<int, 256> zoneToUnit{};
         zoneToUnit.fill(-1);
         for (int pi = 0; pi < static_cast<int>(m_units.size()); ++pi) {
-            if (m_units[pi].area == 0) continue;
+            if (m_units[pi].areaCells == 0) continue;
             uint8_t zid = static_cast<uint8_t>(pi + 1);
             zoneToUnit[zid] = pi;
         }
@@ -566,7 +556,7 @@ private:
                 if (m_touchZones[static_cast<size_t>(ni)] != ownerZoneId) continue;
                 if (m_mfOwner[static_cast<size_t>(ni)] != 0) continue;
                 AssignMfOwner(ni, node.owner);
-                MfHeapPush({ni, frame.heatmapMatrix[nr][nc], node.owner});
+                MfHeapPush({ni, frame.touch.conditioned[nr][nc], node.owner});
             }
         }
 
@@ -576,10 +566,10 @@ private:
             if (owner == 0 || owner > partitionCount) continue;
             const int r = idx / kCols;
             const int c = idx % kCols;
-            const int16_t sig = frame.heatmapMatrix[r][c];
+            const int16_t sig = frame.touch.conditioned[r][c];
             if (sig < unit.zoneThold) continue;
             auto& accum = accums[static_cast<size_t>(owner - 1)];
-            accum.area++;
+            accum.areaCells++;
             accum.signalSum += sig;
             if (sig > 0) {
                 accum.weightedColSum += static_cast<int64_t>(c) * 128 * sig;
@@ -593,10 +583,20 @@ private:
     }
 
     static inline void ApplyEdgeInfo(TouchContact& contact, const ZoneEdgeInfo& edgeInfo) {
+        // 这一份是跟踪级做帧间配对用的坐标，必须在这里就定下来，而不是留给边缘补偿去写：
+        // 补偿可以被配置关掉，那时它一个字节也不会写，匹配坐标就会是零。
+        contact.matchXCells = contact.x;
+        contact.matchYCells = contact.y;
         contact.edgeFlags = edgeInfo.edgeFlags;
         contact.centroidEdgeFlags = TZ_GetCentroidEdgeFlags(edgeInfo, contact.x, contact.y);
         contact.ecWidthX = edgeInfo.colEdgeWidth;
         contact.ecWidthY = edgeInfo.rowEdgeWidth;
+        // 握持比例在这里算一次就定下来。边缘补偿此前自己从 ZoneEdgeInfo 重算一遍,
+        // 而这个量还有别的消费者(边缘拒绝、掌判),各算各的迟早会漂。
+        contact.gripRatioXQ4 = TZ_CentroidGripRatio(edgeInfo.outerColSigSum,
+                                                    edgeInfo.innerColSigSum);
+        contact.gripRatioYQ4 = TZ_CentroidGripRatio(edgeInfo.outerRowSigSum,
+                                                    edgeInfo.innerRowSigSum);
         contact.isEdge = (contact.edgeFlags & (0x20 | 0x80000)) != 0 ||
                          contact.centroidEdgeFlags != 0;
     }
@@ -615,12 +615,12 @@ private:
         m_currentOutputContacts = &frame.touch.output.contacts;
         for (int pi = 0; pi < static_cast<int>(m_units.size()); ++pi) {
             auto& u = m_units[pi];
-            if (u.area == 0 || u.weightTotal == 0) continue;
+            if (u.areaCells == 0 || u.weightTotal == 0) continue;
 
             // TSACore TZ_GetType: classify zone type
             if (u.getPeakCount() >= 2) {
                 u.type = MF;  // MultiFinger
-            } else if (u.area > 9) {
+            } else if (u.areaCells > 9) {
                 u.type = FF;  // FatFinger (large single touch)
             } else {
                 u.type = NF;  // NormalFinger
@@ -639,9 +639,10 @@ private:
                 tc.id = peaks[pi].id;  // Peak's persistent ID
                 tc.sourcePeakId = peaks[pi].id;
                 tc.sourcePeakAge = static_cast<uint8_t>(std::clamp(peaks[pi].tzAge, 0, 255));
+                tc.peakSignal = peaks[pi].z;
                 tc.x = cx;
                 tc.y = cy;
-                tc.area = u.area;
+                tc.areaCells = u.areaCells;
                 tc.signalSum = u.signalSum;
                 tc.state = 0;
                 ApplyEdgeInfo(tc, m_edgeInfos[static_cast<size_t>(pi)]);
@@ -654,7 +655,7 @@ private:
                 for (int j = 0; j < partitionCount; ++j) {
                     const auto& accum = mfAccums[static_cast<size_t>(j)];
                     if (accum.peakIndex < 0 || accum.peakIndex >= static_cast<int>(peaks.size())) continue;
-                    if (accum.area == 0) continue;
+                    if (accum.areaCells == 0) continue;
                     const Peak& pk = peaks[static_cast<size_t>(accum.peakIndex)];
 
                     float cx = static_cast<float>(pk.c) + 0.5f;
@@ -670,9 +671,10 @@ private:
                     tc.id = pk.id;
                     tc.sourcePeakId = pk.id;
                     tc.sourcePeakAge = static_cast<uint8_t>(std::clamp(pk.tzAge, 0, 255));
+                    tc.peakSignal = pk.z;
                     tc.x = cx;
                     tc.y = cy;
-                    tc.area = accum.area;
+                    tc.areaCells = accum.areaCells;
                     tc.signalSum = accum.signalSum;
                     tc.state = 0;
                     ApplyEdgeInfo(tc, m_edgeInfos[static_cast<size_t>(pi)]);

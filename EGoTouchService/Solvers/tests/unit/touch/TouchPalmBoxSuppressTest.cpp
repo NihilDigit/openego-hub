@@ -29,7 +29,7 @@ struct ZoneFixture {
         for (int r = minR; r <= maxR; ++r) {
             for (int c = minC; c <= maxC; ++c) {
                 pixels.push_back(r * 60 + c);
-                zone.area += 1;
+                zone.areaCells += 1;
                 zone.signalSum += signal;
             }
         }
@@ -65,9 +65,9 @@ Solvers::Touch::PeakEvaluation MakeEval(bool allowContact = true) {
 }
 
 void FillFrameForPeaks(Solvers::HeatmapFrame& frame, std::span<const Solvers::Touch::Peak> peaks) {
-    std::fill(&frame.heatmapMatrix[0][0], &frame.heatmapMatrix[0][0] + 40 * 60, int16_t{0});
+    std::fill(&frame.touch.conditioned[0][0], &frame.touch.conditioned[0][0] + 40 * 60, int16_t{0});
     for (const auto& peak : peaks) {
-        frame.heatmapMatrix[peak.r][peak.c] = peak.z;
+        frame.touch.conditioned[peak.r][peak.c] = peak.z;
     }
 }
 

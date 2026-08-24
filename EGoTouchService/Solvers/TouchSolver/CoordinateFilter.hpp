@@ -10,6 +10,12 @@ namespace Solvers { namespace Touch {
 
 class CoordinateFilter {
 public:
+    // 注意：cutoff 使用速度平方项（见 Process 中的 velocityMag * velocityMag），
+    // 不是教科书 1-Euro 的线性项。这三个值是按平方响应标定的，直接套用线性
+    // 1-Euro 的常见取值（min_cutoff≈4.4 / beta≈0.5）会让静止去抖和运动跟随同时变差。
+    // 这里的值必须与 TouchPipeline::registerBindings() 中声明的默认值一致 ——
+    // 配置注入未覆盖到某个字段时（无配置文件、store 校验被拒、键未绑定），
+    // 实际生效的就是成员初始化值。由 SolversUnit_PipelineDefaultsConsistency 守护。
     bool  m_enabled = true;
     float m_minCutoff = 1.0f;   // 降低静止时的截止频率（原 20.0f），大幅增强静止时的去抖动能力
     float m_beta = 150.0f;      // 增大速度斜率（原 50.0f），一旦移动，截止频率迅速升高，减少滤波迟滞

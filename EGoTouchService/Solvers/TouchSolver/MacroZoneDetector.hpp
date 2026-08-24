@@ -31,7 +31,7 @@ public:
 
     inline void Process(const HeatmapFrame& frame, int threshold) {
         const uint32_t visitEpoch = NextVisitEpoch();
-        const int16_t* const heatmap = &frame.heatmapMatrix[0][0];
+        const int16_t* const heatmap = &frame.touch.conditioned[0][0];
         m_pixelArenaCount = 0;
 
         static constexpr int dr[] = {-1, 1, 0, 0, -1, -1, 1, 1};
@@ -51,7 +51,7 @@ public:
                     }
                     auto& zone = m_macroZones[zoneIdx];
                     zone.pixels = {};
-                    zone.area = 0;
+                    zone.areaCells = 0;
                     zone.signalSum = 0;
                     zone.minR = kRows - 1;
                     zone.maxR = 0;
@@ -69,7 +69,7 @@ public:
                         int currIdx = m_queueBuf[m_queueHead++];
 
                         m_pixelArena[static_cast<size_t>(m_pixelArenaCount++)] = currIdx;
-                        zone.area++;
+                        zone.areaCells++;
 
                         int currR = currIdx / kCols;
                         int currC = currIdx % kCols;
@@ -97,10 +97,10 @@ public:
                         }
                     }
 
-                    if (zone.area > 0) {
+                    if (zone.areaCells > 0) {
                         zone.pixels = std::span<const int>(
                             m_pixelArena.data() + zonePixelOffset,
-                            static_cast<size_t>(zone.area));
+                            static_cast<size_t>(zone.areaCells));
                         zoneIdx++;
                     }
                 }
@@ -113,9 +113,6 @@ public:
                   });
         m_macroZones.resize(std::min(zoneIdx, 20));
     }
-
-    const std::vector<MacroZone>& GetMacroZones() const { return m_macroZones; }
-    std::vector<MacroZone>& GetMutableMacroZones() { return m_macroZones; }
 
 private:
     std::vector<MacroZone> m_macroZones;

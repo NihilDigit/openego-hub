@@ -38,7 +38,7 @@ private:
             std::clamp(m_maxCorrection, 0, 0x7FFF));
 
         for (int y = 0; y < 40; ++y) {
-            int16_t* row = frame.heatmapMatrix[y];
+            int16_t* row = frame.touch.conditioned[y];
             int64_t rowSum = 0;
             int validCount = 0;
 #if defined(_M_ARM64)
@@ -119,7 +119,7 @@ private:
             int64_t colSum = 0;
             int validCount = 0;
             for (int y = 0; y < 40; ++y) {
-                int16_t val = frame.heatmapMatrix[y][x];
+                int16_t val = frame.touch.conditioned[y][x];
                 if (val < exclusionThreshold && val > negativeThreshold) {
                     colSum += val;
                     validCount++;
@@ -132,8 +132,8 @@ private:
                     maxCorrection);
                 if (colOffset == 0) continue;
                 for (int y = 0; y < 40; ++y)
-                    frame.heatmapMatrix[y][x] =
-                        static_cast<int16_t>(frame.heatmapMatrix[y][x] - colOffset);
+                    frame.touch.conditioned[y][x] =
+                        static_cast<int16_t>(frame.touch.conditioned[y][x] - colOffset);
             }
         }
     }

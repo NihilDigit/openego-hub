@@ -35,7 +35,7 @@ public:
 
             if (validPixels[idx]) {
                 m_peakZones[idx] = zoneId;
-                heapPush({idx, frame.heatmapMatrix[peaks[i].r][peaks[i].c], zoneId});
+                heapPush({idx, frame.touch.conditioned[peaks[i].r][peaks[i].c], zoneId});
             }
         }
 
@@ -56,7 +56,7 @@ public:
 
                     if (validPixels[nIdx] && m_peakZones[nIdx] == 0) {
                         m_peakZones[nIdx] = curr.zoneId;
-                        heapPush({nIdx, frame.heatmapMatrix[nr][nc], curr.zoneId});
+                        heapPush({nIdx, frame.touch.conditioned[nr][nc], curr.zoneId});
                     }
                 }
             }
@@ -112,29 +112,25 @@ class ContactExtractor {
 public:
     class TouchSizeCalculator {
     public:
-        float m_pixelPitchMm = 4.5f;
-        int   m_unitPerSigMm2 = 128;
-        uint8_t m_fallbackSizeMm = 5;
+        // 传感器格间距。此前这个成员绑了配置却从没有人读，接触点的物理尺度因此无从得知。
+        //
+        // 网格不是方形:60 列覆盖 270 mm、40 行覆盖 165 mm,列间距 4.5 mm、行间距
+        // 4.125 mm。按单值 4.5 算面积会高估 9%(20.25 对 18.5625 mm²)——掌与指的面积
+        // 差一个量级,9% 淹没不了它们,但这是个测量值,不该带着已知偏差。
+        float m_pixelPitchMm = 4.5f;      // 列方向
+        float m_rowPitchMm = 4.125f;      // 行方向
+        float m_fallbackSizeMm = 1.0f;
+        float m_sizeAreaScale = 0.22f;
+        float m_sizeSignalScale = 0.35f;
 
         inline void Process(std::span<TouchContact> contacts) {
+            const float cellMm2 = m_pixelPitchMm * m_rowPitchMm;
             for (auto& tc : contacts) {
-                uint8_t sizeMm = GetSizeInMM(tc.signalSum, m_unitPerSigMm2);
-                if (sizeMm == 0) sizeMm = m_fallbackSizeMm;
-                tc.sizeMm = static_cast<float>(sizeMm);
+                tc.sizeMm = EstimateContactSizeMm(tc.areaCells, tc.signalSum,
+                                                  m_fallbackSizeMm, m_sizeAreaScale,
+                                                  m_sizeSignalScale);
+                tc.areaMm2 = static_cast<float>(tc.areaCells) * cellMm2;
             }
-        }
-
-    private:
-        static inline uint8_t GetSizeInMM(int sigSum, int scale) {
-            if (sigSum >= 0x200000) return 0xFF;
-            uint8_t r = 1;
-            int shifted = sigSum << 10;
-            while (r < 15) {
-                int threshold = scale * r * (r + r * r);
-                if (threshold > shifted) break;
-                r++;
-            }
-            return r;
         }
     };
 
@@ -175,7 +171,6 @@ public:
     const std::array<uint8_t, MicroZoneSegmenter::kGridSize>& GetPeakZones() const { return m_microZoneSeg.GetPeakZones(); }
     std::span<const ZoneEdgeInfo> GetEdgeInfos() const { return m_zoneExp.GetEdgeInfos(); }
     const std::array<uint8_t, ZoneExpander::kGridSize>& GetZoneEdge() const { return m_zoneExp.GetZoneEdge(); }
-    const EdgeBounds& GetEdgeBounds() const { return m_zoneExp.m_edgeBounds; }
     int GetZoneCount() const { return m_zoneExp.GetZoneCount(); }
 };
 

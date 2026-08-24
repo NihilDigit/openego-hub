@@ -45,7 +45,7 @@ Solvers::HeatmapFrame MakeZeroedHeatmapFrame() {
     // matrix in production hot paths. Sparse synthetic tests need an explicit
     // zero background before writing their fixture peaks.
     Solvers::HeatmapFrame frame{};
-    std::fill(&frame.heatmapMatrix[0][0], &frame.heatmapMatrix[0][0] + 40 * 60, int16_t{0});
+    std::fill(&frame.touch.conditioned[0][0], &frame.touch.conditioned[0][0] + 40 * 60, int16_t{0});
     return frame;
 }
 
@@ -59,10 +59,10 @@ Solvers::MacroZone MakeZoneFromFrame(const Solvers::HeatmapFrame& frame,
     zone.maxC = 0;
     for (int r = 0; r < 40; ++r) {
         for (int c = 0; c < 60; ++c) {
-            const int16_t sig = frame.heatmapMatrix[r][c];
+            const int16_t sig = frame.touch.conditioned[r][c];
             if (sig < threshold) continue;
             pixels.push_back(r * 60 + c);
-            zone.area += 1;
+            zone.areaCells += 1;
             zone.signalSum += sig;
             zone.minR = std::min(zone.minR, r);
             zone.maxR = std::max(zone.maxR, r);
@@ -89,44 +89,44 @@ const Solvers::TouchContact* FindContactById(std::span<const Solvers::TouchConta
 }
 
 void BuildCloseTwoPeakFrame(Solvers::HeatmapFrame& frame) {
-    frame.heatmapMatrix[20][20] = 900;
-    frame.heatmapMatrix[19][20] = 420;
-    frame.heatmapMatrix[21][20] = 410;
-    frame.heatmapMatrix[20][19] = 430;
-    frame.heatmapMatrix[19][19] = 260;
-    frame.heatmapMatrix[21][19] = 250;
-    frame.heatmapMatrix[19][21] = 300;
-    frame.heatmapMatrix[21][21] = 290;
+    frame.touch.conditioned[20][20] = 900;
+    frame.touch.conditioned[19][20] = 420;
+    frame.touch.conditioned[21][20] = 410;
+    frame.touch.conditioned[20][19] = 430;
+    frame.touch.conditioned[19][19] = 260;
+    frame.touch.conditioned[21][19] = 250;
+    frame.touch.conditioned[19][21] = 300;
+    frame.touch.conditioned[21][21] = 290;
 
-    frame.heatmapMatrix[20][21] = 350;
+    frame.touch.conditioned[20][21] = 350;
 
-    frame.heatmapMatrix[20][22] = 820;
-    frame.heatmapMatrix[19][22] = 390;
-    frame.heatmapMatrix[21][22] = 380;
-    frame.heatmapMatrix[20][23] = 360;
-    frame.heatmapMatrix[19][23] = 240;
-    frame.heatmapMatrix[21][23] = 230;
+    frame.touch.conditioned[20][22] = 820;
+    frame.touch.conditioned[19][22] = 390;
+    frame.touch.conditioned[21][22] = 380;
+    frame.touch.conditioned[20][23] = 360;
+    frame.touch.conditioned[19][23] = 240;
+    frame.touch.conditioned[21][23] = 230;
 }
 
 void BuildMergedSplitFrame(Solvers::HeatmapFrame& frame) {
-    frame.heatmapMatrix[20][20] = 900;
-    frame.heatmapMatrix[19][20] = 500;
-    frame.heatmapMatrix[21][20] = 480;
-    frame.heatmapMatrix[20][19] = 520;
-    frame.heatmapMatrix[19][19] = 320;
-    frame.heatmapMatrix[21][19] = 300;
-    frame.heatmapMatrix[18][20] = 260;
-    frame.heatmapMatrix[22][20] = 250;
-    frame.heatmapMatrix[20][18] = 240;
+    frame.touch.conditioned[20][20] = 900;
+    frame.touch.conditioned[19][20] = 500;
+    frame.touch.conditioned[21][20] = 480;
+    frame.touch.conditioned[20][19] = 520;
+    frame.touch.conditioned[19][19] = 320;
+    frame.touch.conditioned[21][19] = 300;
+    frame.touch.conditioned[18][20] = 260;
+    frame.touch.conditioned[22][20] = 250;
+    frame.touch.conditioned[20][18] = 240;
 
-    frame.heatmapMatrix[20][21] = 220;
+    frame.touch.conditioned[20][21] = 220;
 
-    frame.heatmapMatrix[20][22] = 820;
-    frame.heatmapMatrix[19][22] = 440;
-    frame.heatmapMatrix[21][22] = 430;
-    frame.heatmapMatrix[20][23] = 450;
-    frame.heatmapMatrix[19][23] = 250;
-    frame.heatmapMatrix[21][23] = 240;
+    frame.touch.conditioned[20][22] = 820;
+    frame.touch.conditioned[19][22] = 440;
+    frame.touch.conditioned[21][22] = 430;
+    frame.touch.conditioned[20][23] = 450;
+    frame.touch.conditioned[19][23] = 250;
+    frame.touch.conditioned[21][23] = 240;
 }
 
 void TestPeakDetectorPreservesTwoCloseSaddledPeaks() {
@@ -135,7 +135,7 @@ void TestPeakDetectorPreservesTwoCloseSaddledPeaks() {
 
     std::vector<int> pixels;
     Solvers::MacroZone zone = MakeZoneFromFrame(frame, pixels, 130);
-    Require(zone.area == 15 && pixels.size() == 15,
+    Require(zone.areaCells == 15 && pixels.size() == 15,
             "close two-peak fixture should contain exactly 15 thresholded pixels");
     std::vector<Solvers::MacroZone> zones{zone};
 
@@ -161,7 +161,7 @@ void TestZoneExpanderKeepsTopSignalCandidatesPastContactCapacity() {
     for (int r = 0; r < 40 && peaks.size() < Solvers::kMaxTouchContacts + 8; r += 5) {
         for (int c = 0; c < 60 && peaks.size() < Solvers::kMaxTouchContacts + 8; c += 7) {
             const int signal = 100 + static_cast<int>(peaks.size());
-            frame.heatmapMatrix[r][c] = static_cast<int16_t>(signal);
+            frame.touch.conditioned[r][c] = static_cast<int16_t>(signal);
 
             Solvers::Touch::Peak peak;
             peak.r = r;
@@ -226,8 +226,8 @@ void TestZoneExpanderPartitionsMergedTwoPeakZone() {
             "left contact should remain left of right contact");
     Require(leftContact->signalSum > rightContact->signalSum,
             "stronger/larger lobe should receive greater partition signal");
-    Require(leftContact->area > rightContact->area,
-            "larger lobe should receive greater partition area");
+    Require(leftContact->areaCells > rightContact->areaCells,
+            "larger lobe should receive greater partition areaCells");
 }
 
 } // namespace

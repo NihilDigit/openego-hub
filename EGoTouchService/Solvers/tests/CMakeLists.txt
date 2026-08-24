@@ -68,8 +68,14 @@ ego_add_solvers_unit(SolversUnit_TouchEdgeCompensation touch
 ego_add_solvers_unit(SolversUnit_TouchCloseSplit touch
     unit/touch/TouchCloseSplitTest.cpp
 )
+ego_add_solvers_unit(SolversUnit_TouchContactSize touch
+    unit/touch/TouchContactSizeTest.cpp
+)
 ego_add_solvers_unit(SolversUnit_TouchPalmBoxSuppress touch
     unit/touch/TouchPalmBoxSuppressTest.cpp
+)
+ego_add_solvers_unit(SolversUnit_TouchPeakHold touch
+    unit/touch/TouchPeakHoldTest.cpp
 )
 
 ego_add_solvers_config_unit(SolversUnit_StylusPipelineConfigRoundTrip stylus

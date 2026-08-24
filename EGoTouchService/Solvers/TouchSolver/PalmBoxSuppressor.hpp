@@ -94,7 +94,7 @@ public:
 private:
     struct PalmBoxObservation {
         PalmBoxRect bbox{};
-        int area = 0;
+        int areaCells = 0;
         int signalSum = 0;
         int peakCount = 0;
         int primaryZoneIndex = -1;
@@ -198,7 +198,7 @@ private:
                 continue;
             }
             existing.bbox = UnionRect(existing.bbox, obs.bbox);
-            existing.area += obs.area;
+            existing.areaCells += obs.areaCells;
             existing.signalSum += obs.signalSum;
             existing.peakCount += obs.peakCount;
             if (existing.primaryZoneIndex < 0) existing.primaryZoneIndex = obs.primaryZoneIndex;
@@ -224,7 +224,7 @@ private:
             const auto& zone = macroZones[static_cast<size_t>(zoneIndex)];
             PalmBoxObservation obs;
             obs.bbox = FromZone(zone);
-            obs.area = zone.area;
+            obs.areaCells = zone.areaCells;
             obs.signalSum = zone.signalSum;
             obs.peakCount = CountPeaksInZone(peaks, zoneIndex);
             obs.primaryZoneIndex = zoneIndex;

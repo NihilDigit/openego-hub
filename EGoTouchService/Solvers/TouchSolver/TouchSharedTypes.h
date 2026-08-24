@@ -7,6 +7,8 @@
 // Peak, PeakEvaluation, ZoneEdgeInfo, EdgeBounds 等类型。
 // ══════════════════════════════════════════════════════════════════════
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace Solvers {
@@ -49,11 +51,22 @@ struct Peak {
     int r = 0, c = 0;
     int16_t z = 0;
     int neighborSignalSum = 0;
+    // 上一行那个和是在**面板内**的邻居上求的。贴边、尤其贴角的峰,邻居有一多半在
+    // 面板外,和天然就小,拿它跟一个固定门槛比等于按位置歧视。所以把实际参与的邻居
+    // 个数一并记下来,判据里按它折算。
+    int neighborCellCount = 0;
     uint8_t id = 0;
     int tzAge = 0;
     int macroZoneIndex = -1;
     int macroZoneArea = 0;
-    int macroZoneSignalSum = 0;
+};
+
+// ── 上一帧活跃轨迹的位置（网格单位，x 为列、y 为行）────────────────────
+// 跟踪级产出，供下一帧的检测级做迟滞判断用：已经被轨迹跟着的峰，允许用比
+// 起始判据宽的维持判据留下来。
+struct TrackAnchor {
+    float x = 0.0f;
+    float y = 0.0f;
 };
 
 enum class PalmClass : uint8_t {
@@ -78,7 +91,7 @@ enum PalmReasonFlags : uint32_t {
 
 struct MacroZoneFeature {
     int zoneIndex = -1;
-    int area = 0;
+    int areaCells = 0;
     int signalSum = 0;
     float density = 0.0f;
     int bboxW = 0;
@@ -110,5 +123,23 @@ struct PeakEvaluation {
     PalmClass zonePalmClass = PalmClass::Unknown;
     uint32_t evalFlags = 0;
 };
+
+// ── 接触点尺寸估计 ────────────────────────────────────────────────
+// sizeMm 不是测量值，是从信号总量拟合出来的：cbrt(signalSum) * signalScale。信号总量同时
+// 受接触面积和按压力度影响，所以它区分不开「用力点的指尖」和「轻搭的掌根」。下游所有 sizeMm
+// 阈值都是围绕这个拟合调出来的，改变换算方式等于让那些阈值集体失去意义。
+//
+// 需要真正的物理尺度时用 TouchContact::areaMm2，那个由传感器格数乘间距得到，是测量值。
+//
+// 这个公式此前在 TouchTracker、StylusTouchSuppressor 和 ContactExtractor 各写了一遍，
+// 且第三份用的是另一套会在 signalSum 达到 368 时饱和到 15mm 的算法。
+inline float EstimateContactSizeMm(int areaCells, int signalSum,
+                                   float fallbackMm, float areaScale, float signalScale) {
+    if (signalSum > 0)
+        return (std::max)(fallbackMm, std::cbrt(static_cast<float>(signalSum)) * signalScale);
+    if (areaCells > 0)
+        return (std::max)(fallbackMm, std::sqrt(static_cast<float>(areaCells)) * areaScale);
+    return fallbackMm;
+}
 
 }} // namespace Solvers::Touch

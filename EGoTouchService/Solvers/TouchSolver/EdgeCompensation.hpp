@@ -82,10 +82,14 @@ inline void TZ_GetEdgeTouchedFlag(ZoneEdgeInfo& ei) {
 
 inline uint8_t TZ_GetCentroidEdgeFlags(const ZoneEdgeInfo& ei, float col, float row) {
     uint8_t flags = 0;
+    // 四条边必须对称。远端曾写作 col > kGridColMax / row > kGridRowMax，而质心是 0..N-1
+    // 号格的加权平均，数学上到不了 N-1 以上，于是右边和下边的补偿一次也没触发过。
+    // 原实现（TSACore Peak_IsOnOuterEdgeDim1Near/Far）按峰的格索引判，near 是 index==0、
+    // far 是 index==N-1，严格镜像；换算成质心就是近端 < min+1、远端 > max-1。
     if (ei.minCol <= kGridColMin && col < static_cast<float>(kGridColMin + 1)) flags |= 0x01;
-    if (ei.maxCol >= kGridColMax && col > static_cast<float>(kGridColMax)) flags |= 0x02;
+    if (ei.maxCol >= kGridColMax && col > static_cast<float>(kGridColMax - 1)) flags |= 0x02;
     if (ei.minRow <= kGridRowMin && row < static_cast<float>(kGridRowMin + 1)) flags |= 0x04;
-    if (ei.maxRow >= kGridRowMax && row > static_cast<float>(kGridRowMax)) flags |= 0x08;
+    if (ei.maxRow >= kGridRowMax && row > static_cast<float>(kGridRowMax - 1)) flags |= 0x08;
     return flags;
 }
 
@@ -180,15 +184,29 @@ static const uint16_t g_ctd256Ln[256] = {
     0x0583, 0x0584, 0x0585, 0x0586, 0x0587, 0x0588, 0x0589, 0x058A
 };
 
-// ── Default EC profiles (per edge direction) ──
+// 本机面板 W273AS2700 的真表，从 TSAPrmt.dll 读出（docs/tsacore_ground_truth.md）。
+// 四张表在 flash+0x840 / +0x851 / +0x862 / +0x873，各 0x11 字节，格式
+// {段数, 尺寸阈, ?, lutLo, lutHi}。分法是按**轴**不是按远近端：Dim1 的两张上界
+// 都是 224，Dim2 的两张都是 96。此前四份是同一个占位符。
 static const ECProfile g_defaultECProfiles[4] = {
-    { 3, { {64, 2, 32}, {128, 32, 96}, {255, 96, 192}, {0, 0, 0} } },
-    { 3, { {64, 2, 32}, {128, 32, 96}, {255, 96, 192}, {0, 0, 0} } },
-    { 3, { {64, 2, 32}, {128, 32, 96}, {255, 96, 192}, {0, 0, 0} } },
-    { 3, { {64, 2, 32}, {128, 32, 96}, {255, 96, 192}, {0, 0, 0} } },
+    { 1, { {7, 16, 224}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0} } },  // Dim1 近端
+    { 1, { {7, 16, 224}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0} } },  // Dim1 远端
+    { 1, { {7, 16,  96}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0} } },  // Dim2 近端
+    { 1, { {7, 16,  96}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0} } },  // Dim2 远端
 };
 
-static inline int ECGetOffset(uint8_t subIdx, uint8_t touchSize,
+// TZ_CentroidGripRatio —— 最外一圈信号和相对次外一圈的陡峭程度。
+// 接触点被边界切得越深，最外一圈相对次外一圈越强，比值越大；这正是「陷进去多少」
+// 的可观测量，也是边缘补偿真正的输入。分母为零时视作比例拉满，不是视作零——
+// 只有最外圈有信号意味着陷得最深。
+static inline uint8_t TZ_CentroidGripRatio(int outerSigSum, int innerSigSum) {
+    if (outerSigSum <= 0) return 0;
+    if (innerSigSum <= 0) return 0xFF;
+    const int ratio = (outerSigSum << 4) / innerSigSum;
+    return static_cast<uint8_t>(std::min(ratio, 0xFF));
+}
+
+static inline int ECGetOffset(uint8_t gripRatio, uint8_t touchSize,
                                const ECProfile& prof) {
     int si = 0;
     const int segmentCount = std::clamp(prof.numSegments, 1, 4);
@@ -201,7 +219,9 @@ static inline int ECGetOffset(uint8_t subIdx, uint8_t touchSize,
     uint16_t hi = g_ctd256Ln[hiIdx];
     uint16_t lo = g_ctd256Ln[loIdx];
     if (hi == lo) return 0;
-    int r = (int(g_ctd256Ln[subIdx] - lo) * 0x100) / int(hi - lo);
+    // 只钳上界。下界不钳是原实现的行为：比例低于 lutLo 时 offset 为负，compOff 因而
+    // 大于一格，接触点被放得比一格更靠里。钳到 0 会把这一段行为抹平。
+    int r = (int(g_ctd256Ln[gripRatio] - lo) * 0x100) / int(hi - lo);
     return std::min(r, 0xFF);
 }
 
@@ -241,8 +261,21 @@ public:
     bool m_enabled = true;
     EdgeBounds m_bounds;
     float m_ecStrength = 1.0f;
-    float m_ecFullCompRange = 0.5f;  // 全量补偿区宽度（传感器间距数）
-    float m_ecBlendRange = 0.505f;   // 线性混合过渡区宽度
+    // TSACore 的 CTD_ECGetFinalOffset 是硬编码的：
+    //
+    //     t = rawDist - 0x100;                    // 0x100 = 1 格 (Q8)
+    //     if (t <= 0)    return compOff;          // 全量区：距边 ≤ 1.0 格
+    //     if (t >= 0x40) return rawDist;          // 恒等区：距边 ≥ 1.25 格
+    //     return (rawDist*t*4 + (0x100 - 4*t)*compOff) >> 8;   // 0.25 格线性过渡
+    //
+    // 我们的 ECGetFinalOffset 与它逐句等价，代入 start=0x100、width=0x40 后
+    // t 的算式恰好化成同一个 4*t，所以这两个常量取真值即复现原实现。
+    //
+    // 这两个值曾被反向调过两次（full 收到 0.08、blend 放到 2.0），因为当时 compOff
+    // 的输入喂错了：喂的是次轴归一化位置，沿被补偿轴移动不变，全量区退化成常量输出，
+    // 于是坐标在边缘冻住。输入已改回 grip 比例（见 ProcessDim），常量随之回到真值。
+    float m_ecFullCompRange = 1.0f;
+    float m_ecBlendRange = 0.25f;
     ECProfile m_profiles[4] = {
         g_defaultECProfiles[0],
         g_defaultECProfiles[1],
@@ -266,6 +299,9 @@ public:
             if (i >= static_cast<int>(edgeInfos.size())) break;
             auto& tc = contacts[static_cast<size_t>(i)];
             const auto& ei = edgeInfos[static_cast<size_t>(i)];
+
+            // matchXCells/matchYCells 由 ZoneExpander::ApplyEdgeInfo 在接触点生成时写好，
+            // 这里只改 x/y。两份坐标的分工：前者供跟踪级配对，后者是对外上报的量。
             tc.edgeFlags |= ei.edgeFlags;
             tc.centroidEdgeFlags |= TZ_GetCentroidEdgeFlags(ei, tc.x, tc.y);
 
@@ -287,8 +323,6 @@ public:
             if (!edge) continue;
 
             tc.isEdge = true;
-            tc.rawXBeforeEC = tc.x;
-            tc.rawYBeforeEC = tc.y;
             tc.ecFlags &= ~(0x100u | 0x200u);
 
             ECDimResult xResult = ProcessDim(tc.x, bounds.colMin, bounds.colMax,
@@ -296,22 +330,22 @@ public:
                                              0x01, 0x02,
                                              ECEdge::Dim1Near, ECEdge::Dim1Far,
                                              tc.sizeMm,
-                                             tc.y, bounds.rowMin, bounds.rowMax);
+                                             tc.gripRatioXQ4);
             ECDimResult yResult = ProcessDim(tc.y, bounds.rowMin, bounds.rowMax,
                                              ei, tc.centroidEdgeFlags,
                                              0x04, 0x08,
                                              ECEdge::Dim2Near, ECEdge::Dim2Far,
                                              tc.sizeMm,
-                                             tc.x, bounds.colMin, bounds.colMax);
+                                             tc.gripRatioYQ4);
 
             if (xResult.active) {
                 tc.ecWidthX = xResult.edgeWidth;
-                tc.edgeDistX = xResult.correctedDistance;
+                tc.edgeDistXCells = xResult.correctedDistance;
                 if (xResult.corrected) tc.ecFlags |= 0x100;
             }
             if (yResult.active) {
                 tc.ecWidthY = yResult.edgeWidth;
-                tc.edgeDistY = yResult.correctedDistance;
+                tc.edgeDistYCells = yResult.correctedDistance;
                 if (yResult.corrected) tc.ecFlags |= 0x200;
             }
         }
@@ -328,9 +362,7 @@ private:
                                   ECEdge nearProfile,
                                   ECEdge farProfile,
                                   float touchSizeMm,
-                                  float crossAxisCoord,
-                                  float crossAxisMin,
-                                  float crossAxisMax) const {
+                                  uint8_t gripRatio) const {
         ECDimResult result;
         result.nearEdge = (centroidFlags & nearMask) != 0;
         result.farEdge = (centroidFlags & farMask) != 0;
@@ -346,15 +378,13 @@ private:
         const bool isDimX = nearMask == 0x01;
         result.edgeWidth = isDimX ? ei.colEdgeWidth : ei.rowEdgeWidth;
 
-        // subIdx: 次轴方向的归一化坐标，用于索引对数 LUT
-        // 固件中 CTD_ECGetOffset 的 param_1 是质心在垂直于补偿方向上的传感器索引
-        const float crossRange = std::max(1.0f, crossAxisMax - crossAxisMin);
-        const float crossNorm = std::clamp(
-            (crossAxisCoord - crossAxisMin) / crossRange, 0.0f, 1.0f);
-        const uint8_t subIdx = static_cast<uint8_t>(crossNorm * 255.0f);
+        // LUT 索引是 grip 比例，不是位置。原实现 CTD_ECGetOffset 的第一个参数取自
+        // 触点结构 +0x196（Dim1）/ +0x197（Dim2），而那两个字节由 TZ_RegisterTouch
+        // 从 TZ_GetGripRatio 算出的比例搬过来。近端与远端共用同一个比例——原实现
+        // 两个分支传的是同一个字段，累加器也把两侧边缘算进同一个和。
         const int profileIndex = static_cast<int>(useFar ? farProfile : nearProfile);
         const uint8_t touchSizeByte = static_cast<uint8_t>(std::min(touchSizeMm, 255.0f));
-        const int offset = ECGetOffset(subIdx, touchSizeByte, m_profiles[profileIndex]);
+        const int offset = ECGetOffset(gripRatio, touchSizeByte, m_profiles[profileIndex]);
         const int compOff = 256 - offset;
         const int blendStart = std::max(1, static_cast<int>(m_ecFullCompRange * 256.0f));
         const int blendWidth = std::max(1, static_cast<int>(m_ecBlendRange * 256.0f));
@@ -376,10 +406,12 @@ private:
     }
 };
 
+// 判定「接触点贴在边界上，且 EC 没能把坐标从边界拉开」——这种点的坐标是钉死的，不可信。
+// 这里只写 TouchContact::edgeRejected，后果交给 TouchTracker：拒绝只在建轨迹那一帧生效，
+// 已经在报的轨迹不中途掐断，否则贴边滑动会碎成一串 up/down。
 class EdgeRejector {
 public:
     bool m_enabled = true;
-    int  m_moveInDelay = 2;
     int  m_edgeMargin = 2;
 
     // ── 统一签名入口：从 frame.touch.runtime 读取 edgeInfos/edgeBounds ──
@@ -387,12 +419,17 @@ public:
         const auto& rt = frame.touch.runtime;
         if (rt.edgeBounds) {
             Process(frame.touch.output.contacts.span(), rt.edgeInfos, *rt.edgeBounds);
+        } else {
+            for (auto& tc : frame.touch.output.contacts) tc.edgeRejected = false;
         }
     }
 
     inline void Process(std::span<TouchContact> contacts,
                         std::span<const ZoneEdgeInfo> edgeInfos,
                         const EdgeBounds& bounds) {
+        // edgeRejected 每帧对每个接触点无条件写一次，包括本级停用时。FixedVector::clear()
+        // 只重置长度，底层数组里的旧对象原样留着，漏写一个槽位就会把上一帧的拒绝结论带进来。
+        for (auto& tc : contacts) tc.edgeRejected = false;
         if (!m_enabled) return;
 
         for (int i = 0; i < static_cast<int>(contacts.size()); ++i) {
@@ -407,17 +444,18 @@ public:
             const bool yEdge = (centroidFlags & 0x0c) != 0;
             const float fallbackXDist = std::min(tc.x - bounds.colMin, bounds.colMax - tc.x);
             const float fallbackYDist = std::min(tc.y - bounds.rowMin, bounds.rowMax - tc.y);
-            const float xDist = tc.edgeDistX > 0.0f ? tc.edgeDistX : fallbackXDist;
-            const float yDist = tc.edgeDistY > 0.0f ? tc.edgeDistY : fallbackYDist;
+            const float xDist = tc.edgeDistXCells > 0.0f ? tc.edgeDistXCells : fallbackXDist;
+            const float yDist = tc.edgeDistYCells > 0.0f ? tc.edgeDistYCells : fallbackYDist;
             const bool uncorrectedX = xEdge && (tc.ecFlags & 0x100) == 0;
             const bool uncorrectedY = yEdge && (tc.ecFlags & 0x200) == 0;
             const bool stillPinned = (uncorrectedX && xDist <= static_cast<float>(m_edgeMargin)) ||
                                      (uncorrectedY && yDist <= static_cast<float>(m_edgeMargin));
 
-            if (tc.state == 0 && stillPinned) {
-                tc.debugFlags |= 0x400;
-                tc.isReported = false;
-            }
+            // 这里曾经写作 `if (tc.state == 0 && stillPinned)`，本意是「只在落下那一帧拒绝」。
+            // 但本级跑在 tracker 之前，state 还没有任何上游赋值，恒为默认的 0，条件实际恒真；
+            // 而紧接着的 isReported = false 又被 tracker 无条件重写，两个错误相互抵消，整个
+            // EdgeRejector 是死代码。判定移到这里、后果移到 tracker，两处都不再依赖 state。
+            tc.edgeRejected = stillPinned;
         }
     }
 };

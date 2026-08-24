@@ -16,11 +16,11 @@ void Require(bool condition, const char* message) {
 }
 
 int16_t PeakValue(const Solvers::HeatmapFrame& frame) {
-    return frame.heatmapMatrix[kPeakRow][kPeakCol];
+    return frame.touch.conditioned[kPeakRow][kPeakCol];
 }
 
 int16_t BackgroundValue(const Solvers::HeatmapFrame& frame) {
-    return frame.heatmapMatrix[0][0];
+    return frame.touch.conditioned[0][0];
 }
 
 void FillRaw(Solvers::HeatmapFrame& frame, uint16_t value) {
@@ -149,24 +149,42 @@ void TestNoFingerNoiseTrackingStillOutputsZero() {
     Require(PeakValue(frame) == 0, "no-finger with noise tracking still outputs zero");
 }
 
-void TestNoFingerAbsorbsPeakSignal() {
+// 固件说没手指、而本帧自己还有强信号时,不许把它吸收掉。
+//
+// 这条测试原先断言的正好相反(「无手指模式把高信号吸进基线」),那正是真机上
+// 「手指停在角上就消失」的来源:无手指分支一帧能把基线推 512 个单位,一个 500 量级的
+// 信号一帧就没了,而且不可逆。厂商的做法是拿自己算的帧极值判,硬件检测器只是否决票
+// (SPEC_baseline §3.2)。
+void TestOwnSignalOverridesTheFirmwareFlag() {
     Solvers::Touch::BaselineTracker tracker;
     tracker.m_noFingerAlphaShift = 0;
     tracker.m_noFingerMaxStep = 2000;
     PrimeBaseline(tracker);
 
-    // Feed high peak signal during no-finger mode
     Solvers::HeatmapFrame frame;
     frame.masterWasRead = true;
     frame.masterSuffixValid = true;
     FillRawWithHighCell(frame);
     tracker.Process(frame, false);
-    Require(PeakValue(frame) == 0, "no-finger mode absorbs high signal into baseline");
+    Require(PeakValue(frame) > 0, "a strong own signal must survive the firmware saying no finger");
 
-    // Now switch to finger mode — the high cell should be baseline-absorbed
-    FillRawWithHighCell(frame);
-    tracker.Process(frame, true);
-    Require(PeakValue(frame) == 0, "previously absorbed peak should not reappear as touch");
+    // 把门槛关掉就回到旧行为,这条守住开关本身真的在起作用。
+    Solvers::Touch::BaselineTracker trusting;
+    trusting.m_noFingerAlphaShift = 0;
+    trusting.m_noFingerMaxStep = 2000;
+    trusting.m_noFingerMaxSignal = 0;
+    PrimeBaseline(trusting);
+    Solvers::HeatmapFrame frame2;
+    frame2.masterWasRead = true;
+    frame2.masterSuffixValid = true;
+    FillRawWithHighCell(frame2);
+    trusting.Process(frame2, false);
+    Require(PeakValue(frame2) == 0, "with the override off the old absorbing behaviour returns");
+
+    // 真被吸收掉的那一份不会自己回来:切到有手指模式,基线已经爬到那个高度了。
+    FillRawWithHighCell(frame2);
+    trusting.Process(frame2, true);
+    Require(PeakValue(frame2) == 0, "an absorbed peak does not come back on its own");
 }
 
 // ──── Finger mode: Freeze ────
@@ -452,8 +470,72 @@ void TestClampBaselineRange() {
 
 } // namespace
 
+// ──── 贴边轨迹附近的维持门槛 ────
+
+// 守的是「手指停在角上不会被基线吃掉」。信号强度取在进入门槛与维持门槛之间:
+// 没有轨迹时该格不冻结、被背景更新吸收成 0;上一帧有贴边轨迹时该格冻结、信号留住。
+// 这两半必须一起断言——只断言前者会让「门槛恒定放宽」也通过,只断言后者会让
+// 「门槛恒定收紧」也通过。
+void TestSustainThresholdNeedsAnEdgeTrack() {
+    constexpr int kEdgeRow = 39;
+    constexpr int kEdgeCol = 59;
+    constexpr uint16_t kWeak = kRawBaseline + 200;   // 介于 100 与 305 之间
+
+    auto run = [&](bool withAnchor) {
+        Solvers::Touch::BaselineTracker tracker;
+        PrimeBaseline(tracker);
+
+        Solvers::Touch::TrackAnchor anchor{static_cast<float>(kEdgeCol) + 0.5f,
+                                           static_cast<float>(kEdgeRow) + 0.5f};
+        int16_t last = 0;
+        for (int i = 0; i < 12; ++i) {
+            Solvers::HeatmapFrame frame;
+            frame.masterWasRead = true;
+            frame.masterSuffixValid = true;
+            FillRaw(frame, kRawBaseline);
+            frame.heatmapMatrix[kEdgeRow][kEdgeCol] = static_cast<int16_t>(kWeak);
+            if (withAnchor) {
+                frame.touch.runtime.prevTrackAnchors = {&anchor, 1};
+            }
+            tracker.Process(frame, true);
+            last = frame.touch.conditioned[kEdgeRow][kEdgeCol];
+        }
+        return last;
+    };
+
+    Require(run(true) > 100,
+            "a weak contact under an edge-hugging track must survive the baseline");
+    Require(run(false) == 0,
+            "the same weak signal with no track must still be absorbed");
+}
+
+// 屏幕中间的轨迹不该享受维持门槛:掌落在中间,放宽它只会让掌上报更多。
+void TestSustainThresholdIgnoresInteriorTracks() {
+    constexpr uint16_t kWeak = kRawBaseline + 200;
+
+    Solvers::Touch::BaselineTracker tracker;
+    PrimeBaseline(tracker);
+
+    Solvers::Touch::TrackAnchor anchor{static_cast<float>(kPeakCol) + 0.5f,
+                                       static_cast<float>(kPeakRow) + 0.5f};
+    int16_t last = 0;
+    for (int i = 0; i < 12; ++i) {
+        Solvers::HeatmapFrame frame;
+        frame.masterWasRead = true;
+        frame.masterSuffixValid = true;
+        FillRaw(frame, kRawBaseline);
+        frame.heatmapMatrix[kPeakRow][kPeakCol] = static_cast<int16_t>(kWeak);
+        frame.touch.runtime.prevTrackAnchors = {&anchor, 1};
+        tracker.Process(frame, true);
+        last = PeakValue(frame);
+    }
+    Require(last == 0, "an interior track must not lower the freeze threshold");
+}
+
 int main() {
     try {
+        TestSustainThresholdNeedsAnEdgeTrack();
+        TestSustainThresholdIgnoresInteriorTracks();
         TestInitFromDefaultBaseline();
         TestDisabledPassesThrough();
         TestInvalidMasterZeroOutput();
@@ -461,7 +543,7 @@ int main() {
         TestNoFingerUpdatesAllCells();
         TestNoFingerDeadbandSkipsUpdate();
         TestNoFingerNoiseTrackingStillOutputsZero();
-        TestNoFingerAbsorbsPeakSignal();
+        TestOwnSignalOverridesTheFirmwareFlag();
         TestFingerFreezePositivePeak();
         TestFingerFreezeMultiFrameStaysFrozen();
         TestFingerBackgroundAbsorbsNoise();
