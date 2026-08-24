@@ -14,3 +14,20 @@ out/
 .clangd
 docs/artifacts/
 scripts/__pycache__/
+# 编辑前自动生成的备份，随时间戳堆积，不属于仓库内容。
+*.bak
+
+Tools/EGoTouchSettings/packages/
+Tools/EGoTouchSettings/Generated Files/
+# Visual Studio creates a second project-named directory for ARM64 intermediates.
+Tools/EGoTouchSettings/EGoTouchSettings/
+Tools/EGoTouchSettings/ARM64/
+Tools/EGoTouchSettings/obj/
+
+# EGoTouchApp writes its ImGui dock layout next to the working directory it was
+# launched from (scripts/ when started via dev-cycle.ps1).
+imgui.ini
+
+# TSALib.log is dropped in the working directory by the vendor oracle when it is
+# run for a comparison, not by anything we build.
+TSALib.log

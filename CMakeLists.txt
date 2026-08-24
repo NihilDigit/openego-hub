@@ -73,6 +73,31 @@ if (WIN32 AND CMAKE_EXPORT_COMPILE_COMMANDS)
     endif()
 endif()
 
+# --- Target architecture gate ---
+# This project ships ARM64-native binaries only (no WOW64). The arm64-* presets select
+# cl.exe and rely on the surrounding environment (vcvarsarm64.bat) to supply an ARM64
+# toolchain, which CMake cannot verify on its own — "architecture": {"strategy":
+# "external"} explicitly opts out of that check. Building them from an x64 developer
+# prompt would otherwise emit x64 binaries under an arm64-named build directory and only
+# fail at install time on the device. Fail here instead.
+option(EGO_REQUIRE_ARM64 "Fail configuration unless the compiler targets ARM64" ON)
+if (EGO_REQUIRE_ARM64 AND WIN32)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_TARGET)
+        set(_ego_target "${CMAKE_CXX_COMPILER_TARGET}")
+    else()
+        set(_ego_target "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}")
+    endif()
+    if (NOT _ego_target MATCHES "^([Aa][Rr][Mm]64|aarch64)")
+        message(FATAL_ERROR
+            "Compiler targets '${_ego_target}', not ARM64.\n"
+            "Run the build from an ARM64 developer environment, e.g.\n"
+            "  \"%ProgramFiles(x86)%\\Microsoft Visual Studio\\2022\\BuildTools"
+            "\\VC\\Auxiliary\\Build\\vcvarsarm64.bat\"\n"
+            "then re-run cmake --preset. Pass -DEGO_REQUIRE_ARM64=OFF to override.")
+    endif()
+    unset(_ego_target)
+endif()
+
 set(CMAKE_CTEST_ARGUMENTS "--verbose" CACHE STRING "Arguments passed to ctest by generated test targets")
 include(CTest)
 enable_testing()
@@ -84,6 +109,16 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # Suppress MSVC CRT deprecation warnings (e.g. localtime -> localtime_s)
 if (WIN32)
     add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    if(MSVC)
+        # Sources are UTF-8 and carry Chinese comments/literals. Without /utf-8 cl.exe
+        # decodes them with the system ANSI code page (936 on zh-CN), which corrupts
+        # string literals into "C2001: newline in constant". Clang defaults to UTF-8,
+        # which is why this only surfaces on MSVC.
+        add_compile_options(/utf-8)
+        # try/catch is used across the service entry and the test binaries; without /EHsc
+        # MSVC warns C4530 and skips unwind semantics, so destructors may not run.
+        add_compile_options(/EHsc)
+    endif()
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         add_compile_options(/Zc:preprocessor)
     endif()
@@ -668,21 +703,10 @@ if (EGO_BUILD_TESTS)
             TIMEOUT 30
             WORKING_DIRECTORY "$<TARGET_FILE_DIR:EGoTouchApp_ServiceProxyCatalogSchemaTest>")
 
-        add_test(NAME PackagingConfigLayoutTest
-            COMMAND ${CMAKE_COMMAND}
-                "-DSERVICE_EXE=$<TARGET_FILE:EGoTouchService>"
-                "-DAPP_EXE=$<TARGET_FILE:EGoTouchApp>"
-                "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-                "-DINSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/test-workdirs/PackagingConfigLayoutTest/install"
-                "-DSOURCE_DEFAULT_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/config/default.yaml"
-                "-DWIX_SETUP=${CMAKE_CURRENT_SOURCE_DIR}/scripts/EGoTouchSetup.wxs"
-                "-DWIX_TEST_SETUP=${CMAKE_CURRENT_SOURCE_DIR}/scripts/EGoTouchTestSetup.wxs"
-                "-DWIX_SOURCE_BASE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-                "-DWIX_BUILD_OUTPUT_DIR=$<TARGET_FILE_DIR:EGoTouchService>"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyConfigLayout.cmake")
-        set_tests_properties(PackagingConfigLayoutTest PROPERTIES
-            LABELS "packaging;config;device-free"
-            TIMEOUT 10)
+        # PackagingConfigLayoutTest was removed together with cmake/VerifyConfigLayout.cmake
+        # in 6e869ed: Config v3 (docs/task.md, gate "Packaging") stopped shipping any
+        # config file, so there is no layout left to verify. The add_test() call outlived
+        # the script it invoked and failed with "Not a file" on every run.
     endif()
 
     add_test(NAME ServiceEntryArgumentRoutingTest COMMAND ServiceEntryArgumentRoutingTest)
@@ -697,5 +721,3 @@ if (EGO_BUILD_TESTS)
         TIMEOUT 10
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:ServiceHostLifecycleFakeIntegrationTest>")
 endif()
-
-

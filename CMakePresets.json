@@ -9,6 +9,7 @@
     {
       "name": "arm64-base",
       "hidden": true,
+      "description": "cl.exe is resolved from PATH, so run vcvarsarm64.bat (or use scripts/dev-cycle.ps1) first. CMakeLists enforces an ARM64 target via EGO_REQUIRE_ARM64. Do not add CMAKE_*_COMPILER_TARGET here: it is clang-only and makes CMake emit GNU-style link flags that cl.exe cannot parse.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "architecture": {
@@ -20,22 +21,14 @@
           "type": "BOOL",
           "value": "ON"
         },
-        "CMAKE_C_COMPILER": {
-          "type": "FILEPATH",
-          "value": "C:/Program Files/LLVM/bin/clang.exe"
-        },
-        "CMAKE_CXX_COMPILER": {
-          "type": "FILEPATH",
-          "value": "C:/Program Files/LLVM/bin/clang++.exe"
-        },
-        "CMAKE_C_COMPILER_TARGET": "arm64-pc-windows-msvc",
-        "CMAKE_CXX_COMPILER_TARGET": "arm64-windows-msvc",
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
       },
       "vendor": {
         "microsoft.com/VisualStudioSettings/CMake/1.0": {
           "hostOS": "Windows",
-          "intelliSenseMode": "windows-clang-arm64"
+          "intelliSenseMode": "windows-msvc-arm64"
         }
       }
     },

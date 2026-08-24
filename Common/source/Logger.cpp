@@ -10,10 +10,20 @@
 #include <ctime>
 #include <cctype>
 #include <cstdio>
+#if defined(_WIN32)
+#include <share.h>
+#endif
 
 namespace MiniFmt {
 
-static void format_single_arg(std::string& out, const std::string& spec, const LogArg& arg) {
+static void format_single_arg(std::string& out, const std::string& rawSpec, const LogArg& arg) {
+    // std::format 风格的说明符以冒号起头：{:06X} 交到这里的 spec 是 ":06X"。此前没有跳过冒号，
+    // 于是宽度和进制整段被忽略，所有 {:...} 都按十进制打印——而格式串里的 "0x" 是手写前缀，
+    // 于是 id=0x{:06X} 打出来是 "id=0x283"，那个 283 其实是十进制（即 0x11B）。这种日志比没有
+    // 更糟：它看着像十六进制，会把人引到错误结论上。
+    const std::string spec =
+        (!rawSpec.empty() && rawSpec[0] == ':') ? rawSpec.substr(1) : rawSpec;
+
     char buf[256];
     buf[0] = '\0';
 
@@ -221,8 +231,12 @@ void Logger::Init(const std::string& loggerName, const std::filesystem::path& lo
 
 #if defined(_WIN32)
         std::wstring wpath = g_logPath.wstring();
-        errno_t err = _wfopen_s(&g_fileStream, wpath.c_str(), truncate ? L"wb" : L"ab");
-        g_initialized = (err == 0 && g_fileStream != nullptr);
+        // _wfopen_s opens with exclusive sharing, which locks the log file for the whole
+        // service lifetime — the diagnostics app, a support bundle, or a plain `type` all
+        // fail with a sharing violation while the service runs. _wfsopen with _SH_DENYWR
+        // still keeps other writers out, but lets readers in.
+        g_fileStream = _wfsopen(wpath.c_str(), truncate ? L"wb" : L"ab", _SH_DENYWR);
+        g_initialized = (g_fileStream != nullptr);
 #else
         g_fileStream = fopen(g_logPath.string().c_str(), truncate ? "wb" : "ab");
         g_initialized = (g_fileStream != nullptr);

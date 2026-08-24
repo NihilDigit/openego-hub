@@ -99,10 +99,24 @@ void TestExtraSinkReceivesFormattedMacroOutput() {
     std::filesystem::remove_all(logDir);
 }
 
+// 说明符曾被整段忽略：{:06X} 的 spec 是 ":06X"，解析时没跳过冒号，于是宽度和进制都丢了，
+// 全部按十进制打印。而调用点普遍写成 "0x{:06X}"，前缀是手写的，结果就是一个看着像十六进制的
+// 十进制数——日志因此会把人引向错误结论，比不打还糟。
+void TestFormatSpecsAreHonoured() {
+    Require(MiniFmt::format("{:06X}", 0x11Bu) == "00011B", "{:06X} should be zero-padded hex");
+    Require(MiniFmt::format("{:02X}", 1u) == "01", "{:02X} should be zero-padded hex");
+    Require(MiniFmt::format("{:x}", 0x2Fu) == "2f", "{:x} should be lowercase hex");
+    Require(MiniFmt::format("{}", 283u) == "283", "plain {} stays decimal");
+    // 十六进制与十进制在这个值上不同，才验得出进制真的生效了。
+    Require(MiniFmt::format("{:X}", 283u) != MiniFmt::format("{}", 283u),
+            "hex and decimal must differ for a value where they actually differ");
+}
+
 } // namespace
 
 int main() {
     try {
+        TestFormatSpecsAreHonoured();
         TestInvalidDirectoryDoesNotInitialize();
         TestInitializeRepeatAndShutdown();
         TestExtraSinkReceivesFormattedMacroOutput();
