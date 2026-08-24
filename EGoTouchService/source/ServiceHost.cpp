@@ -9,6 +9,10 @@
 #include "SolverBuildConfig.h"
 #include "SolverTypes.h"
 #include "ServiceConfigCore.h"
+#include "PenSettingsStore.h"
+#include "TouchProviderCoordinator.h"
+#include "PenControlChannel.h"
+#include "PenStatusChannel.h"
 
 #if EGOTOUCH_SERVICE_ENABLE_IPC
 #include "GuiLogSink.h"
@@ -32,18 +36,54 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <cwchar>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace Service {
 
 struct ServiceHost::Impl {
     ServiceLifecycleStateMachine m_lifecycle;
+    // Read-only pen state broadcast for the tray companion. Present in every build:
+    // unlike the IPC control surface, a shipping service still has to publish this.
+    PenStatus::Writer m_penStatusWriter;
+    // 反方向的小通道：托盘菜单选了哪个侧键模式。服务创建，托盘只写。
+    PenControl::Host m_penControlHost;
+    std::thread m_penControlThread;
+    std::atomic<bool> m_penControlStop{false};
+    // 托盘要显示当前哪一项生效，而 PublishPenStatus 跑在 DeviceRuntime 的回调线程上，
+    // 不能去读会被配置路径改写的 m_configState。应用路径写这份原子镜像，发布路径只读它。
+    std::atomic<PenButtonMode> m_effectivePenButtonMode{PenButtonMode::WindowsInk};
+    std::atomic<PenStatus::TouchProviderState> m_touchProvider{
+        PenStatus::TouchProviderState::Unknown};
+    std::atomic<TouchProviderError> m_touchProviderError{TouchProviderError::None};
+    std::unique_ptr<TouchProviderCoordinator> m_touchProviderCoordinator;
+    std::atomic<bool> m_inputSuppressed{false};
+    std::atomic<uint32_t> m_notificationSequence{0};
+    std::atomic<PenStatus::NotificationKind> m_notificationKind{
+        PenStatus::NotificationKind::None};
+    // 键盘「分离后无线连接」的镜像。真值在 MCU 侧，服务只缓存最近一次应答：写入方是
+    // PenEventBridge 的读线程，读取方是 DeviceRuntime 回调线程上的 PublishPenStatus。
+    // 未收到过应答时 known 为 false，此时状态通道不置 has 位，托盘据此把该项显示为不可用。
+    std::atomic<bool> m_kbdDetachSupportKnown{false};
+    std::atomic<bool> m_kbdDetachSupport{false};
+    // 键盘状态镜像。含字符串，用不了原子，改由互斥保护：写入方是 MCU 读线程，
+    // 读取方是 DeviceRuntime 回调线程上的 PublishPenStatus。
+    std::mutex m_kbdStateMutex;
+    Himax::Pen::PenEventBridge::KbdState m_kbdState;
+    std::chrono::steady_clock::time_point m_lastKbdConnectionNotification{};
+    std::chrono::steady_clock::time_point m_inputSuppressionStarted{};
+    std::chrono::steady_clock::time_point m_inputSuppressionDeadline{};
+    // 侧键模式有 IPC 配置重载和托盘控制通道两个写入方，串行化它们对 m_configState 的读改写。
+    std::mutex m_penButtonApplyMutex;
     std::unique_ptr<Host::SystemStateMonitor> m_sysMonitor;
     // Serializes startup-time IPC access with Pen object publication.
     std::mutex m_penSubsystemMutex;
@@ -65,6 +105,9 @@ struct ServiceHost::Impl {
     uint16_t m_debugSchemaVersion = 0;
     uint32_t m_debugSchemaHash = 0;
     std::mutex m_debugFrameMutex;
+    // 最后一次唤醒类系统事件,用于运行时起来之后补投。见 ReplayLastWakeEvent。
+    std::mutex m_lastWakeEventMutex;
+    std::optional<Host::SystemStateEvent> m_lastWakeEvent;
     Solvers::HeatmapFrame m_latestDebugFrame;
     Solvers::HeatmapFrame m_latestMasterTouchFrame;
     Ipc::SharedFrameData m_latestMasterSharedFrame{};
@@ -81,6 +124,103 @@ static const std::wstring kDevicePathSlave     = L"\\\\.\\Global\\SPBTESTTOOL_SL
 static const std::wstring kDevicePathInterrupt = L"\\\\.\\Global\\SPBTESTTOOL_MASTER";
 
 namespace {
+
+constexpr wchar_t kHuaweiThpServiceName[] = L"HuaweiThpService";
+constexpr DWORD kProviderServiceWaitMs = 15000;
+constexpr auto kInputSuppressionTimeout = std::chrono::milliseconds(1000);
+
+bool WaitForServiceState(SC_HANDLE service, DWORD desiredState, DWORD timeoutMs) {
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    SERVICE_STATUS_PROCESS status{};
+    DWORD needed = 0;
+    do {
+        if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                  reinterpret_cast<BYTE*>(&status), sizeof(status), &needed)) {
+            return false;
+        }
+        if (status.dwCurrentState == desiredState) return true;
+        if (status.dwCurrentState != SERVICE_START_PENDING &&
+            status.dwCurrentState != SERVICE_STOP_PENDING) {
+            return false;
+        }
+        Sleep(100);
+    } while (GetTickCount64() < deadline);
+    SetLastError(ERROR_TIMEOUT);
+    return false;
+}
+
+bool WithHuaweiService(DWORD access, const std::function<bool(SC_HANDLE)>& operation) {
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!manager) return false;
+    SC_HANDLE service = OpenServiceW(manager, kHuaweiThpServiceName, access);
+    if (!service) {
+        const DWORD error = GetLastError();
+        CloseServiceHandle(manager);
+        SetLastError(error);
+        return false;
+    }
+    const bool result = operation(service);
+    const DWORD error = result ? ERROR_SUCCESS : GetLastError();
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    SetLastError(error);
+    return result;
+}
+
+bool StopHuaweiThpService() {
+    return WithHuaweiService(SERVICE_STOP | SERVICE_QUERY_STATUS,
+        [](SC_HANDLE service) {
+            SERVICE_STATUS_PROCESS status{};
+            DWORD needed = 0;
+            if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                      reinterpret_cast<BYTE*>(&status), sizeof(status), &needed)) {
+                return false;
+            }
+            if (status.dwCurrentState == SERVICE_STOPPED) return true;
+            if (status.dwCurrentState != SERVICE_STOP_PENDING) {
+                SERVICE_STATUS legacy{};
+                if (!ControlService(service, SERVICE_CONTROL_STOP, &legacy) &&
+                    GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
+                    return false;
+                }
+            }
+            return WaitForServiceState(service, SERVICE_STOPPED, kProviderServiceWaitMs);
+        });
+}
+
+bool SetHuaweiThpDisabled() {
+    return WithHuaweiService(SERVICE_CHANGE_CONFIG,
+        [](SC_HANDLE service) {
+            return ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_DISABLED,
+                                        SERVICE_NO_CHANGE, nullptr, nullptr, nullptr,
+                                        nullptr, nullptr, nullptr, nullptr) != FALSE;
+        });
+}
+
+bool RestoreHuaweiThpService() {
+    return WithHuaweiService(SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS,
+        [](SC_HANDLE service) {
+            if (!ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_AUTO_START,
+                                      SERVICE_NO_CHANGE, nullptr, nullptr, nullptr,
+                                      nullptr, nullptr, nullptr, nullptr)) {
+                return false;
+            }
+
+            SERVICE_STATUS_PROCESS status{};
+            DWORD needed = 0;
+            if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                      reinterpret_cast<BYTE*>(&status), sizeof(status), &needed)) {
+                return false;
+            }
+            if (status.dwCurrentState == SERVICE_RUNNING) return true;
+            if (status.dwCurrentState != SERVICE_START_PENDING &&
+                !StartServiceW(service, 0, nullptr) &&
+                GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+                return false;
+            }
+            return WaitForServiceState(service, SERVICE_RUNNING, kProviderServiceWaitMs);
+        });
+}
 
 enum class DebugDerivedSourceIndex : int16_t {
     MasterWasRead = 0,
@@ -366,7 +506,9 @@ ServiceHost::~ServiceHost() {
 }
 
 bool ServiceHost::InitializeConfigStores() {
-#if EGOTOUCH_SERVICE_ENABLE_IPC
+    // Runs in every build. Config v3 defaults come from code, not from a file or from
+    // IPC, so gating this on EGOTOUCH_SERVICE_ENABLE_IPC used to leave Release running
+    // the pipelines' in-class initializers instead of the declared defaults.
     const bool ok = m_configRuntime.Initialize(
         [this](const Config::ConfigStore& store) { return ValidateStartupConfig(store); });
     if (!ok) {
@@ -374,9 +516,6 @@ bool ServiceHost::InitializeConfigStores() {
     }
     m_configState = m_configRuntime.ServiceState();
     m_configRuntime.WriteServiceState(m_configState);
-#else
-    m_configState = ServiceConfigState{};
-#endif
     return true;
 }
 // ── 模式解析 ──────────────────────────────────────────
@@ -389,7 +528,8 @@ void ServiceHost::ApplyServiceConfigToRuntime(const ServiceConfigState& config) 
         config.penButtonRouteExplicit);
 }
 
-#if EGOTOUCH_SERVICE_ENABLE_IPC
+// Validates the startup store in every build: it guards the same defaults that
+// InitializeConfigStores() now injects unconditionally.
 bool ServiceHost::ValidateStartupConfig(const Config::ConfigStore& store) const {
     ServiceConfigState schemaState{};
     Config::ConfigBinder serviceBinder;
@@ -412,6 +552,7 @@ bool ServiceHost::ValidateStartupConfig(const Config::ConfigStore& store) const 
     return true;
 }
 
+#if EGOTOUCH_SERVICE_ENABLE_IPC
 ReloadServiceConfigResult ServiceHost::HandleReloadServiceConfig(
     const ServiceConfigState& reloadedConfig) {
     const bool modeChanged = (m_configState.mode != reloadedConfig.mode);
@@ -481,7 +622,16 @@ ReloadServiceConfigResult ServiceHost::HandleReloadServiceConfig(
     if (modeChanged) {
         activeConfig.mode = m_configState.mode;
     }
-    m_configState = activeConfig;
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_penButtonApplyMutex);
+        m_configState = activeConfig;
+        // 托盘读的是这份镜像，IPC 改了模式也要同步过去。
+        m_impl->m_effectivePenButtonMode.store(activeConfig.penButtonMode,
+                                               std::memory_order_release);
+    }
+    if (penButtonModeChanged) {
+        RepublishPenStatus();
+    }
     return result;
 }
 #endif
@@ -490,7 +640,6 @@ bool ServiceHost::StartRuntimeAndPipeline() {
     m_deviceRuntime = std::make_unique<DeviceRuntime>(
         kDevicePathMaster, kDevicePathSlave, kDevicePathInterrupt);
 
-#if EGOTOUCH_SERVICE_ENABLE_IPC
     Config::ConfigStore startupConfig = m_configRuntime.SnapshotStore();
     // Phase 2 runs after DeviceRuntime is constructed: validate pipeline keys against
     // the runtime-owned binder before applying the config store.
@@ -500,21 +649,95 @@ bool ServiceHost::StartRuntimeAndPipeline() {
         return false;
     }
     m_deviceRuntime->ApplyConfigStore(startupConfig);
-#endif
+
+    // 配置注入已完成，这里再让持久化的侧键模式覆盖它：托盘上一次选的那一项优先于配置默认值。
+    // 文件缺失或 token 非法时 LoadPenButtonMode 返回 nullopt 并已记 WARN，走配置里的值。
+    if (const auto persisted = PenSettingsStore::LoadPenButtonMode()) {
+        m_configState.penButtonMode = *persisted;
+        m_configRuntime.WriteServiceState(m_configState);
+        LOG_INFO("Service", __func__, "Boot",
+                 "Restored persisted pen button mode: {}.", ToString(*persisted));
+    }
+    m_impl->m_effectivePenButtonMode.store(m_configState.penButtonMode,
+                                           std::memory_order_release);
 
     ApplyServiceConfigToRuntime(m_configState);
 #if EGOTOUCH_SERVICE_ENABLE_IPC
     BuildDebugSchema();
 #endif
 
-    if (!m_deviceRuntime->Start()) {
-        LOG_ERROR("Service", __func__, "Boot", "DeviceRuntime::Start() failed.");
-        m_deviceRuntime->Stop();
+    if (m_impl->m_penStatusWriter.Open()) {
+        m_deviceRuntime->SetPenStateChangedCallback(
+            [this](const RuntimePenState& state) { PublishPenStatus(state); });
+        m_deviceRuntime->SetPenDoubleClickCallback([this] {
+            return m_impl->m_penStatusWriter.SignalDoubleClick();
+        });
+        LOG_INFO("Service", __func__, "Boot", "Pen status channel published.");
+        if (!m_impl->m_penStatusWriter.HasEventChannel()) {
+            // 共享内存可用而事件没建成时，面板靠轮询照常显示，但双击转发会无声失效。
+            // 不打错误码：事件创建失败发生在 Open() 内部，等日志写完 last error 早被覆盖了。
+            LOG_WARN("Service", __func__, "Boot",
+                     "Pen status events unavailable; side-key double click will "
+                     "not reach the tray.");
+        }
+    } else {
+        // Non-fatal: losing the tray display must never keep touch from starting.
+        // 同上，Open() 有多条失败路径，带不出可信的错误码，只陈述失败事实。
+        LOG_WARN("Service", __func__, "Boot",
+                 "Pen status channel unavailable; tray display disabled.");
+    }
+
+    TouchProviderOperations providerOps{};
+    providerOps.stopHuawei = [] {
+        const bool ok = StopHuaweiThpService();
+        if (!ok) {
+            LOG_ERROR("Service", "StopHuawei", "Provider",
+                      "Failed to stop HuaweiThpService (err={}).", GetLastError());
+        }
+        return ok;
+    };
+    providerOps.disableHuawei = [] {
+        const bool ok = SetHuaweiThpDisabled();
+        if (!ok) {
+            LOG_ERROR("Service", "DisableHuawei", "Provider",
+                      "Failed to disable HuaweiThpService (err={}).", GetLastError());
+        }
+        return ok;
+    };
+    providerOps.startEGo = [this] { return StartEGoTouchProvider(); };
+    providerOps.stopEGo = [this] { return StopEGoTouchProvider(); };
+    providerOps.restoreHuawei = [] {
+        const bool ok = RestoreHuaweiThpService();
+        if (!ok) {
+            LOG_ERROR("Service", "RestoreHuawei", "Provider",
+                      "Failed to restore HuaweiThpService (err={}).", GetLastError());
+        }
+        return ok;
+    };
+    m_impl->m_touchProviderCoordinator = std::make_unique<TouchProviderCoordinator>(
+        std::move(providerOps),
+        [this](PenStatus::TouchProviderState state, TouchProviderError error) {
+            PublishTouchProviderState(state, static_cast<uint8_t>(error));
+        },
+        std::chrono::seconds(5));
+
+    // 服务本身是常驻监督器，启动时先确保 Huawei 提供触控。托盘登录后取得租约，才切换到
+    // EGo runtime；这样登录界面和托盘未运行的场景始终有 OEM 回退。
+    const bool huaweiReady = m_impl->m_touchProviderCoordinator->Release();
+    if (!huaweiReady &&
+        m_impl->m_touchProviderCoordinator->State() == PenStatus::TouchProviderState::Error) {
+        LOG_ERROR("Service", __func__, "Boot",
+                  "Neither HuaweiTHP nor EGoTouch could be made active.");
+        m_impl->m_touchProviderCoordinator.reset();
         m_deviceRuntime.reset();
         return false;
     }
 
-    LOG_INFO("Service", __func__, "Boot", "DeviceRuntime started (auto mode).");
+    // 控制线程在 runtime 对象和 provider coordinator 都发布之后才启动。
+    StartPenControlChannel();
+
+    LOG_INFO("Service", __func__, "Boot",
+             "Touch provider supervisor ready; awaiting tray lease.");
     return true;
 }
 
@@ -523,6 +746,13 @@ bool ServiceHost::StartSystemStateMonitor() {
     const bool monitorOk = m_impl->m_sysMonitor->Start(
         [this](const Host::SystemStateEvent& ev) {
             LOG_INFO("Service", __func__, "Event", "System event: type={}", Host::ToString(ev.type));
+            // Windows 在注册电源通知的那一刻就把当前的显示/盖子状态送过来一次,而运行时
+            // 那时通常还没准备好,会把它丢掉;此后显示与盖子不再变化,不会有第二次,运行时
+            // 于是永远进不了 streaming。记下最后一次唤醒状态,运行时起来之后补投一次。
+            if (Host::IsPenStatusWakeEvent(ev.type)) {
+                std::lock_guard<std::mutex> lk(m_impl->m_lastWakeEventMutex);
+                m_impl->m_lastWakeEvent = ev;
+            }
             if (m_deviceRuntime) {
                 m_deviceRuntime->IngestPolicyEvent(TranslateSystemStateEvent(ev));
             }
@@ -621,6 +851,57 @@ bool ServiceHost::StartPenSubsystem() {
                 if (m_deviceRuntime) {
                     m_deviceRuntime->IngestPenEvent(ev);
                 }
+                PenStatus::NotificationKind notification = PenStatus::NotificationKind::None;
+                if (ev.code == Himax::Pen::PenUsbEventCode::PenTopBatteryWindow ||
+                    ev.code == Himax::Pen::PenUsbEventCode::PenBatteryAfterConn) {
+                    notification = PenStatus::NotificationKind::PenConnected;
+                } else if (ev.code == Himax::Pen::PenUsbEventCode::PenDeviationReminder) {
+                    notification = PenStatus::NotificationKind::PenDeviation;
+                }
+                if (notification != PenStatus::NotificationKind::None) {
+                    m_impl->m_notificationKind.store(notification, std::memory_order_release);
+                    m_impl->m_notificationSequence.fetch_add(1, std::memory_order_acq_rel);
+                    RepublishPenStatus();
+                }
+            });
+        // 回调跑在 PenEventBridge 的 MCU 读线程上，不能久阻。RepublishPenStatus 只读一份
+        // 快照再写共享内存，不碰 m_penSubsystemMutex，所以与本函数末尾发布桥对象的那段
+        // 临界区不构成互锁。
+        eventBridge->SetKbdStateCallback(
+            [this](const Himax::Pen::PenEventBridge::KbdState& kbd) {
+                bool notifyConnected = false;
+                {
+                    std::lock_guard<std::mutex> lk(m_impl->m_kbdStateMutex);
+                    notifyConnected = Himax::Pen::PenEventBridge::IsKbdConnectionEdge(
+                        m_impl->m_kbdState, kbd);
+                    if (notifyConnected) {
+                        // 0x12（连接）与 0x31（吸附）通常紧挨着到达，都是同一次物理动作。
+                        // 在 Producer 侧合并，所有 Consumer 看到的 notificationSequence 都一致。
+                        constexpr auto kDuplicateWindow = std::chrono::milliseconds(1500);
+                        const auto now = std::chrono::steady_clock::now();
+                        if (m_impl->m_lastKbdConnectionNotification !=
+                                std::chrono::steady_clock::time_point{} &&
+                            now - m_impl->m_lastKbdConnectionNotification < kDuplicateWindow) {
+                            notifyConnected = false;
+                        } else {
+                            m_impl->m_lastKbdConnectionNotification = now;
+                        }
+                    }
+                    m_impl->m_kbdState = kbd;
+                }
+                if (notifyConnected) {
+                    m_impl->m_notificationKind.store(
+                        PenStatus::NotificationKind::KeyboardConnected,
+                        std::memory_order_release);
+                    m_impl->m_notificationSequence.fetch_add(1, std::memory_order_acq_rel);
+                }
+                RepublishPenStatus();
+            });
+        eventBridge->SetKbdDetachSupportCallback(
+            [this](bool enabled) {
+                m_impl->m_kbdDetachSupport.store(enabled, std::memory_order_release);
+                m_impl->m_kbdDetachSupportKnown.store(true, std::memory_order_release);
+                RepublishPenStatus();
             });
         if (!eventBridge->Start()) {
             LOG_ERROR("Service", __func__, "MCU", "PenEventBridge failed to start.");
@@ -778,10 +1059,352 @@ void ServiceHost::StopSystemStateMonitor() {
     LOG_INFO("Service", __func__, "Monitor", "SystemStateMonitor stopped.");
 }
 
-void ServiceHost::StopRuntimeSubsystem() {
+void ServiceHost::PublishPenStatus(const RuntimePenState& state) {
+    PenStatus::State out{};
+    out.hasBatteryLevel = state.hasBatteryLevel;
+    out.batteryLevel = state.batteryLevel;
+    out.hasChargingState = state.hasChargingState;
+    out.charging = state.charging;
+    out.hasDeviceAttached = state.hasDeviceConnected;
+    out.deviceAttached = state.deviceConnected;
+    out.hasStylusLink = state.hasConnection;
+    out.stylusLinked = state.connected;
+    out.notificationSequence =
+        m_impl->m_notificationSequence.load(std::memory_order_acquire);
+    out.notificationKind = m_impl->m_notificationKind.load(std::memory_order_acquire);
+
+    // 通道里放产品名而不是内部代号：读它的是面板。CopyCString 会截断，而截断一个 UTF-8
+    // 多字节序列会得到无效字节、在渲染侧解码失败，所以最长的名字必须编译期就装得下。
+    static_assert(sizeof("HUAWEI M-Pencil（第一代）") <= PenStatus::kModelNameCapacity,
+                  "product display name must fit the channel's modelName field");
+    out.modelId = state.penModuleModelId;
+    const char* name = Himax::Pen::ToDisplayName(state.penModuleModel);
+    CopyCString(out.modelName, sizeof(out.modelName), name ? name : "");
+
+    // 笔身份三项：MCU 在一次连接内只答复一次，DeviceRuntime 已经缓存好，这里只是转发。
+    out.hasPenFirmware = state.hasFirmwareVersion;
+    CopyCString(out.penFirmware, sizeof(out.penFirmware), state.firmwareVersion);
+    out.hasPenHardware = state.hasHardwareVersion;
+    CopyCString(out.penHardware, sizeof(out.penHardware), state.hardwareVersion);
+    out.hasPenSerial = state.hasSerialNumber;
+    CopyCString(out.penSerial, sizeof(out.penSerial), state.serialNumber);
+
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_kbdStateMutex);
+        const auto& kbd = m_impl->m_kbdState;
+        out.hasKbdPresent = kbd.hasPresent;
+        out.kbdPresent = kbd.present;
+        out.hasKbdDetached = kbd.hasDetached;
+        out.kbdDetached = kbd.detached;
+        out.hasKbdBattery = kbd.hasBattery;
+        out.kbdBatteryLevel = kbd.battery;
+        out.hasKbdCharging = kbd.hasCharging;
+        out.kbdCharging = kbd.charging;
+        CopyCString(out.kbdModelName, sizeof(out.kbdModelName), kbd.modelName);
+        CopyCString(out.kbdFirmware, sizeof(out.kbdFirmware), kbd.firmware);
+    }
+
+    // 托盘菜单靠这个值决定哪一项打勾，而不是靠它自己提交过什么——提交可能被服务按枚举
+    // 校验拒绝，也可能被 IPC 配置改写。
+    out.hasPenButtonMode = true;
+    out.penButtonMode = static_cast<uint8_t>(
+        m_impl->m_effectivePenButtonMode.load(std::memory_order_acquire));
+    out.hasEraserActive = state.hasEraserToggle;
+    out.eraserActive = state.eraserToggle != 0;
+    out.hasTouchProvider = true;
+    out.touchProvider = m_impl->m_touchProvider.load(std::memory_order_acquire);
+    const auto providerError =
+        m_impl->m_touchProviderError.load(std::memory_order_acquire);
+    out.hasProviderError = providerError != TouchProviderError::None;
+    out.providerError = static_cast<uint8_t>(providerError);
+    out.hasInputSuppressed = true;
+    out.inputSuppressed =
+        m_impl->m_inputSuppressed.load(std::memory_order_acquire);
+    out.hasKbdDetachSupport =
+        m_impl->m_kbdDetachSupportKnown.load(std::memory_order_acquire);
+    out.kbdDetachSupport =
+        m_impl->m_kbdDetachSupport.load(std::memory_order_acquire);
+
+    m_impl->m_penStatusWriter.Publish(out);
+}
+
+void ServiceHost::PublishTouchProviderState(
+        PenStatus::TouchProviderState state,
+        uint8_t error) {
+    m_impl->m_touchProvider.store(state, std::memory_order_release);
+    m_impl->m_touchProviderError.store(
+        static_cast<TouchProviderError>(error), std::memory_order_release);
+    RepublishPenStatus();
+    LOG_INFO("Service", __func__, "Provider",
+             "Touch provider state={} error={}.",
+             static_cast<unsigned>(state), static_cast<unsigned>(error));
+}
+
+bool ServiceHost::StartEGoTouchProvider() {
+    if (!m_deviceRuntime) return false;
+    SetInputSuppressed(false);
+    switch (m_deviceRuntime->RequestStart()) {
+    case DeviceRuntime::StartRequestResult::Started:
+    case DeviceRuntime::StartRequestResult::AlreadyRunning:
+        ReplayLastWakeEvent();
+        return true;
+    default:
+        return false;
+    }
+}
+
+// 补投启动竞态里被运行时丢掉的那次唤醒事件。放在这里而不是 DeviceRuntime::Start 内部:
+// 那里补投会把「Start 发布 running 之后到达的 Shutdown」盖掉(SystemPowerPolicy 守着
+// 这条边界),而这里已经在 Start 之外,且服务本来就知道最后一次的显示/盖子状态。
+void ServiceHost::ReplayLastWakeEvent() {
+    if (!m_deviceRuntime) return;
+    std::optional<Host::SystemStateEvent> pending;
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_lastWakeEventMutex);
+        pending = m_impl->m_lastWakeEvent;
+    }
+    if (!pending) return;
+    LOG_INFO("Service", __func__, "Policy", "Replaying last wake event ({}) after runtime start.",
+             Host::ToString(pending->type));
+    m_deviceRuntime->IngestPolicyEvent(TranslateSystemStateEvent(*pending));
+}
+
+bool ServiceHost::StopEGoTouchProvider() {
+    if (!m_deviceRuntime) return true;
+    SetInputSuppressed(false);
+    (void)m_deviceRuntime->RequestStop();
+    return !m_deviceRuntime->IsRunning();
+}
+
+void ServiceHost::SetInputSuppressed(bool suppressed) {
+    if (m_deviceRuntime) {
+        m_deviceRuntime->SetInputSuppressed(suppressed);
+    }
+    const bool wasSuppressed =
+        m_impl->m_inputSuppressed.exchange(suppressed, std::memory_order_acq_rel);
+    const auto now = std::chrono::steady_clock::now();
+    if (suppressed) {
+        if (!wasSuppressed) m_impl->m_inputSuppressionStarted = now;
+        m_impl->m_inputSuppressionDeadline = now + kInputSuppressionTimeout;
+    } else {
+        m_impl->m_inputSuppressionDeadline = {};
+    }
+    if (suppressed != wasSuppressed) {
+        if (suppressed) {
+            LOG_INFO("Service", __func__, "PenControl",
+                     "OneNote input suppression enabled (watchdog={} ms).",
+                     kInputSuppressionTimeout.count());
+        } else {
+            const auto elapsed = m_impl->m_inputSuppressionStarted ==
+                                     std::chrono::steady_clock::time_point{}
+                ? std::chrono::milliseconds(0)
+                : std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - m_impl->m_inputSuppressionStarted);
+            LOG_INFO("Service", __func__, "PenControl",
+                     "OneNote input suppression released after {} ms.",
+                     elapsed.count());
+            m_impl->m_inputSuppressionStarted = {};
+        }
+    }
+    RepublishPenStatus();
+}
+
+void ServiceHost::TickInputSuppressionTimeout() {
+    if (!m_impl->m_inputSuppressed.load(std::memory_order_acquire)) return;
+    const auto deadline = m_impl->m_inputSuppressionDeadline;
+    if (deadline == std::chrono::steady_clock::time_point{} ||
+        std::chrono::steady_clock::now() < deadline) {
+        return;
+    }
+    LOG_WARN("Service", __func__, "PenControl",
+             "OneNote input suppression timed out; releasing the VHF gate.");
+    SetInputSuppressed(false);
+}
+
+void ServiceHost::RepublishPenStatus() {
     if (!m_deviceRuntime) {
         return;
     }
+    PublishPenStatus(m_deviceRuntime->GetPenStateSnapshot());
+}
+
+void ServiceHost::ApplyPenButtonMode(PenButtonMode mode, const char* source, bool persist) {
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_penButtonApplyMutex);
+        if (m_configState.penButtonMode == mode) {
+            LOG_INFO("Service", __func__, "PenControl",
+                     "{}: pen button mode already {}; nothing to apply.", source, ToString(mode));
+        } else {
+            m_configState.penButtonMode = mode;
+            // 经现行的策略应用路径生效，与 IPC 配置重载走的是同一个入口。
+            m_configRuntime.WriteServiceState(m_configState);
+            ApplyServiceConfigToRuntime(m_configState);
+            m_impl->m_effectivePenButtonMode.store(mode, std::memory_order_release);
+            LOG_INFO("Service", __func__, "PenControl",
+                     "{}: pen button mode applied: {}.", source, ToString(mode));
+        }
+
+        if (persist && !PenSettingsStore::SavePenButtonMode(mode)) {
+            // 落盘失败不回滚：本次会话里模式已经生效，重启后退回默认值好过让选择当场失效。
+            LOG_WARN("Service", __func__, "PenControl",
+                     "{}: pen button mode {} applied but not persisted.", source, ToString(mode));
+        }
+    }
+
+    RepublishPenStatus();
+}
+
+void ServiceHost::HandlePenControlCommand(const PenControl::Command& command) {
+    if (command.hasPenButtonMode) {
+        // 同会话的任意进程都写得进这个通道，所以提交的值一律按枚举映射校验，非法值不落地。
+        const auto mode = PenButtonModeFromNumeric(static_cast<int32_t>(command.penButtonMode));
+        if (!mode) {
+            LOG_WARN("Service", __func__, "PenControl",
+                     "Rejecting pen button mode {} from the control channel: not a known enum value.",
+                     static_cast<unsigned>(command.penButtonMode));
+        } else {
+            ApplyPenButtonMode(*mode, "PenControl", true);
+        }
+    }
+
+    if (command.hasProviderLease && m_impl->m_touchProviderCoordinator) {
+        switch (command.providerLease) {
+        case PenControl::ProviderLeaseCommand::AcquireOrRenew:
+            (void)m_impl->m_touchProviderCoordinator->AcquireOrRenew(
+                TouchProviderCoordinator::Clock::now());
+            break;
+        case PenControl::ProviderLeaseCommand::Release:
+            (void)m_impl->m_touchProviderCoordinator->Release();
+            break;
+        default:
+            LOG_WARN("Service", __func__, "PenControl",
+                     "Rejecting unknown provider lease command {}.",
+                     static_cast<unsigned>(command.providerLease));
+            break;
+        }
+    }
+
+    if (command.hasInputSuppression) {
+        switch (command.inputSuppression) {
+        case PenControl::InputSuppressionCommand::BeginOrRenew:
+            SetInputSuppressed(true);
+            break;
+        case PenControl::InputSuppressionCommand::End:
+            SetInputSuppressed(false);
+            break;
+        default:
+            LOG_WARN("Service", __func__, "PenControl",
+                     "Rejecting unknown input suppression command {}.",
+                     static_cast<unsigned>(command.inputSuppression));
+            break;
+        }
+    }
+
+    // 一条提交可以同时带多个字段，所以每个分支都只处理自己那一段、不提前 return——
+    // 早返回会让一个非法的键盘值顺带丢掉同一条提交里其余合法的命令。
+    if (command.hasKbdDetachSupport) {
+        const bool enable =
+            command.kbdDetachSupport == PenControl::KbdDetachSupportCommand::Enable;
+        const bool known =
+            enable || command.kbdDetachSupport == PenControl::KbdDetachSupportCommand::Disable;
+
+        if (!known) {
+            LOG_WARN("Service", __func__, "PenControl",
+                     "Rejecting unknown keyboard detach support command {}.",
+                     static_cast<unsigned>(command.kbdDetachSupport));
+        } else {
+            // 持锁调用：锁挡住的是 StopPenSubsystem 销毁桥对象，不能只取裸指针就放手。
+            std::lock_guard<std::mutex> penLock(m_impl->m_penSubsystemMutex);
+            auto* bridge = m_impl->m_penEventBridge.get();
+            if (!bridge) {
+                // touch_only 模式或笔子系统尚未起来：没有 MCU 可写，丢弃而不是崩。
+                LOG_WARN("Service", __func__, "PenControl",
+                         "Dropping keyboard detach support command: pen event bridge is not available.");
+            } else if (!bridge->SendKbdDetachSupportSet(enable)) {
+                LOG_WARN("Service", __func__, "PenControl",
+                         "Keyboard detach support set to {} failed on the MCU channel.",
+                         enable ? "enabled" : "disabled");
+            }
+            // 这里不补发 Get：SendKbdDetachSupportSet 内部已经重发一次，实际值经 detach
+            // support 回调回流到状态通道。本次调用返回时状态通道还是旧值，这不是漏更新。
+        }
+    }
+}
+
+namespace {
+// 等待切片。有提交事件时它只决定 Stop 的响应上限（事件一置位就返回）；事件缺失时它同时
+// 是轮询周期——读一次 32 字节的 seqlock 比这次等待本身还便宜，没必要为省这点开销把停机
+// 延迟拉长到秒级。
+constexpr DWORD kPenControlWaitSliceMs = 250;
+} // namespace
+
+void ServiceHost::PenControlThreadMain() {
+    while (!m_impl->m_penControlStop.load(std::memory_order_acquire)) {
+        (void)m_impl->m_penControlHost.WaitForSubmit(kPenControlWaitSliceMs);
+        if (m_impl->m_penControlStop.load(std::memory_order_acquire)) {
+            break;
+        }
+
+        PenControl::Command command{};
+        if (m_impl->m_penControlHost.PollCommand(command)) {
+            HandlePenControlCommand(command);
+        }
+        if (m_impl->m_touchProviderCoordinator) {
+            m_impl->m_touchProviderCoordinator->Tick(
+                TouchProviderCoordinator::Clock::now());
+        }
+        TickInputSuppressionTimeout();
+    }
+}
+
+void ServiceHost::StartPenControlChannel() {
+    if (!m_impl->m_penControlHost.Open()) {
+        // Non-fatal: 托盘改不了模式而已，配置和默认值仍然生效。
+        LOG_WARN("Service", __func__, "PenControl",
+                 "Pen control channel unavailable; tray cannot change the pen button mode.");
+        return;
+    }
+
+    if (!m_impl->m_penControlHost.HasEventChannel()) {
+        LOG_WARN("Service", __func__, "PenControl",
+                 "Pen control submit event unavailable; falling back to polling.");
+    }
+
+    m_impl->m_penControlStop.store(false, std::memory_order_release);
+    m_impl->m_penControlThread = std::thread([this] { PenControlThreadMain(); });
+    LOG_INFO("Service", __func__, "PenControl", "Pen control channel opened.");
+}
+
+void ServiceHost::StopPenControlChannel() {
+    // 先退线程再关 Host：线程正在 WaitForSubmit 里持有 Host 的事件句柄，反过来关会让它
+    // 等在一个已经关闭的句柄上。
+    m_impl->m_penControlStop.store(true, std::memory_order_release);
+    if (m_impl->m_penControlThread.joinable()) {
+        m_impl->m_penControlThread.join();
+    }
+    m_impl->m_penControlHost.Close();
+}
+
+void ServiceHost::StopRuntimeSubsystem() {
+    // 控制通道的线程会调进 DeviceRuntime，必须先于它退出，且与 StartRuntimeAndPipeline
+    // 里的创建位置对称。DeviceRuntime 不在时这里是空操作。
+    StopPenControlChannel();
+
+    // 先交还 Huawei 并等到 Running，再拆掉 runtime 对象。正常停止、卸载和服务关闭都走
+    // 这里；托盘被强杀则由上面的租约超时走同一个 coordinator 分支。
+    if (m_impl->m_touchProviderCoordinator) {
+        m_impl->m_touchProviderCoordinator->Shutdown();
+        m_impl->m_touchProviderCoordinator.reset();
+    }
+
+    if (!m_deviceRuntime) {
+        return;
+    }
+    // 拆 runtime 之前先摘掉两个回调，缩小晚到的笔事件打到即将析构的 Impl 上的窗口。
+    // 摘除本身不构成安全保证：setter 只换指针，不等待已经在飞的调用；真正让在飞调用结束的
+    // 是随后的 Stop() 与 reset()——它们 join 掉产生回调的线程。
+    m_deviceRuntime->SetPenStateChangedCallback(nullptr);
+    m_deviceRuntime->SetPenDoubleClickCallback(nullptr);
 
     m_deviceRuntime->Stop();
     m_deviceRuntime.reset();
@@ -796,8 +1419,8 @@ void ServiceHost::Stop() {
     });
 }
 
-#if EGOTOUCH_SERVICE_ENABLE_IPC
-// ── Pipeline 构建 ──────────────────────────────
+// 与 IPC 无关的字符串助手，因此不在下面那个守卫里：PublishPenStatus 在所有配置里都要编，
+// 而笔状态通道在 Release 中同样要工作。
 void ServiceHost::CopyCString(char* dst, size_t dstSize, std::string_view src) {
     if (!dst || dstSize == 0) return;
     std::memset(dst, 0, dstSize);
@@ -806,6 +1429,8 @@ void ServiceHost::CopyCString(char* dst, size_t dstSize, std::string_view src) {
     std::memcpy(dst, src.data(), n);
 }
 
+#if EGOTOUCH_SERVICE_ENABLE_IPC
+// ── Pipeline 构建 ──────────────────────────────
 uint32_t ServiceHost::HashDebugSchema(const std::vector<Ipc::DebugFieldSchemaWire>& defs) {
     uint32_t h = 2166136261u;
     auto hashBytes = [&h](const void* p, size_t n) {
@@ -914,7 +1539,6 @@ uint64_t ServiceHost::EncodeDebugValue(const Solvers::HeatmapFrame& frame,
             return 0;
         case Ipc::DebugStylusSourceIndex::TouchSuppressActive: return EncodeBool(s.interop.touchSuppressActive);
         case Ipc::DebugStylusSourceIndex::BtSeq: return EncodeU32(press.btSeq);
-        case Ipc::DebugStylusSourceIndex::PredictedAgeFrames: return EncodeU32(press.predictedAgeFrames);
         case Ipc::DebugStylusSourceIndex::PressureIsReal: return EncodeBool(press.pressureIsReal);
         default:
             valid = false;
@@ -1019,17 +1643,11 @@ void ServiceHost::BuildDebugSchema() {
         "stylus_bt_seq", "Stylus BT Seq", "", "Stylus",
         "DBG_StylusBtSeq", "DBG_StylusPointY");
 
-    add(14, Ipc::DebugValueType::UInt32, Ipc::DebugSourceKind::StylusField,
-        static_cast<int16_t>(Ipc::DebugStylusSourceIndex::PredictedAgeFrames), 5,
-        Ipc::DebugDvrTarget::SlaveSuffix, Ipc::DebugDvrPositionMode::AfterAnchor, -1,
-        "stylus_predicted_age", "Predicted Age", "frames", "Stylus",
-        "DBG_StylusPredictedAge", "DBG_StylusBtSeq");
-
     add(15, Ipc::DebugValueType::Bool, Ipc::DebugSourceKind::StylusField,
-        static_cast<int16_t>(Ipc::DebugStylusSourceIndex::PressureIsReal), 6,
+        static_cast<int16_t>(Ipc::DebugStylusSourceIndex::PressureIsReal), 5,
         Ipc::DebugDvrTarget::SlaveSuffix, Ipc::DebugDvrPositionMode::AfterAnchor, -1,
         "stylus_pressure_is_real", "Pressure Is Real", "", "Stylus",
-        "DBG_StylusPressureIsReal", "DBG_StylusPredictedAge");
+        "DBG_StylusPressureIsReal", "DBG_StylusBtSeq");
 
     add(6, Ipc::DebugValueType::UInt32, Ipc::DebugSourceKind::PenBridgeField,
         static_cast<int16_t>(Ipc::DebugPenSourceIndex::Freq1), 1,
@@ -1319,6 +1937,15 @@ void ServiceHost::HandleIpcGetPenIdentityStatus(Ipc::IpcResponse& resp) {
     if (state.hasPairStatus) {
         Ipc::SetPenIdentityPairStatus(wire, state.pairStatus);
     }
+    if (state.hasBatteryLevel) {
+        Ipc::SetPenIdentityBatteryLevel(wire, state.batteryLevel);
+    }
+    if (state.hasChargingState) {
+        Ipc::SetPenIdentityChargingState(wire, state.charging);
+    }
+    if (state.hasDeviceConnected) {
+        Ipc::SetPenIdentityDeviceConnected(wire, state.deviceConnected);
+    }
     wire.factoryStatusFlags = state.factoryStatusFlags;
     if (state.hasStylusId) {
         wire.flags |= Ipc::kPenIdentityHasStylusId;
@@ -1515,6 +2142,9 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(const Ipc::IpcRequest& req) {
         if (m_deviceRuntime) {
             switch (m_deviceRuntime->RequestStart()) {
             case DeviceRuntime::StartRequestResult::Started:
+                // 与 StartEGoTouchProvider 同理:运行时刚起来,把启动竞态里被丢掉的
+                // 那次显示/盖子状态补投一遍,否则它永远等不到第二次。
+                ReplayLastWakeEvent();
                 Ipc::MarkSuccess(resp);
                 LOG_INFO("Service", __func__, "IPC", "StartRuntime accepted: runtime started.");
                 break;

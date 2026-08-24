@@ -208,6 +208,7 @@ target_sources(Common PRIVATE
     "${COMMON_ROOT}/source/PenStatusChannel.cpp"
     "${COMMON_ROOT}/source/PenControlChannel.cpp"
     "${COMMON_ROOT}/source/PenInkShortcut.cpp"
+    "${COMMON_ROOT}/source/ManagedResource.cpp"
     "${COMMON_ROOT}/source/config/ConfigStore.cpp"
     "${COMMON_ROOT}/source/config/ConfigBinder.cpp"
     "${COMMON_ROOT}/source/config/ConfigSchemaSnapshot.cpp"
@@ -427,23 +428,17 @@ add_executable(EGoTouchService
     "${SERVICE_ROOT}/source/ServiceShell.cpp"
     "${SERVICE_ROOT}/source/ServiceHost.cpp"
     "${SERVICE_ROOT}/source/PenSettingsStore.cpp"
+    "${SERVICE_ROOT}/source/TouchProviderCoordinator.cpp"
 )
 target_include_directories(EGoTouchService PRIVATE
     "${SERVICE_ROOT}/include"
 )
-target_link_libraries(EGoTouchService PRIVATE EGoTouchServiceCore $<$<CONFIG:Debug>:IPCCore> Device Host Common advapi32 setupapi hid)
+target_link_libraries(EGoTouchService PRIVATE EGoTouchServiceCore $<$<CONFIG:Debug>:IPCCore> Device Host Common advapi32 setupapi hid shell32)
 target_compile_definitions(EGoTouchService PRIVATE
     EGOTOUCH_SERVICE_ENABLE_IPC=$<IF:$<CONFIG:Debug>,1,0>
 )
 
 ego_copy_config_to_output(EGoTouchService)
-
-# 面向用户的可执行文件名随产品走，CMake target 名保持不变：target 名只出现在构建脚本、
-# CI 与 add_dependencies 里，改它没有用户可见的收益，却会牵连每一处引用。
-set_target_properties(EGoTouchService PROPERTIES OUTPUT_NAME OpenEGoHubService)
-if(TARGET EGoTouchApp)
-    set_target_properties(EGoTouchApp PROPERTIES OUTPUT_NAME OpenEGoHubApp)
-endif()
 
 install(TARGETS EGoTouchService
     RUNTIME DESTINATION "."
@@ -467,6 +462,116 @@ if(MSVC)
     set_target_properties(EGoTouchService PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
 elseif(WIN32)
     target_link_options(EGoTouchService PRIVATE -municode)
+endif()
+
+# --- EGoTouchTray (pen status companion) ---
+# Built in every configuration, not gated on EGO_BUILD_TOOLS: unlike the diagnostics
+# workbench this ships alongside the service. It runs unelevated by design, so no
+# requireAdministrator manifest here.
+if(WIN32 AND MSVC)
+    find_program(EGO_MSBUILD_EXECUTABLE
+        NAMES MSBuild.exe
+        HINTS
+            "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin/arm64"
+            "C:/Program Files/Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin/arm64"
+            "$ENV{VSINSTALLDIR}/MSBuild/Current/Bin/arm64"
+            "$ENV{VSINSTALLDIR}/MSBuild/Current/Bin"
+        REQUIRED
+    )
+
+    set(EGO_SETTINGS_PROJECT
+        "${CMAKE_CURRENT_SOURCE_DIR}/Tools/EGoTouchSettings/EGoTouchSettings.vcxproj")
+    set(EGO_SETTINGS_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}")
+    set(EGO_SETTINGS_INTERMEDIATE
+        "${CMAKE_CURRENT_BINARY_DIR}/EGoTouchSettings-int/${CMAKE_BUILD_TYPE}")
+    set(EGO_SETTINGS_SOURCES
+        Tools/EGoTouchSettings/App.xaml
+        Tools/EGoTouchSettings/App.xaml.cpp
+        Tools/EGoTouchSettings/App.xaml.h
+        Tools/EGoTouchSettings/BatteryIndicator.xaml
+        Tools/EGoTouchSettings/BatteryIndicator.xaml.cpp
+        Tools/EGoTouchSettings/BatteryIndicator.xaml.h
+        Tools/EGoTouchSettings/MainWindow.xaml
+        Tools/EGoTouchSettings/MainWindow.xaml.cpp
+        Tools/EGoTouchSettings/MainWindow.xaml.h
+        Tools/EGoTouchSettings/NotificationWindow.xaml
+        Tools/EGoTouchSettings/NotificationWindow.xaml.cpp
+        Tools/EGoTouchSettings/NotificationWindow.xaml.h
+        Tools/EGoTouchSettings/Types.idl
+        Tools/EGoTouchSettings/app.manifest
+        Tools/EGoTouchSettings/pch.cpp
+        Tools/EGoTouchSettings/pch.h
+        # 资源那一路也要列进来。少了它们，换图标或改版本号不会触发重建，产物却看着是新的
+        # ——这类「构建成功但跑的是旧东西」在这个仓库已经咬过好几次。
+        Tools/EGoTouchSettings/App.rc
+        Tools/EGoTouchSettings/EGoTouchSettings.vcxproj
+        Tools/EGoTouchSettings/Assets/OpenEGoHub.ico
+        Common/include/AppIconResource.h
+        Common/include/AppVersion.h
+        Common/include/EGoTouchTrayIpc.h
+        Common/include/ManagedResource.h
+        Common/include/PenButtonConfig.h
+        Common/include/PenStatusChannel.h
+        Common/source/PenStatusChannel.cpp
+        Common/source/ManagedResource.cpp
+    )
+
+    add_custom_command(
+        OUTPUT "${EGO_SETTINGS_OUTPUT}/OpenEGoHubSettings.exe"
+        COMMAND "${EGO_MSBUILD_EXECUTABLE}" "${EGO_SETTINGS_PROJECT}"
+            /restore
+            /nologo
+            /verbosity:minimal
+            /p:Configuration=${CMAKE_BUILD_TYPE}
+            /p:Platform=ARM64
+            /p:OutDir=${EGO_SETTINGS_OUTPUT}/
+            /p:IntDir=${EGO_SETTINGS_INTERMEDIATE}/
+        DEPENDS ${EGO_SETTINGS_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/EGoTouchSettings"
+        COMMENT "Building EGoTouchSettings (WinUI 3, ARM64)"
+        VERBATIM
+        USES_TERMINAL
+    )
+    add_custom_target(EGoTouchSettings ALL
+        DEPENDS "${EGO_SETTINGS_OUTPUT}/OpenEGoHubSettings.exe")
+endif()
+
+add_executable(EGoTouchTray WIN32
+    Tools/EGoTouchTray/EGoTouchTray.cpp
+    Tools/EGoTouchTray/Tray.rc
+)
+target_include_directories(EGoTouchTray PRIVATE "${COMMON_ROOT}/include")
+target_link_libraries(EGoTouchTray PRIVATE Common advapi32 comctl32 d2d1 dwrite dwmapi
+    shell32 shcore user32 gdi32 uiautomationcore uxtheme)
+set_target_properties(EGoTouchTray PROPERTIES OUTPUT_NAME OpenEGoHubTray)
+if(TARGET EGoTouchSettings)
+    add_dependencies(EGoTouchTray EGoTouchSettings)
+endif()
+
+# 面向用户的可执行文件名随产品走，CMake target 名保持不变：target 名只出现在构建脚本、
+# CI 与 add_dependencies 里，改它没有用户可见的收益，却会牵连每一处引用。
+set_target_properties(EGoTouchService PROPERTIES OUTPUT_NAME OpenEGoHubService)
+if(TARGET EGoTouchApp)
+    set_target_properties(EGoTouchApp PROPERTIES OUTPUT_NAME OpenEGoHubApp)
+endif()
+
+install(TARGETS EGoTouchTray
+    RUNTIME DESTINATION "."
+    COMPONENT Runtime
+)
+if(TARGET EGoTouchSettings)
+    install(FILES
+        "${EGO_SETTINGS_OUTPUT}/OpenEGoHubSettings.exe"
+        "${EGO_SETTINGS_OUTPUT}/OpenEGoHubSettings.pri"
+        "${EGO_SETTINGS_OUTPUT}/EGoTouchSettings.winmd"
+        "${EGO_SETTINGS_OUTPUT}/App.xbf"
+        "${EGO_SETTINGS_OUTPUT}/BatteryIndicator.xbf"
+        "${EGO_SETTINGS_OUTPUT}/MainWindow.xbf"
+        "${EGO_SETTINGS_OUTPUT}/NotificationWindow.xbf"
+        "${EGO_SETTINGS_OUTPUT}/Microsoft.WindowsAppRuntime.Bootstrap.dll"
+        DESTINATION "."
+        COMPONENT Runtime
+    )
 endif()
 
 # --- DvrReplay (offline pipeline replay over recorded .dvrbin datasets) ---
@@ -518,6 +623,21 @@ if (EGO_BUILD_TESTS)
     ego_add_common_test(CommonConfigCatalogTest Common/tests/ConfigCatalogTest.cpp)
     ego_add_common_test(CommonPenStatusChannelTest Common/tests/PenStatusChannelTest.cpp)
     ego_add_common_test(CommonPenControlChannelTest Common/tests/PenControlChannelTest.cpp)
+
+    add_executable(TouchProviderCoordinatorTest
+        EGoTouchService/tests/unit/TouchProviderCoordinatorTest.cpp
+        EGoTouchService/source/TouchProviderCoordinator.cpp
+    )
+    target_include_directories(TouchProviderCoordinatorTest PRIVATE
+        "${SERVICE_ROOT}/include"
+        "${COMMON_ROOT}/include"
+    )
+    target_link_libraries(TouchProviderCoordinatorTest PRIVATE Common)
+    add_test(NAME TouchProviderCoordinatorTest COMMAND TouchProviderCoordinatorTest)
+    set_tests_properties(TouchProviderCoordinatorTest PROPERTIES
+        LABELS "service;unit;device-free"
+        TIMEOUT 10
+    )
 
     add_executable(HostSystemStateMonitorTest
         EGoTouchService/Host/tests/SystemStateMonitorNamedEventTest.cpp

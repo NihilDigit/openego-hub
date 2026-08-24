@@ -8,6 +8,7 @@
  */
 #include "himax/HimaxProtocol.h"
 #include "himax/HimaxByteUtils.h"
+#include "Logger.h"
 #include <cstddef>
 #include <cstdint>
 #include <array>
@@ -154,7 +155,16 @@ namespace Himax {
     HalDevice::~HalDevice() {
         if (IsValid()) {
             CancelIoEx(m_handle, nullptr);
-            (void)DrainInterruptOverlapped(INFINITE);
+            // 有界等待。这里必须等一下——m_ov 和它的事件马上要随对象一起消失，内核若还持有
+            // 它就会写进已释放的内存。但不能无限等：与 CancelPendingIo 里那条注释同理，
+            // 事件可能已被别的线程消费掉，等不到第二次。等不到就放弃，泄漏一次取消的完成
+            // 也好过让析构永久卡住。
+            constexpr DWORD kDrainTimeoutMs = 2000;
+            if (!DrainInterruptOverlapped(kDrainTimeoutMs)) {
+                LOG_WARN("HimaxChip", __func__, "Device",
+                         "Pending overlapped did not drain within {} ms; closing anyway.",
+                         kDrainTimeoutMs);
+            }
         }
         if (m_ov.hEvent) {
             CloseHandle(m_ov.hEvent);
@@ -472,10 +482,19 @@ namespace Himax {
     }
 
     void HalDevice::CancelPendingIo() {
-        if (m_handle != INVALID_HANDLE_VALUE) {
-            CancelIoEx(m_handle, NULL);
-            (void)DrainInterruptOverlapped(INFINITE);
-        }
+        if (m_handle == INVALID_HANDLE_VALUE) return;
+
+        // 只发取消，不等待。这里曾经跟着一句 DrainInterruptOverlapped(INFINITE)，那是个死锁：
+        //
+        // m_ov 与 m_ovPending 的所有者是发起读的那条 worker 线程，它在发起下一次读之前会
+        // ResetEvent(m_ov.hEvent)。取消跑在另一条线程上（停止请求来自控制通道线程），它对同一个
+        // 事件做无限等待，一旦错过 worker 那一次置位就再也等不到——CancelIoEx 已经取消完了，
+        // 不会再有新的完成来唤醒它。于是 Stop() 卡死在取消里，连 join() 都走不到，表现为
+        // 「切回华为触控」永远停在切换中。
+        //
+        // CancelIoEx 本身是线程安全的，取消该句柄上的全部挂起 I/O。worker 的读会以
+        // ERROR_OPERATION_ABORTED 返回，由它在自己的线程里收尾 m_ov——那本来就是它的东西。
+        CancelIoEx(m_handle, NULL);
     }
 
     ChipResult<> HimaxProtocol::burst_enable(HalDevice *dev, bool isEnable) {

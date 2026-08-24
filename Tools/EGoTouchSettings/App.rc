@@ -1,0 +1,45 @@
+﻿// 程序图标：任务栏、Alt+Tab、开始菜单、资源管理器都取这一张。
+//
+// 托盘那一个不走这个资源，它按当前 DPI 与任务栏深浅现画：托盘图标要跟着系统主题变黑白，
+// 而 exe 图标是静态的彩色标记，共用一张两边都不合适。
+//
+// .ico 由 scripts/make_brand_assets.py 从 Assets/brand/openego-hub.svg 生成。
+
+#include <windows.h>
+
+#include "AppIconResource.h"
+#include "AppVersion.h"
+
+IDI_APP_ICON ICON "Assets\\OpenEGoHub.ico"
+
+// 版本资源。「关于」页读的就是这里的 FILEVERSION——没有这个资源时那一行是空的，
+// 而一个空 TextBlock 照样占一行高，会把标题顶离垂直中线。
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    OPENEGO_VERSION_MAJOR, OPENEGO_VERSION_MINOR, OPENEGO_VERSION_PATCH, 0
+    PRODUCTVERSION OPENEGO_VERSION_MAJOR, OPENEGO_VERSION_MINOR, OPENEGO_VERSION_PATCH, 0
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+    FILEFLAGS      0x0L
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0804 简体中文 + 04b0 Unicode
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "OpenEGo Hub"
+            VALUE "FileDescription",  "OpenEGo Hub 控制面板"
+            VALUE "FileVersion",      OPENEGO_VERSION_STRING
+            VALUE "InternalName",     "OpenEGoHubSettings"
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", "OpenEGoHubSettings.exe"
+            VALUE "ProductName",      "OpenEGo Hub"
+            VALUE "ProductVersion",   OPENEGO_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

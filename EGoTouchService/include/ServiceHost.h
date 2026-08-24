@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ConfigRuntime.h"
+#include "PenButtonConfig.h"
 #include "ServiceConfigCore.h"
 
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <vector>
 
 class DeviceRuntime;
+struct RuntimePenState;
 
 namespace Config {
 class ConfigStore;
@@ -27,6 +29,14 @@ struct IpcResponse;
 
 namespace Solvers {
 struct HeatmapFrame;
+}
+
+namespace PenControl {
+struct Command;
+}
+
+namespace PenStatus {
+enum class TouchProviderState : uint8_t;
 }
 
 namespace Service {
@@ -57,15 +67,19 @@ private:
 
     ServiceConfigState m_configState{};
     ServiceMode m_runtimeMode = ServiceMode::Full;
-#if EGOTOUCH_SERVICE_ENABLE_IPC
+    // ConfigRuntime holds the code-defined defaults and has no IPC dependency of its
+    // own (see ConfigRuntime.h). It must exist in every build: it is the only source of
+    // the startup ConfigStore, and without it Release would fall back to whatever the
+    // pipeline member initializers happen to hold.
     ConfigRuntime m_configRuntime;
-#endif
 
     std::unique_ptr<DeviceRuntime> m_deviceRuntime;
     std::unique_ptr<Impl> m_impl;
 
-#if EGOTOUCH_SERVICE_ENABLE_IPC
+    // 与 IPC 无关，所以不在守卫里：PublishPenStatus 在所有配置里都要编。
     static void CopyCString(char* dst, size_t dstSize, std::string_view src);
+
+#if EGOTOUCH_SERVICE_ENABLE_IPC
     static uint32_t HashDebugSchema(const std::vector<Ipc::DebugFieldSchemaWire>& defs);
     static uint16_t DeriveDebugSchemaVersion(uint32_t schemaHash);
     static uint64_t EncodeDebugValue(const Solvers::HeatmapFrame& frame,
@@ -80,11 +94,27 @@ private:
 #endif
 
     bool InitializeConfigStores();
+    void PublishPenStatus(const RuntimePenState& state);
+    void ReplayLastWakeEvent();
     void ApplyServiceConfigToRuntime(const ServiceConfigState& config);
+
+    // 托盘控制通道：起停线程、消费一条提交、把新模式落到运行时并持久化。
+    void StartPenControlChannel();
+    void StopPenControlChannel();
+    void PenControlThreadMain();
+    void HandlePenControlCommand(const PenControl::Command& command);
+    void ApplyPenButtonMode(PenButtonMode mode, const char* source, bool persist);
+    bool StartEGoTouchProvider();
+    bool StopEGoTouchProvider();
+    void SetInputSuppressed(bool suppressed);
+    void TickInputSuppressionTimeout();
+    void PublishTouchProviderState(PenStatus::TouchProviderState state,
+                                   uint8_t error);
+    void RepublishPenStatus();
 #if EGOTOUCH_SERVICE_ENABLE_IPC
     ReloadServiceConfigResult HandleReloadServiceConfig(const ServiceConfigState& reloadedConfig);
-    bool ValidateStartupConfig(const Config::ConfigStore& store) const;
 #endif
+    bool ValidateStartupConfig(const Config::ConfigStore& store) const;
     bool StartRuntimeAndPipeline();
     bool StartSystemStateMonitor();
     bool StartIpcSubsystem();

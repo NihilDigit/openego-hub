@@ -32,7 +32,7 @@ struct TestEventNames {
         const DWORD thread_id = GetCurrentThreadId();
         for (std::size_t i = 0; i < Host::SystemStateMonitor::kEventCount; ++i) {
             std::wostringstream stream;
-            stream << L"Local\\EGoTouchSystemStateMonitorTest_"
+            stream << L"Local\\OpenEGoHubSystemStateMonitorTest_"
                    << process_id << L"_" << thread_id << L"_"
                    << scenario << L"_" << i;
             storage[i] = stream.str();

@@ -578,7 +578,7 @@ Offset  Size  Field                   Type       说明
 |------|-----|
 | 名称 | `Global\OpenEGoHubSharedFrame` |
 | 布局 | `SharedTripleBuffer` (三缓冲) |
-| ABI 版本 | 9 |
+| ABI 版本 | 5 |
 | 帧就绪事件 | `Global\EGoTouchFrameReady` (Windows Event) |
 | 热图尺寸 | 40×60 (rows × cols) |
 | 最大触控点数 | 10 |

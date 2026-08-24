@@ -1,0 +1,27 @@
+namespace EGoTouchSettings
+{
+    [default_interface]
+    runtimeclass BatteryIndicator : Microsoft.UI.Xaml.Controls.UserControl
+    {
+        BatteryIndicator();
+        void SetState(Boolean hasLevel, UInt8 level, Boolean charging);
+    };
+
+    [default_interface]
+    runtimeclass NotificationWindow : Microsoft.UI.Xaml.Window
+    {
+        NotificationWindow();
+    };
+
+    [default_interface]
+    runtimeclass MainWindow : Microsoft.UI.Xaml.Window
+    {
+        MainWindow();
+
+        void ProviderToggled(IInspectable sender, Microsoft.UI.Xaml.RoutedEventArgs args);
+        void PenModeSelectionChanged(IInspectable sender, Microsoft.UI.Xaml.Controls.SelectionChangedEventArgs args);
+        void OneNoteCompatibilityToggled(IInspectable sender, Microsoft.UI.Xaml.RoutedEventArgs args);
+        void AutoStartToggled(IInspectable sender, Microsoft.UI.Xaml.RoutedEventArgs args);
+        void ExitClicked(IInspectable sender, Microsoft.UI.Xaml.RoutedEventArgs args);
+    };
+}
