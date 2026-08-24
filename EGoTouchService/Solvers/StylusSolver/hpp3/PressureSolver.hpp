@@ -58,7 +58,6 @@ public:
 
         pressure.btSeq = m_haveBtPacket ? m_lastSeq : 0;
         pressure.pressureIsReal = m_haveBtPacket;
-        pressure.predictedAgeFrames = 0;
         pressure.lookaheadHoverGate = m_haveBtPacket && m_btPressBuf[3] == 0;
 
         if (m_haveBtPacket && !pressure.lookaheadHoverGate) {

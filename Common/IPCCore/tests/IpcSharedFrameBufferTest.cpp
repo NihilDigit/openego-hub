@@ -13,16 +13,18 @@
 
 namespace {
 
-static_assert(Ipc::kSharedFrameAbiVersion == 6, "SharedFrameData slot seqlock ABI version must remain 6");
+static_assert(Ipc::kSharedFrameAbiVersion == 9, "SharedFrameData slot seqlock ABI version must remain 9");
 static_assert(sizeof(Ipc::SharedStylusRawGridBlock) == 168, "SharedStylusRawGridBlock ABI size changed");
 static_assert(sizeof(Ipc::SharedStylusRawGrid) == 336, "SharedStylusRawGrid ABI size changed");
-static_assert(offsetof(Ipc::SharedFrameData, stylusRawGrid) == 16106, "SharedFrameData::stylusRawGrid ABI offset changed");
-static_assert(offsetof(Ipc::SharedFrameData, stylusAsaMode) == 16442, "SharedFrameData::stylusAsaMode ABI offset changed");
-static_assert(sizeof(Ipc::SharedFrameData) == 18544, "SharedFrameData ABI size changed");
+static_assert(offsetof(Ipc::SharedFrameData, stylusRawGrid) == 16066, "SharedFrameData::stylusRawGrid ABI offset changed");
+static_assert(offsetof(Ipc::SharedFrameData, stylusAsaMode) == 16402, "SharedFrameData::stylusAsaMode ABI offset changed");
+// 18552 -> 18568 with the v8 BT MCU pressure snapshot appended at the struct tail,
+// then -> 18528 in v9 when the constant-zero stylus fields and the legacy packet went.
+static_assert(sizeof(Ipc::SharedFrameData) == 18528, "SharedFrameData ABI size changed");
 static_assert(offsetof(Ipc::SharedTripleBuffer, slotFrameIds) == 320, "SharedTripleBuffer::slotFrameIds ABI offset changed");
 static_assert(offsetof(Ipc::SharedTripleBuffer, slotSequences) == 384, "SharedTripleBuffer::slotSequences ABI offset changed");
 static_assert(offsetof(Ipc::SharedTripleBuffer, slots) == 408, "SharedTripleBuffer::slots ABI offset changed");
-static_assert(sizeof(Ipc::SharedTripleBuffer) == 56064, "SharedTripleBuffer ABI size changed");
+static_assert(sizeof(Ipc::SharedTripleBuffer) == 56000, "SharedTripleBuffer ABI size changed");
 static_assert(std::is_trivially_copyable_v<Ipc::SharedFrameData>, "SharedFrameData must remain trivially copyable");
 static_assert(std::is_standard_layout_v<Ipc::SharedFrameData>, "SharedFrameData must remain standard layout");
 
@@ -126,7 +128,7 @@ void VerifySolverDebugBoxesRoundTrip() {
     zoneBox.zoneId = 4;
     zoneBox.zoneIndex = 3;
     zoneBox.bbox = {2, 6, 8, 12};
-    zoneBox.area = 20;
+    zoneBox.areaCells = 20;
     zoneBox.signalSum = 4567;
     solverIn.touch.debug.zoneBoxes.push_back(zoneBox);
 

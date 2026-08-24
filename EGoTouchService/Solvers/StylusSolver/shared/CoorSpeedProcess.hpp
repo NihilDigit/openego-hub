@@ -59,14 +59,9 @@ public:
             runtime.post.speedValue = 0;
             runtime.post.speedShortAvgDist = 0;
             runtime.post.speedFullAvgDist = 0;
-            runtime.post.speedAvgDx = 0;
-            runtime.post.speedAvgDy = 0;
             m_prevPressureActive = pressureActive;
             return;
         }
-
-        const int32_t dxFirst = HistoryX(0) - HistoryX(lastValidIdx);
-        const int32_t dyFirst = HistoryY(0) - HistoryY(lastValidIdx);
 
         // Cumulative distance (÷10)
         const int cumDist = (cumulativeDistX10 > 0) ? cumulativeDistX10 / 10 : 1;
@@ -86,10 +81,6 @@ public:
             speedShortAvgDist = (dist3X10 / 10) / 3;
         }
         runtime.post.speedShortAvgDist = speedShortAvgDist;
-
-        // Average dx/dy over valid points
-        runtime.post.speedAvgDx = std::abs(dxFirst) / lastValidIdx;
-        runtime.post.speedAvgDy = std::abs(dyFirst) / lastValidIdx;
 
         // Speed value: 1-frame instant distance (drives IIR coefficient selection)
         int speedInstant = 0;

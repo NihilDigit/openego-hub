@@ -79,13 +79,9 @@ public:
         if (!m_enabled || !historyRaw.valid || !filterInput.valid) {
             Reset();
             runtime.post.postCoor = historyRaw;
-            runtime.post.predictedCoor = historyRaw;
             runtime.post.finalCoor = historyRaw;
             runtime.post.finalValid = historyRaw.valid;
             runtime.post.linearFilterState = 0;
-            runtime.post.linearFilterActive = false;
-            runtime.post.linearFilterDeltaDim1 = 0;
-            runtime.post.linearFilterDeltaDim2 = 0;
 #if EGOTOUCH_DIAG
             runtime.post.lfLineFitSlopeA = 0.f;
             runtime.post.lfLineFitInterceptB = 0.f;
@@ -133,17 +129,6 @@ public:
         PushFilteredHistory(avg3.dim1, avg3.dim2);
         runtime.post.postCoor = avg3;
 
-        // Quadratic extrapolation prediction: 3*x0 − 3*x1 + x2
-        Asa::CoorResult predicted;
-        if (m_historyCount >= 3) {
-            predicted.valid = true;
-            predicted.dim1 = 3 * RawX(0) - 3 * RawX(1) + RawX(2);
-            predicted.dim2 = 3 * RawY(0) - 3 * RawY(1) + RawY(2);
-        } else {
-            predicted = avg3;
-        }
-        runtime.post.predictedCoor = predicted;
-
         if (!pressureActive) {
             if (wasPressureActive) {
                 ResetStrokeState();
@@ -152,9 +137,6 @@ public:
             runtime.post.finalCoor = historyRaw;
             runtime.post.finalValid = historyRaw.valid;
             runtime.post.linearFilterState = 0;
-            runtime.post.linearFilterActive = false;
-            runtime.post.linearFilterDeltaDim1 = 0;
-            runtime.post.linearFilterDeltaDim2 = 0;
 #if EGOTOUCH_DIAG
             runtime.post.lfLineFitSlopeA = 0.f;
             runtime.post.lfLineFitInterceptB = 0.f;
@@ -168,17 +150,17 @@ public:
 
         m_prevPressureActive = true;
 
-        // ── Linear correction consumes the staged coordinate path. avg3/predicted stay as
-        // diagnostics and side-channel trend data, mirroring the original split.
+        // ── Linear correction consumes the staged coordinate path; avg3 stays on
+        // postCoor as side-channel trend data, mirroring the original split.
+        // The quadratic extrapolation that used to sit here wrote a coordinate
+        // nobody read. Reviving it is the prediction work, and that wants a real
+        // dt plus the extrapolation gates, not a bare 3*x0 - 3*x1 + x2.
         const Asa::CoorResult result = Process(
             filterInput, pressureActive, m_sensorDim1Limit, m_sensorDim2Limit);
 
         runtime.post.finalCoor = result;
         runtime.post.finalValid = result.valid;
         runtime.post.linearFilterState = m_state;
-        runtime.post.linearFilterActive = m_active;
-        runtime.post.linearFilterDeltaDim1 = m_lastDeltaDim1;
-        runtime.post.linearFilterDeltaDim2 = m_lastDeltaDim2;
 #if EGOTOUCH_DIAG
         runtime.post.lfLineFitSlopeA = static_cast<float>(m_curLineFit.slopeA);
         runtime.post.lfLineFitInterceptB = static_cast<float>(m_curLineFit.interceptB);

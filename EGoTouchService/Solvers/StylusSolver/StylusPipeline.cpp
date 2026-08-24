@@ -19,6 +19,15 @@ void StylusPipeline::registerBindings(Config::ConfigBinder& binder) {
                 m_hpp3.m_coordinateSolver, true, {}, "HPP3 coordinate solver enable");
     binder.bind("stylus.sp.tilt_process_enabled", &Stylus::Hpp3::TiltProcess::m_enabled,
                 m_hpp3.m_tiltProcess, true, {}, "HPP3 tilt process enable");
+    binder.bind("stylus.sp.tilt_calib_offset", &Stylus::Hpp3::TiltProcess::m_calibOffsetUnits,
+                m_hpp3.m_tiltProcess, static_cast<int32_t>(523), ConfigRange{0.0, 4096.0},
+                "Tilt calibration: projection diff at vertical (coor units)");
+    binder.bind("stylus.sp.tilt_calib_scale", &Stylus::Hpp3::TiltProcess::m_calibScaleUnits,
+                m_hpp3.m_tiltProcess, static_cast<int32_t>(985), ConfigRange{1.0, 8192.0},
+                "Tilt calibration: projection diff span over sin(tilt) (coor units)");
+    binder.bind("stylus.sp.tilt_max_diff_jump", &Stylus::Hpp3::TiltProcess::m_maxDiffJumpPerFrame,
+                m_hpp3.m_tiltProcess, static_cast<int32_t>(400), ConfigRange{0.0, 4096.0},
+                "Tilt outlier damping: max projection diff step per frame");
     binder.bind("stylus.sp.pressure_solver_enabled", &Stylus::Hpp3::PressureSolver::m_enabled,
                 m_hpp3.m_pressureSolver, true, {}, "HPP3 pressure solver enable");
 
@@ -61,14 +70,20 @@ void StylusPipeline::registerBindings(Config::ConfigBinder& binder) {
                 m_commonPost.m_coorSpeedProcess, true, {}, "Coordinate speed process enable");
     binder.bind("stylus.sp.iir_filter_enabled", &Stylus::CoorIIRProcess::m_enabled,
                 m_commonPost.m_coorIIRProcess, true, {}, "IIR coordinate filter enable");
-    binder.bindSchema("stylus.sp.iir_coef_low_hover", Config::ConfigValue(static_cast<int32_t>(10)), "int", ConfigRange{0.0, 255.0}, "IIR low coefficient while hovering", Config::ConfigRuntimeBinding::ManualLiveApply);
-    binder.bindSchema("stylus.sp.iir_coef_high_hover", Config::ConfigValue(static_cast<int32_t>(6)), "int", ConfigRange{0.0, 255.0}, "IIR high coefficient while hovering", Config::ConfigRuntimeBinding::ManualLiveApply);
-    binder.bindSchema("stylus.sp.iir_speed_thold_hover", Config::ConfigValue(static_cast<int32_t>(10)), "int", ConfigRange{0.0, 255.0}, "IIR speed threshold while hovering", Config::ConfigRuntimeBinding::ManualLiveApply);
-    binder.bindSchema("stylus.sp.iir_coef_low_writing", Config::ConfigValue(static_cast<int32_t>(18)), "int", ConfigRange{0.0, 255.0}, "IIR low coefficient while writing", Config::ConfigRuntimeBinding::ManualLiveApply);
-    binder.bindSchema("stylus.sp.iir_coef_high_writing", Config::ConfigValue(static_cast<int32_t>(26)), "int", ConfigRange{0.0, 255.0}, "IIR high coefficient while writing", Config::ConfigRuntimeBinding::ManualLiveApply);
+    binder.bindSchema("stylus.sp.iir_coef_low_hover", Config::ConfigValue(static_cast<int32_t>(2)), "int", ConfigRange{0.0, 255.0}, "IIR low coefficient while hovering", Config::ConfigRuntimeBinding::ManualLiveApply);
+    binder.bindSchema("stylus.sp.iir_coef_high_hover", Config::ConfigValue(static_cast<int32_t>(16)), "int", ConfigRange{0.0, 255.0}, "IIR high coefficient while hovering", Config::ConfigRuntimeBinding::ManualLiveApply);
+    binder.bindSchema("stylus.sp.iir_speed_thold_hover", Config::ConfigValue(static_cast<int32_t>(20)), "int", ConfigRange{0.0, 255.0}, "IIR speed threshold while hovering", Config::ConfigRuntimeBinding::ManualLiveApply);
+    binder.bindSchema("stylus.sp.iir_coef_low_writing", Config::ConfigValue(static_cast<int32_t>(6)), "int", ConfigRange{0.0, 255.0}, "IIR low coefficient while writing", Config::ConfigRuntimeBinding::ManualLiveApply);
+    binder.bindSchema("stylus.sp.iir_coef_high_writing", Config::ConfigValue(static_cast<int32_t>(18)), "int", ConfigRange{0.0, 255.0}, "IIR high coefficient while writing", Config::ConfigRuntimeBinding::ManualLiveApply);
     binder.bindSchema("stylus.sp.iir_speed_thold_writing", Config::ConfigValue(static_cast<int32_t>(10)), "int", ConfigRange{0.0, 255.0}, "IIR speed threshold while writing", Config::ConfigRuntimeBinding::ManualLiveApply);
     binder.bind("stylus.sp.iir_speed_max", &Stylus::CoorIIRProcess::m_speedMax,
-                m_commonPost.m_coorIIRProcess, static_cast<int32_t>(60), ConfigRange{0.0, 1000.0}, "IIR speed max");
+                m_commonPost.m_coorIIRProcess, static_cast<int32_t>(205), ConfigRange{0.0, 1000.0}, "IIR speed max");
+    binder.bind("stylus.sp.touch_arbiter_enabled", &Stylus::StylusTouchArbiter::m_enabled,
+                m_touchArbiter, true, {}, "Enable pen/touch arbitration signal");
+    binder.bind("stylus.sp.touch_arbiter_linger_frames",
+                &Stylus::StylusTouchArbiter::m_lingerFrames, m_touchArbiter,
+                static_cast<int32_t>(40), ConfigRange{0.0, 240.0},
+                "Frames to keep touch suppression asserted after the pen leaves range");
     binder.bindSchema("stylus.sp.iir_max_coef", Config::ConfigValue(static_cast<int32_t>(32)), "int", ConfigRange{1.0, 255.0}, "IIR maximum coefficient denominator", Config::ConfigRuntimeBinding::ManualLiveApply);
 
     // ── AFT Coor ──
@@ -76,8 +91,8 @@ void StylusPipeline::registerBindings(Config::ConfigBinder& binder) {
                 m_commonPost.m_aftCoorProcess, true, {}, "AFT coordinate process enable");
     binder.bindSchema("stylus.sp.lock_flash_in_band_x", Config::ConfigValue(static_cast<int32_t>(0)), "int", ConfigRange{0.0, 255.0}, "AFT lock flash in-band X", Config::ConfigRuntimeBinding::ManualLiveApply);
     binder.bindSchema("stylus.sp.lock_flash_in_band_y", Config::ConfigValue(static_cast<int32_t>(0)), "int", ConfigRange{0.0, 255.0}, "AFT lock flash in-band Y", Config::ConfigRuntimeBinding::ManualLiveApply);
-    binder.bindSchema("stylus.sp.lock_flash_edge_x", Config::ConfigValue(static_cast<int32_t>(1)), "int", ConfigRange{0.0, 255.0}, "AFT lock flash edge X", Config::ConfigRuntimeBinding::ManualLiveApply);
-    binder.bindSchema("stylus.sp.lock_flash_edge_y", Config::ConfigValue(static_cast<int32_t>(2)), "int", ConfigRange{0.0, 255.0}, "AFT lock flash edge Y", Config::ConfigRuntimeBinding::ManualLiveApply);
+    binder.bindSchema("stylus.sp.lock_flash_edge_x", Config::ConfigValue(static_cast<int32_t>(8)), "int", ConfigRange{0.0, 255.0}, "AFT lock flash edge X", Config::ConfigRuntimeBinding::ManualLiveApply);
+    binder.bindSchema("stylus.sp.lock_flash_edge_y", Config::ConfigValue(static_cast<int32_t>(16)), "int", ConfigRange{0.0, 255.0}, "AFT lock flash edge Y", Config::ConfigRuntimeBinding::ManualLiveApply);
     binder.bind("stylus.sp.lock_sensor_tx_count", &Stylus::AftCoorProcess::m_sensorTxCount,
                 m_commonPost.m_aftCoorProcess, static_cast<int32_t>(60), ConfigRange{1.0, 200.0}, "AFT lock sensor TX count");
     binder.bind("stylus.sp.lock_sensor_rx_count", &Stylus::AftCoorProcess::m_sensorRxCount,
@@ -93,6 +108,9 @@ void StylusPipeline::applyConfig(const Config::ConfigStore& store) {
 
     const bool tiltEnabled = store.getOr<bool>("stylus.sp.tilt_process_enabled", true);
     m_hpp3.m_tiltProcess.m_enabled = tiltEnabled;
+    m_hpp3.m_tiltProcess.m_calibOffsetUnits = store.getOr<int32_t>("stylus.sp.tilt_calib_offset", 523);
+    m_hpp3.m_tiltProcess.m_calibScaleUnits = store.getOr<int32_t>("stylus.sp.tilt_calib_scale", 985);
+    m_hpp3.m_tiltProcess.m_maxDiffJumpPerFrame = store.getOr<int32_t>("stylus.sp.tilt_max_diff_jump", 400);
     if (!tiltEnabled) { m_hpp3.m_tiltProcess.Reset(); }
 
     m_hpp3.m_pressureSolver.m_enabled = store.getOr<bool>("stylus.sp.pressure_solver_enabled", true);
@@ -137,22 +155,24 @@ void StylusPipeline::applyConfig(const Config::ConfigStore& store) {
 
     const bool iirFilterEnabled = store.getOr<bool>("stylus.sp.iir_filter_enabled", true);
     m_commonPost.m_coorIIRProcess.m_enabled = iirFilterEnabled;
-    m_commonPost.m_coorIIRProcess.m_coefLowHover = store.getOr<int32_t>("stylus.sp.iir_coef_low_hover", 10);
-    m_commonPost.m_coorIIRProcess.m_coefHighHover = store.getOr<int32_t>("stylus.sp.iir_coef_high_hover", 6);
-    m_commonPost.m_coorIIRProcess.m_speedTholdHover = store.getOr<int32_t>("stylus.sp.iir_speed_thold_hover", 10);
-    m_commonPost.m_coorIIRProcess.m_coefLowWriting = store.getOr<int32_t>("stylus.sp.iir_coef_low_writing", 18);
-    m_commonPost.m_coorIIRProcess.m_coefHighWriting = store.getOr<int32_t>("stylus.sp.iir_coef_high_writing", 26);
+    m_commonPost.m_coorIIRProcess.m_coefLowHover = store.getOr<int32_t>("stylus.sp.iir_coef_low_hover", 2);
+    m_commonPost.m_coorIIRProcess.m_coefHighHover = store.getOr<int32_t>("stylus.sp.iir_coef_high_hover", 16);
+    m_commonPost.m_coorIIRProcess.m_speedTholdHover = store.getOr<int32_t>("stylus.sp.iir_speed_thold_hover", 20);
+    m_commonPost.m_coorIIRProcess.m_coefLowWriting = store.getOr<int32_t>("stylus.sp.iir_coef_low_writing", 6);
+    m_commonPost.m_coorIIRProcess.m_coefHighWriting = store.getOr<int32_t>("stylus.sp.iir_coef_high_writing", 18);
     m_commonPost.m_coorIIRProcess.m_speedTholdWriting = store.getOr<int32_t>("stylus.sp.iir_speed_thold_writing", 10);
-    m_commonPost.m_coorIIRProcess.m_speedMax = store.getOr<int32_t>("stylus.sp.iir_speed_max", 60);
+    m_commonPost.m_coorIIRProcess.m_speedMax = store.getOr<int32_t>("stylus.sp.iir_speed_max", 205);
     m_commonPost.m_coorIIRProcess.m_maxCoef = store.getOr<int32_t>("stylus.sp.iir_max_coef", 32);
+    m_touchArbiter.m_enabled = store.getOr<bool>("stylus.sp.touch_arbiter_enabled", true);
+    m_touchArbiter.m_lingerFrames = store.getOr<int32_t>("stylus.sp.touch_arbiter_linger_frames", 40);
     if (!iirFilterEnabled) { m_commonPost.m_coorIIRProcess.Reset(); }
 
     const bool aftCoorEnabled = store.getOr<bool>("stylus.sp.aft_coor_enabled", true);
     m_commonPost.m_aftCoorProcess.m_enabled = aftCoorEnabled;
     m_commonPost.m_aftCoorProcess.m_lockFlashInBandX = static_cast<uint8_t>(store.getOr<int32_t>("stylus.sp.lock_flash_in_band_x", 0));
     m_commonPost.m_aftCoorProcess.m_lockFlashInBandY = static_cast<uint8_t>(store.getOr<int32_t>("stylus.sp.lock_flash_in_band_y", 0));
-    m_commonPost.m_aftCoorProcess.m_lockFlashEdgeX = static_cast<uint8_t>(store.getOr<int32_t>("stylus.sp.lock_flash_edge_x", 1));
-    m_commonPost.m_aftCoorProcess.m_lockFlashEdgeY = static_cast<uint8_t>(store.getOr<int32_t>("stylus.sp.lock_flash_edge_y", 2));
+    m_commonPost.m_aftCoorProcess.m_lockFlashEdgeX = static_cast<uint8_t>(store.getOr<int32_t>("stylus.sp.lock_flash_edge_x", 8));
+    m_commonPost.m_aftCoorProcess.m_lockFlashEdgeY = static_cast<uint8_t>(store.getOr<int32_t>("stylus.sp.lock_flash_edge_y", 16));
     m_commonPost.m_aftCoorProcess.m_sensorTxCount = store.getOr<int32_t>("stylus.sp.lock_sensor_tx_count", 60);
     m_commonPost.m_aftCoorProcess.m_sensorRxCount = store.getOr<int32_t>("stylus.sp.lock_sensor_rx_count", 40);
     m_commonPost.m_aftCoorProcess.m_bypassLock = store.getOr<bool>("stylus.sp.lock_bypass", false);
@@ -164,19 +184,13 @@ bool StylusPipeline::Process(HeatmapFrame& frame) {
     ReadLatestBtSample(frame.stylus.input.btSample);
 
     const auto selectTerminalProtocol = [&]() {
-        if (m_lastActiveProtocol == StylusRuntime::Protocol::Hpp2) {
-            frame.stylus.runtime.SelectHpp2().flow.terminal = true;
-        } else if (m_lastActiveProtocol == StylusRuntime::Protocol::Hpp3) {
-            frame.stylus.runtime.SelectHpp3().flow.terminal = true;
-        } else if (m_penSession.protocolHint == StylusProtocolHint::Hpp2) {
-            frame.stylus.runtime.SelectHpp2().flow.terminal = true;
-        } else if (m_penSession.protocolHint == StylusProtocolHint::Hpp3) {
+        if (m_lastActiveProtocol == StylusRuntime::Protocol::Hpp3 ||
+            m_penSession.protocolHint == StylusProtocolHint::Hpp3) {
             frame.stylus.runtime.SelectHpp3().flow.terminal = true;
         } else {
             // Protocol-neutral terminal: keep activeProtocol as None so a fresh
-            // disconnected session does not get misclassified as HPP3. Mark both
-            // runtimes terminal because Active() maps None to HPP3 for legacy reads.
-            frame.stylus.runtime.hpp2.flow.terminal = true;
+            // disconnected session does not get misclassified as HPP3. The runtime
+            // still has to be marked terminal because Active() maps None to HPP3.
             frame.stylus.runtime.hpp3.flow.terminal = true;
         }
     };
@@ -187,18 +201,7 @@ bool StylusPipeline::Process(HeatmapFrame& frame) {
         return true;
     }
 
-    const bool hasHpp3Evidence = frame.rawPtr != nullptr || frame.slaveSuffixValid;
-    const StylusInputSnapshot inputBeforeParse = frame.stylus.input;
     m_frameParser.Process(frame);
-
-    const bool parsedTerminal = frame.stylus.runtime.Active().flow.terminal;
-    const bool parsedHpp2 = frame.stylus.runtime.activeProtocol == StylusRuntime::Protocol::Hpp2;
-
-    if (parsedTerminal && !hasHpp3Evidence &&
-        m_penSession.protocolHint == StylusProtocolHint::Hpp2 && !parsedHpp2) {
-        frame.stylus.input = inputBeforeParse;
-        m_frameParser.ProcessHpp2Line(frame);
-    }
 
     if (frame.stylus.runtime.Active().flow.terminal) {
         FinalizeTerminalFrame(frame);
@@ -206,9 +209,7 @@ bool StylusPipeline::Process(HeatmapFrame& frame) {
     }
 
     bool completed = false;
-    if (frame.stylus.runtime.activeProtocol == StylusRuntime::Protocol::Hpp2) {
-        completed = m_hpp2.Process(frame);
-    } else if (frame.stylus.runtime.activeProtocol == StylusRuntime::Protocol::Hpp3) {
+    if (frame.stylus.runtime.activeProtocol == StylusRuntime::Protocol::Hpp3) {
         completed = m_hpp3.Process(frame);
     }
 
@@ -224,6 +225,7 @@ bool StylusPipeline::Process(HeatmapFrame& frame) {
     m_edgeCoorPostProcess.Process(frame);
     m_commonPost.Process(frame);
     m_edgeCoorProcess.CaptureFinal(frame.stylus.runtime.Active());
+    m_touchArbiter.Process(frame);
     m_commit.Commit(frame);
     if (frame.stylus.runtime.activeProtocol != StylusRuntime::Protocol::None) {
         m_lastActiveProtocol = frame.stylus.runtime.activeProtocol;
@@ -248,19 +250,14 @@ void StylusPipeline::ApplyPenSession(const StylusPenSession& session) {
     ResetStatefulStages();
     ClearBtSample();
     if (m_penSession.connected) {
-        if (m_penSession.protocolHint == StylusProtocolHint::Hpp2) {
-            m_lastActiveProtocol = StylusRuntime::Protocol::Hpp2;
-        } else if (m_penSession.protocolHint == StylusProtocolHint::Hpp3) {
-            m_lastActiveProtocol = StylusRuntime::Protocol::Hpp3;
-        } else {
-            m_lastActiveProtocol = StylusRuntime::Protocol::None;
-        }
+        m_lastActiveProtocol = m_penSession.protocolHint == StylusProtocolHint::Hpp3
+                                   ? StylusRuntime::Protocol::Hpp3
+                                   : StylusRuntime::Protocol::None;
     }
     m_lastFrameWasTerminal = true;
 }
 
 void StylusPipeline::ResetStatefulStages() {
-    m_hpp2.ResetOnTerminal();
     m_hpp3.ResetOnTerminal();
     m_edgeCoorProcess.Reset();
     m_edgeCoorPostProcess.Reset();
@@ -284,6 +281,9 @@ void StylusPipeline::FinalizeTerminalFrame(HeatmapFrame& frame) {
     frame.stylus.runtime.ResetDiagnosticFields();
 #endif
     m_edgeCoorProcess.CaptureFinal(frame.stylus.runtime.Active());
+    // Deliberately NOT reset by ResetStatefulStages(): the terminal frame is when the pen
+    // goes away, and zeroing the arbiter here would collapse the linger tail to nothing.
+    m_touchArbiter.Process(frame);
     m_commit.Commit(frame);
 }
 

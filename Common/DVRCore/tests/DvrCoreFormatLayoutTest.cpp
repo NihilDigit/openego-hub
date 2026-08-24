@@ -37,20 +37,20 @@ void TestWireLayout() {
     DvrCoreTest::Require(sizeof(F::Dvr2TouchPacketRecord) == 36, "Dvr2TouchPacketRecord size changed");
     DvrCoreTest::Require(sizeof(F::Dvr2StylusRawGridBlockRecord) == 168, "Dvr2StylusRawGridBlockRecord size changed");
     DvrCoreTest::Require(sizeof(F::Dvr2StylusRawGridRecord) == 336, "Dvr2StylusRawGridRecord size changed");
-    DvrCoreTest::Require(sizeof(F::Dvr2StylusDataRecord) == 488, "Dvr2StylusDataRecord size changed");
+    DvrCoreTest::Require(sizeof(F::Dvr2StylusDataRecord) == 440, "Dvr2StylusDataRecord size changed");
     DvrCoreTest::Require(sizeof(F::Dvr2RuntimeConfigSchemaHeader) == 16, "Dvr2RuntimeConfigSchemaHeader size changed");
     DvrCoreTest::Require(sizeof(F::Dvr2RuntimeConfigFieldDef) == 224, "Dvr2RuntimeConfigFieldDef size changed");
     DvrCoreTest::Require(sizeof(F::Dvr2RuntimeConfigValuesHeader) == 16, "Dvr2RuntimeConfigValuesHeader size changed");
     DvrCoreTest::Require(sizeof(F::Dvr2RuntimeConfigValueRecord) == 144, "Dvr2RuntimeConfigValueRecord size changed");
-    DvrCoreTest::Require(sizeof(F::Dvr2FramePayload) == 17352, "Dvr2FramePayload size changed");
+    DvrCoreTest::Require(sizeof(F::Dvr2FramePayload) == 17304, "Dvr2FramePayload size changed");
     DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, heatmapMatrix) == 28, "heatmapMatrix offset changed");
     DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, masterSuffix) == 4828, "masterSuffix offset changed");
     DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, touchPackets) == 5416, "touchPackets offset changed");
     DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, stylus) == 10288, "stylus offset changed");
-    DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, contacts) == 10776, "contacts offset changed");
-    DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, peaks) == 11580, "peaks offset changed");
-    DvrCoreTest::Require(offsetof(F::Dvr2FramePayload, rawDataLength) == 11944, "rawDataLength offset changed");
-    DvrCoreTest::Require(offsetof(F::Dvr2FramePayload, rawData) == 11946, "rawData offset changed");
+    DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, contacts) == 10728, "contacts offset changed");
+    DvrCoreTest::Require(offsetof(F::Dvr2FrameCore, peaks) == 11532, "peaks offset changed");
+    DvrCoreTest::Require(offsetof(F::Dvr2FramePayload, rawDataLength) == 11896, "rawDataLength offset changed");
+    DvrCoreTest::Require(offsetof(F::Dvr2FramePayload, rawData) == 11898, "rawData offset changed");
     DvrCoreTest::Require(std::is_trivially_copyable_v<F::Dvr2FramePayload>, "Dvr2FramePayload should be trivially copyable");
     DvrCoreTest::Require(std::is_standard_layout_v<F::Dvr2FramePayload>, "Dvr2FramePayload should be standard layout");
 }

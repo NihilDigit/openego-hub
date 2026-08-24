@@ -44,13 +44,6 @@ bool Chip::IsStylusConnected() const {
     return m_afe.GetStylusStateSnapshot().connected;
 }
 
-uint16_t Chip::GetLastFrameTimestamp() const {
-    if (back_data.size() < Frame::kMasterFrameSize) return 0;
-    Frame::MasterSuffixView masterSuffix;
-    masterSuffix.LoadFromBytes(back_data.data() + Frame::kMasterSuffixOffset);
-    return masterSuffix.timestamp();
-}
-
 ChipResult<HalDevice*> Chip::SelectDevice(DeviceType type) {
     HalDevice* dev = nullptr;
     switch (type) {

@@ -160,7 +160,6 @@ const char* PenProtocolHintName(PenProtocolHint hint) {
 
 const char* StylusRuntimeProtocolName(Solvers::StylusRuntime::Protocol protocol) {
     switch (protocol) {
-    case Solvers::StylusRuntime::Protocol::Hpp2: return "HPP2";
     case Solvers::StylusRuntime::Protocol::Hpp3: return "HPP3";
     default: return "None";
     }
@@ -224,6 +223,19 @@ std::string PenIdentitySummary(const PenIdentityStatus& pen) {
     summary += " | pairStatus=";
     summary += pen.hasPairStatus
         ? std::to_string(static_cast<unsigned int>(pen.pairStatus))
+        : "Unknown";
+    summary += " | battery=";
+    if (pen.hasBatteryLevel) {
+        summary += std::to_string(static_cast<unsigned int>(pen.batteryLevel));
+        summary += "%";
+    } else {
+        summary += "Unknown";
+    }
+    summary += " | charging=";
+    summary += pen.hasChargingState ? (pen.charging ? "Yes" : "No") : "Unknown";
+    summary += " | device=";
+    summary += pen.hasDeviceConnected
+        ? (pen.deviceConnected ? "Attached" : "Detached")
         : "Unknown";
     summary += " | serial=";
     summary += (pen.hasSerialNumber && !pen.serialNumber.empty()) ? pen.serialNumber : "Unknown";
@@ -349,28 +361,6 @@ void DrawServiceRuntimeGraph(ServiceWorkerState activeState) {
                           active ? IM_COL32(0, 0, 0, 255) : IM_COL32(220, 225, 235, 255),
                           node.label);
     }
-}
-
-std::string StylusPacketBytes(const Solvers::StylusPacket& packet) {
-    const auto displayLength = std::min<std::size_t>(packet.length, packet.bytes.size());
-
-    std::string result;
-    result.reserve(displayLength * 3 + (packet.length > packet.bytes.size() ? 37U : 0U));
-    char byteText[4]{};
-    for (std::size_t i = 0; i < displayLength; ++i) {
-        std::snprintf(byteText, sizeof(byteText), "%02x", static_cast<unsigned int>(packet.bytes[i]));
-        result += byteText;
-        if (i + 1 < displayLength) {
-            result += ' ';
-        }
-    }
-    if (packet.length > packet.bytes.size()) {
-        if (!result.empty()) {
-            result += ' ';
-        }
-        result += "... (declared length exceeds buffer)";
-    }
-    return result;
 }
 
 template <typename FourValueArray>
@@ -719,7 +709,7 @@ void DiagnosticsWorkbench::DrawTouchContactSummaryTable() {
             ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(TouchStateLabel(contact.state));
             ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f", contact.x);
             ImGui::TableSetColumnIndex(3); ImGui::Text("%.3f", contact.y);
-            ImGui::TableSetColumnIndex(4); ImGui::Text("%d", contact.area);
+            ImGui::TableSetColumnIndex(4); ImGui::Text("%d", contact.areaCells);
             ImGui::TableSetColumnIndex(5); ImGui::Text("%d", contact.signalSum);
             ImGui::TableSetColumnIndex(6); ImGui::TextUnformatted(contact.isReported ? "Y" : "N");
             ImGui::TableSetColumnIndex(7); ImGui::TextUnformatted(TouchReportEventLabel(contact.reportEvent));
@@ -787,8 +777,8 @@ void DiagnosticsWorkbench::DrawStylusControlPanel() {
             DrawStylusCoordinatePanel();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Packets")) {
-            DrawStylusPacketDetails();
+        if (ImGui::BeginTabItem("Parser Input")) {
+            DrawStylusParserInputPanel();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -888,12 +878,11 @@ void DiagnosticsWorkbench::DrawStylusOverviewPanel() {
                 ImGui::Text("%s | %s | %s", output.inRange ? "InRange" : "OutOfRange", output.tipDown ? "TipDown" : "TipUp", output.buttonActive ? "Button" : "NoButton");
             });
             drawRow("Pressure", [&] {
-                ImGui::Text("final=%u  raw=%u  mapped=%u  real=%s  age=%u",
+                ImGui::Text("final=%u  raw=%u  mapped=%u  real=%s",
                     static_cast<unsigned int>(output.pressure),
                     static_cast<unsigned int>(diag.rawPressure),
                     static_cast<unsigned int>(diag.mappedPressure),
-                    diag.pressureIsReal ? "yes" : "no",
-                    static_cast<unsigned int>(diag.predictedAgeFrames));
+                    diag.pressureIsReal ? "yes" : "no");
             });
             drawRow("Confidence", [&] { ImGui::Text("%.3f", output.confidence); });
             drawRow("Pipeline Stage", [&] { ImGui::Text("%u", static_cast<unsigned int>(output.pipelineStage)); });
@@ -930,8 +919,16 @@ void DiagnosticsWorkbench::DrawStylusServicePolicyPanel() {
     ImGui::TextColored(InfoColor(), "Service Policy");
     const bool configAdjustmentAllowed = DrawConfigSyncGate(m_proxy);
 #ifdef _DEBUG
-    const char* modeItems[] = {"OEM Custom", "Native Barrel", "Native Eraser"};
-    const char* routeItems[] = {"VHF Only", "Win32 Only", "VHF + Win32"};
+    // Combo 直接把下标当枚举值用，所以列表必须与枚举同序同长。从共享映射表生成，
+    // 而不是手写：手写的那份漏掉新增模式时，选中项会静默错位到别的模式上。
+    std::vector<const char*> modeItems;
+    for (const auto& [mode, token] : PenButtonModeMapping()) {
+        modeItems.push_back(ToString(mode));
+    }
+    std::vector<const char*> routeItems;
+    for (const auto& [route, token] : PenButtonRouteMapping()) {
+        routeItems.push_back(ToString(route));
+    }
 
     if (!configAdjustmentAllowed) {
         ImGui::BeginDisabled();
@@ -946,12 +943,14 @@ void DiagnosticsWorkbench::DrawStylusServicePolicyPanel() {
     ImGui::Separator();
     ImGui::TextUnformatted("Pen Button Injection");
     int curMode = static_cast<int>(m_proxy->GetPenButtonMode());
-    if (ImGui::Combo("Button Mode", &curMode, modeItems, IM_ARRAYSIZE(modeItems))) {
+    if (ImGui::Combo("Button Mode", &curMode, modeItems.data(),
+                     static_cast<int>(modeItems.size()))) {
         m_proxy->SetPenButtonMode(static_cast<PenButtonMode>(curMode));
     }
 
     int curRoute = static_cast<int>(m_proxy->GetPenButtonRoute());
-    if (ImGui::Combo("Injection Route", &curRoute, routeItems, IM_ARRAYSIZE(routeItems))) {
+    if (ImGui::Combo("Injection Route", &curRoute, routeItems.data(),
+                     static_cast<int>(routeItems.size()))) {
         m_proxy->SetPenButtonRoute(static_cast<PenButtonRoute>(curRoute));
     }
     ImGui::TextDisabled("Button policy changes are staged; click Apply Global to live-apply service policy.");
@@ -1093,10 +1092,7 @@ void DiagnosticsWorkbench::DrawStylusCoordinatePanel() {
                 sd.output.tipDown ? " | TipDown" : "");
         });
         drawRow("Sensor", [&] { ImGui::Text("X=%.1f / %.1f  Y=%.1f / %.1f", point.x, activeCols, point.y, activeRows); });
-        drawRow("Report", [&] { ImGui::Text("X=%u  Y=%u", static_cast<unsigned int>(point.reportX), static_cast<unsigned int>(point.reportY)); });
         drawRow("Screen", [&] { ImGui::Text("X=%u / 16000  Y=%u / 25600", static_cast<unsigned int>(screenX), static_cast<unsigned int>(screenY)); });
-        drawRow("TX1/TX2", [&] { ImGui::Text("TX1=(%.3f, %.3f)  TX2=(%.3f, %.3f)", point.tx1X, point.tx1Y, point.tx2X, point.tx2Y); });
-        drawRow("Composite Signal", [&] { ImGui::Text("TX1=%u  TX2=%u", static_cast<unsigned int>(point.peakTx1), static_cast<unsigned int>(point.peakTx2)); });
         if (finalPointMismatch) {
             drawRow("Final Mismatch", [&] {
                 ImGui::TextColored(BadColor(), "final=(%d,%d)  point=(%.1f,%.1f)", diag.finalDim1, diag.finalDim2, point.x, point.y);
@@ -1164,38 +1160,13 @@ void DiagnosticsWorkbench::DrawStylusCoordinatePanel() {
     ImGui::EndChild();
 }
 
-void DiagnosticsWorkbench::DrawStylusPacketDetails() {
+void DiagnosticsWorkbench::DrawStylusParserInputPanel() {
     const auto& stylus = m_currentFrame.stylus;
     const auto& input = stylus.input;
-    const auto& packet = stylus.output.packet;
 
-    ImGui::TextWrapped("Raw stylus HID packet mirror and parser input details for the current frame.");
-    ImGui::BeginChild("StylusPacketScroll", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::TextWrapped("Stylus parser input details for the current frame.");
+    ImGui::BeginChild("StylusParserInputScroll", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
 
-    if (ImGui::BeginTable("StylusPacketsTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-        ImGui::TableSetupColumn("Packet", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-        ImGui::TableSetupColumn("Valid", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("RID", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Length", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableHeadersRow();
-
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("StylusPacket");
-        ImGui::TableSetColumnIndex(1); ImGui::TextColored(StatusColor(packet.valid), "%s", packet.valid ? "Valid" : "Invalid");
-        ImGui::TableSetColumnIndex(2); ImGui::Text("0x%02X", static_cast<unsigned int>(packet.reportId));
-        ImGui::TableSetColumnIndex(3); ImGui::Text("%u", static_cast<unsigned int>(packet.length));
-        ImGui::TableSetColumnIndex(4);
-        if (packet.valid) {
-            const std::string bytes = StylusPacketBytes(packet);
-            ImGui::TextUnformatted(bytes.c_str());
-        } else {
-            ImGui::TextDisabled("N/A");
-        }
-        ImGui::EndTable();
-    }
-
-    ImGui::Separator();
     ImGui::TextColored(InfoColor(), "Parser Input");
     if (ImGui::BeginTable("StylusParserInputTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
         ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthFixed, 150.0f);
@@ -1216,7 +1187,6 @@ void DiagnosticsWorkbench::DrawStylusPacketDetails() {
         drawRow("tx1BlockValid", [&] { ImGui::TextColored(StatusColor(input.tx1BlockValid), "%s", YesNo(input.tx1BlockValid)); });
         drawRow("tx2BlockValid", [&] { ImGui::TextColored(StatusColor(input.tx2BlockValid), "%s", YesNo(input.tx2BlockValid)); });
         drawRow("status", [&] { ImGui::Text("0x%08X", static_cast<unsigned int>(input.status)); });
-        drawRow("hpp2LineValid", [&] { ImGui::TextColored(StatusColor(input.hpp2LineValid), "%s", YesNo(input.hpp2LineValid)); });
         drawRow("masterSuffixValid", [&] { ImGui::TextColored(StatusColor(m_currentFrame.masterSuffixValid), "%s", YesNo(m_currentFrame.masterSuffixValid)); });
         drawRow("slaveSuffixValid", [&] { ImGui::TextColored(StatusColor(m_currentFrame.slaveSuffixValid), "%s", YesNo(m_currentFrame.slaveSuffixValid)); });
         ImGui::EndTable();

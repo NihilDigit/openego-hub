@@ -60,6 +60,8 @@ void DiagnosticsWorkbench::DrawHeatmap() {
 
             for (int y = 0; y < rows; ++y) {
                 for (int x = 0; x < cols; ++x) {
+                    // IPC 送来的 heatmapMatrix 就是调理后的图(见 PopulateSharedFrameDataFromSolverFrame)。
+                    // 工作台这一侧不跑管线,所以 touch.conditioned 在这里永远是空的。
                     int16_t val = m_currentFrame.heatmapMatrix[rows - 1 - y][cols - 1 - x];
                     float normalized = std::clamp(val / m_colorRange, -1.0f, 1.0f);
 
@@ -413,14 +415,11 @@ void DiagnosticsWorkbench::DrawSlaveHeatmap() {
         ImGui::Text("Point: %s", point.valid ? "Valid" : "Invalid");
         ImGui::Text("XY: %.3f, %.3f", point.x, point.y);
         ImGui::Text("Confidence: %.3f", point.confidence);
-        ImGui::Text("TX1: %.3f, %.3f", point.tx1X, point.tx1Y);
-        ImGui::Text("TX2: %.3f, %.3f", point.tx2X, point.tx2Y);
         ImGui::Text("Peak TX1/TX2 (Raw): %u / %u", interop.signalX, interop.signalY);
-        ImGui::Text("Signal TX1/TX2 (Composite): %u / %u", point.peakTx1, point.peakTx2);
         ImGui::Text("Max Raw Peak: %u", interop.maxRawPeak);
         if (m_currentFrame.masterSuffixValid) {
             ImGui::Text("Master Noise F0/F1: %u / %u", m_currentFrame.masterSuffix.penF0NoiseCount(), m_currentFrame.masterSuffix.penF1NoiseCount());
-            ImGui::Text("Master TP Freq1/Timestamp: %u / %u", m_currentFrame.masterSuffix.tpFreq1(), m_currentFrame.masterSuffix.timestamp());
+            ImGui::Text("Master TP Freq1/Freq2: %u / %u", m_currentFrame.masterSuffix.tpFreq1(), m_currentFrame.masterSuffix.tpFreq2());
             ImGui::Text("Master FreqShiftDone: %u", m_currentFrame.masterSuffix.freqShiftDone());
         }
 
@@ -431,9 +430,8 @@ void DiagnosticsWorkbench::DrawSlaveHeatmap() {
         ImGui::Text("TX1/TX2 Block: %s / %s", input.tx1BlockValid ? "Y" : "N", input.tx2BlockValid ? "Y" : "N");
         ImGui::Text("Pressure: %u (Raw:%u Mapped:%u)", stylus.output.pressure, point.rawPressure, point.mappedPressure);
 #if EGOTOUCH_DIAG
-        ImGui::Text("BT Seq: %u  PredAge: %u  Real: %s",
+        ImGui::Text("BT Seq: %u  Real: %s",
                     static_cast<unsigned int>(diag.btSeq),
-                    static_cast<unsigned int>(diag.predictedAgeFrames),
                     diag.pressureIsReal ? "Y" : "N");
 #endif
         ImGui::Text("Status: 0x%08X", static_cast<unsigned int>(input.status));
@@ -514,7 +512,7 @@ void DiagnosticsWorkbench::DrawCoordinateTable() {
                 ImGui::Text("%s", stateStr);
 
                 ImGui::TableSetColumnIndex(6);
-                ImGui::Text("%d", contact.area);
+                ImGui::Text("%d", contact.areaCells);
 
                 ImGui::TableSetColumnIndex(7);
                 ImGui::Text("%d", contact.signalSum);
@@ -589,33 +587,22 @@ void DiagnosticsWorkbench::DrawStylusPanel() {
                 static_cast<unsigned int>(point.rawPressure),
                 static_cast<unsigned int>(point.mappedPressure));
 #if EGOTOUCH_DIAG
-    ImGui::Text("BT Seq: %u  PredAge: %u  Real: %s",
+    ImGui::Text("BT Seq: %u  Real: %s",
                 static_cast<unsigned int>(diag.btSeq),
-                static_cast<unsigned int>(diag.predictedAgeFrames),
                 diag.pressureIsReal ? "Y" : "N");
 #endif
     ImGui::Text("Peak TX1/TX2 (Raw): %u / %u  MaxPeak: %u",
                 static_cast<unsigned int>(interop.signalX),
                 static_cast<unsigned int>(interop.signalY),
                 static_cast<unsigned int>(interop.maxRawPeak));
-    ImGui::Text("Pressure Source: %s  PredAge=%u",
-                diag.pressureIsReal ? "Real(BT)" : "Predicted/Synth",
-                static_cast<unsigned int>(diag.predictedAgeFrames));
+    ImGui::Text("Pressure Source: %s",
+                diag.pressureIsReal ? "Real(BT)" : "Predicted/Synth");
 
     if (point.valid) {
         ImGui::Text("Point: X=%.3f  Y=%.3f  Confidence=%.3f",
                     point.x,
                     point.y,
                     point.confidence);
-        ImGui::Text("Report Coord: X=%u  Y=%u",
-                    static_cast<unsigned int>(point.reportX),
-                    static_cast<unsigned int>(point.reportY));
-        ImGui::Text("TX1/TX2 Coord: (%.3f,%.3f) / (%.3f,%.3f)",
-                    point.tx1X,
-                    point.tx1Y,
-                    point.tx2X,
-                    point.tx2Y);
-        ImGui::Text("Signal TX1/TX2 (Composite): %u / %u", point.peakTx1, point.peakTx2);
         ImGui::Text("Tilt: Valid=%s Pre(%d,%d) Out(%d,%d) |Mag|=%.2f Az=%.1f",
                     point.tiltValid ? "Y" : "N",
                     static_cast<int>(point.preTiltX),
@@ -626,28 +613,6 @@ void DiagnosticsWorkbench::DrawStylusPanel() {
                     point.tiltAzimuthDeg);
     } else {
         ImGui::TextUnformatted("Point: Invalid");
-    }
-
-    ImGui::Separator();
-    if (ImGui::CollapsingHeader("Legacy Stylus Packet (optional)")) {
-#if EGOTOUCH_DIAG
-        if (output.packet.valid) {
-            ImGui::Text("Packet (RID=0x%02X, Len=%u):", output.packet.reportId, output.packet.length);
-            std::ostringstream oss;
-            oss << std::hex << std::setfill('0');
-            for (size_t i = 0; i < output.packet.bytes.size(); ++i) {
-                oss << std::setw(2) << static_cast<unsigned int>(output.packet.bytes[i]);
-                if (i + 1 < output.packet.bytes.size()) {
-                    oss << " ";
-                }
-            }
-            ImGui::TextUnformatted(oss.str().c_str());
-        } else {
-            ImGui::TextDisabled("Legacy packet unavailable for current frame.");
-        }
-#else
-        ImGui::TextDisabled("Legacy packet mirror is disabled in non-diagnostic builds.");
-#endif
     }
 
     ImGui::End();

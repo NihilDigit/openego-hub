@@ -106,8 +106,6 @@ struct GridFeature {
     uint16_t peakSignal = 0;
     uint16_t dim1SelectedPeakNetSignal = 0;
     uint16_t dim2SelectedPeakNetSignal = 0;
-    bool dim1SelectedPeakOnEdge = false;
-    bool dim2SelectedPeakOnEdge = false;
 };
 
 struct RawGridRuntime {
@@ -123,13 +121,6 @@ struct TxGridRuntime {
     uint16_t triRight = 0;
     int16_t pitchComp = 0;
 #endif
-};
-
-struct Settings {
-    bool enabled = true;
-};
-
-struct State {
 };
 
 struct Runtime : Asa::Runtime {
@@ -149,8 +140,6 @@ struct Runtime : Asa::Runtime {
 struct Context {
     HeatmapFrame& frame;
     Runtime& runtime;
-    const Settings& settings;
-    State& state;
 };
 
 inline bool IsAnchorValid(uint16_t anchorRow, uint16_t anchorCol) {

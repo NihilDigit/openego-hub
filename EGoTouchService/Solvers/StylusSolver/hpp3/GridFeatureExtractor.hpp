@@ -634,8 +634,6 @@ private:
         out.projection.peakIdxDim2 = dim2Peak.peakIdx;
         out.dim1SelectedPeakNetSignal = static_cast<uint16_t>(std::clamp(dim1Peak.netSignal, 0, 0xFFFF));
         out.dim2SelectedPeakNetSignal = static_cast<uint16_t>(std::clamp(dim2Peak.netSignal, 0, 0xFFFF));
-        out.dim1SelectedPeakOnEdge = IsPhysicalEdge(dim1Peak.peakIdx, dim1Edge);
-        out.dim2SelectedPeakOnEdge = IsPhysicalEdge(dim2Peak.peakIdx, dim2Edge);
     }
 
     inline LinePeakTable SearchLinePeaks(const Axis& signal, int globalOffset) const {

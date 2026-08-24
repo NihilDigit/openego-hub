@@ -62,16 +62,6 @@ struct DvrTouchPacket {
 };
 static_assert(sizeof(DvrTouchPacket) == 36, "DvrTouchPacket must be exactly 36 bytes");
 
-struct DvrStylusPacket {
-    uint8_t valid = 0;
-    uint8_t reportId = 0x08;
-    uint8_t length = 17;
-    uint8_t reserved = 0;
-    uint8_t bytes[17]{};
-    uint8_t reservedTail[3]{};
-};
-static_assert(sizeof(DvrStylusPacket) == 24, "DvrStylusPacket must be exactly 24 bytes");
-
 constexpr int kMaxDynamicDebugSamples = 256;
 
 struct DvrDynamicDebugSampleSlot {
@@ -95,13 +85,9 @@ struct DvrStylusPoint {
     bool valid = false;
     float x = 0.0f;
     float y = 0.0f;
-    uint16_t reportX = 0;
-    uint16_t reportY = 0;
     uint16_t pressure = 0;
     uint16_t rawPressure = 0;
     uint16_t mappedPressure = 0;
-    uint16_t peakTx1 = 0;
-    uint16_t peakTx2 = 0;
     bool tiltValid = false;
     int16_t preTiltX = 0;
     int16_t preTiltY = 0;
@@ -109,10 +95,6 @@ struct DvrStylusPoint {
     int16_t tiltY = 0;
     float tiltMagnitude = 0.0f;
     float tiltAzimuthDeg = 0.0f;
-    float tx1X = 0.0f;
-    float tx1Y = 0.0f;
-    float tx2X = 0.0f;
-    float tx2Y = 0.0f;
     float confidence = 0.0f;
 };
 
@@ -149,9 +131,7 @@ struct DvrStylusData {
     bool touchSuppressActive = false;
     uint8_t touchSuppressFrames = 0;
     bool pressureIsReal = false;
-    uint8_t predictedAgeFrames = 0;
     Solvers::Stylus::Hpp3::GridData rawGrid{};
-    DvrStylusPacket packet{};
     DvrStylusPoint point{};
 };
 
@@ -244,22 +224,13 @@ struct DvrFrameSlot {
         stylus.touchSuppressActive = src.stylus.interop.touchSuppressActive;
         stylus.touchSuppressFrames = src.stylus.interop.touchSuppressFrames;
         stylus.pressureIsReal = src.stylus.runtime.Active().pressure.pressureIsReal;
-        stylus.predictedAgeFrames = src.stylus.runtime.Active().pressure.predictedAgeFrames;
         stylus.rawGrid = src.stylus.runtime.hpp3.rawGrid.grid;
-        stylus.packet.valid = src.stylus.output.packet.valid ? 1 : 0;
-        stylus.packet.reportId = src.stylus.output.packet.reportId;
-        stylus.packet.length = src.stylus.output.packet.length;
-        std::memcpy(stylus.packet.bytes, src.stylus.output.packet.bytes.data(), sizeof(stylus.packet.bytes));
         stylus.point.valid = src.stylus.output.point.valid;
         stylus.point.x = src.stylus.output.point.x;
         stylus.point.y = src.stylus.output.point.y;
-        stylus.point.reportX = src.stylus.output.point.reportX;
-        stylus.point.reportY = src.stylus.output.point.reportY;
         stylus.point.pressure = src.stylus.output.point.pressure;
         stylus.point.rawPressure = src.stylus.output.point.rawPressure;
         stylus.point.mappedPressure = src.stylus.output.point.mappedPressure;
-        stylus.point.peakTx1 = src.stylus.output.point.peakTx1;
-        stylus.point.peakTx2 = src.stylus.output.point.peakTx2;
         stylus.point.tiltValid = src.stylus.output.point.tiltValid;
         stylus.point.preTiltX = src.stylus.output.point.preTiltX;
         stylus.point.preTiltY = src.stylus.output.point.preTiltY;
@@ -267,10 +238,6 @@ struct DvrFrameSlot {
         stylus.point.tiltY = src.stylus.output.point.tiltY;
         stylus.point.tiltMagnitude = src.stylus.output.point.tiltMagnitude;
         stylus.point.tiltAzimuthDeg = src.stylus.output.point.tiltAzimuthDeg;
-        stylus.point.tx1X = src.stylus.output.point.tx1X;
-        stylus.point.tx1Y = src.stylus.output.point.tx1Y;
-        stylus.point.tx2X = src.stylus.output.point.tx2X;
-        stylus.point.tx2Y = src.stylus.output.point.tx2Y;
         stylus.point.confidence = src.stylus.output.point.confidence;
 
         contactCount = static_cast<uint8_t>(std::min(static_cast<int>(src.touch.output.contacts.size()), kMaxContacts));
@@ -280,13 +247,13 @@ struct DvrFrameSlot {
             contacts[i].x = sc.x;
             contacts[i].y = sc.y;
             contacts[i].state = sc.state;
-            contacts[i].area = sc.area;
+            contacts[i].area = sc.areaCells;
             contacts[i].signalSum = sc.signalSum;
             contacts[i].sizeMm = sc.sizeMm;
-            contacts[i].edgeDistX = sc.edgeDistX;
-            contacts[i].edgeDistY = sc.edgeDistY;
-            contacts[i].rawXBeforeEC = sc.rawXBeforeEC;
-            contacts[i].rawYBeforeEC = sc.rawYBeforeEC;
+            contacts[i].edgeDistX = sc.edgeDistXCells;
+            contacts[i].edgeDistY = sc.edgeDistYCells;
+            contacts[i].rawXBeforeEC = sc.matchXCells;
+            contacts[i].rawYBeforeEC = sc.matchYCells;
             contacts[i].prevIndex = sc.prevIndex;
             contacts[i].debugFlags = sc.debugFlags;
             contacts[i].edgeFlags = sc.edgeFlags;

@@ -18,12 +18,18 @@
 namespace Ipc {
 
 // Fixed shared memory name
-constexpr const wchar_t* kSharedFrameName = L"Global\\EGoTouchSharedFrame";
+constexpr const wchar_t* kSharedFrameName = L"Global\\OpenEGoHubSharedFrame";
 // Frame-ready event name (Service signals after Write)
 constexpr const wchar_t* kFrameReadyEventName = L"Global\\EGoTouchFrameReady";
 
 // Stable shared-memory ABI contract for Phase 0.
-constexpr uint32_t kSharedFrameAbiVersion = 6;
+// v7 adds stylusOutputValid / stylusInRange / stylusTipDown. Layout changed, so the
+// version must move with it: a stale reader would otherwise misread the tail of the
+// struct rather than reject the mapping.
+// v8 appends the full BT MCU pressure snapshot (stylusBt*): rawPressure alone cannot
+// re-drive PressureSolver in offline replay, which needs the calibrated pressure
+// array, the packet sequence, and the presence flags.
+constexpr uint32_t kSharedFrameAbiVersion = 9;
 constexpr uint32_t kSharedFrameAbiCapabilityTouchBoxes = 1u << 0;
 constexpr uint32_t kSharedFrameAbiCapabilities = kSharedFrameAbiCapabilityTouchBoxes;
 constexpr uint32_t kSharedFrameAbiReserved = 0;
@@ -102,23 +108,12 @@ struct SharedPalmBox {
 struct SharedStylusSolvePoint {
     bool     valid  = false;
     float    x = 0.f, y = 0.f;
-    uint16_t reportX = 0, reportY = 0;
     uint16_t pressure = 0, rawPressure = 0, mappedPressure = 0;
-    uint16_t peakTx1 = 0, peakTx2 = 0;
     bool     tiltValid = false;
     int16_t  preTiltX = 0, preTiltY = 0;
     int16_t  tiltX = 0, tiltY = 0;
     float    tiltMagnitude = 0.f, tiltAzimuthDeg = 0.f;
-    float    tx1X = 0.f, tx1Y = 0.f, tx2X = 0.f, tx2Y = 0.f;
     float    confidence = 0.f;
-};
-
-// Flat stylus packet
-struct SharedStylusPacket {
-    bool    valid    = false;
-    uint8_t reportId = 0x08;
-    uint8_t length   = 13;
-    uint8_t bytes[13]{};
 };
 
 constexpr int kSharedStylusRawGridDim = 9;
@@ -159,7 +154,6 @@ struct SharedStylusDiagnostics {
     uint16_t rawPressure = 0;
     uint16_t mappedPressure = 0;
     uint32_t btSeq = 0;
-    uint8_t  predictedAgeFrames = 0;
     bool     pressureIsReal = false;
     uint8_t  vhfPenState = 0;
     uint8_t  linearFilterState = 0;
@@ -254,7 +248,6 @@ struct SharedFrameData {
 
     // Stylus
     SharedStylusSolvePoint stylusPoint{};
-    SharedStylusPacket     stylusPacket{};
     // Key stylus debug fields (subset of StylusFrameData)
     bool     stylusSlaveValid    = false;
     bool     stylusChecksumOk    = false;
@@ -291,6 +284,14 @@ struct SharedFrameData {
     bool     stylusNoPressInk = false;
     uint8_t  stylusPipelineStage = 0;  // 0=ok,1=slaveParse,2=tx1,3=peak,4=coord,5=noise
 
+    // Top-level pen state. Without these the diagnostics app could not tell whether the
+    // pen was in range or touching: stylusPoint carries coordinates but not the verdict.
+    // Recovering pen state used to require replaying the whole capture through
+    // StylusPipeline offline.
+    bool     stylusOutputValid = false;
+    bool     stylusInRange     = false;
+    bool     stylusTipDown     = false;
+
     // ── Pipeline Diagnostics (Common-owned shared-memory POD mirror) ──
     SharedStylusDiagnostics diag{};
 
@@ -305,6 +306,14 @@ struct SharedFrameData {
     SharedTouchZoneBox zoneBoxes[kMaxSharedTouchZoneBoxes]{};
     uint8_t palmBoxCount = 0;
     SharedPalmBox palmBoxes[kMaxSharedPalmBoxes]{};
+
+    // v8: appended at the tail so every pre-existing member keeps its offset.
+    uint16_t stylusBtPressure[4]{};
+    uint32_t stylusBtSeq = 0;
+    uint8_t  stylusBtFreq1 = 0;
+    uint8_t  stylusBtFreq2 = 0;
+    bool     stylusBtHasSample = false;
+    bool     stylusBtHasFreq = false;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -376,32 +385,6 @@ inline void PreserveMasterTouchVisualizationFromCachedFrame(SharedFrameData& dst
     std::memcpy(dst.palmBoxes, cached.palmBoxes, sizeof(dst.palmBoxes));
 }
 
-template <typename StylusType>
-inline void PopulateLegacyStylusPacketForSharedFrame(SharedStylusPacket& dst,
-                                                     const StylusType& stylus) {
-    dst = SharedStylusPacket{};
-    if constexpr (requires { stylus.output.packet.valid; stylus.output.packet.reportId; stylus.output.packet.length; stylus.output.packet.bytes.data(); }) {
-        dst.valid = stylus.output.packet.valid;
-        dst.reportId = stylus.output.packet.reportId;
-        dst.length = stylus.output.packet.length;
-        std::memcpy(dst.bytes, stylus.output.packet.bytes.data(), sizeof(dst.bytes));
-    }
-}
-
-template <typename StylusType>
-inline void PopulateStylusPacketFromLegacySharedFrame(StylusType& stylus,
-                                                      const SharedStylusPacket& src) {
-    if constexpr (requires { stylus.output.packet.valid = false; stylus.output.packet.reportId = uint8_t{}; stylus.output.packet.length = uint8_t{}; stylus.output.packet.bytes.data(); }) {
-        stylus.output.packet.valid = src.valid;
-        stylus.output.packet.reportId = src.reportId;
-        stylus.output.packet.length = src.length;
-        std::memcpy(stylus.output.packet.bytes.data(), src.bytes, sizeof(src.bytes));
-    } else {
-        (void)stylus;
-        (void)src;
-    }
-}
-
 template <typename SrcBlock>
 inline void PopulateSharedStylusRawGridBlock(SharedStylusRawGridBlock& dst,
                                              const SrcBlock& src) {
@@ -424,7 +407,11 @@ template <typename HeatmapFrame>
 inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
                                                    const HeatmapFrame& src) {
     ResetSharedFrameData(dst);
-    std::memcpy(dst.heatmapMatrix, src.heatmapMatrix, sizeof(dst.heatmapMatrix));
+    // 这一路送出去的 heatmapMatrix 一直是**调理后**的图:工作台直接拿它上色,
+    // 通过工作台录的 DVR 也存这一份。契约 4 把调理产物挪进 touch.conditioned 之后
+    // 这里必须跟着改,否则工作台显示的是原始 ADC(满屏 32750),而录制内容也会与
+    // 既有语料不可比。
+    std::memcpy(dst.heatmapMatrix, src.touch.conditioned, sizeof(dst.heatmapMatrix));
     dst.rawDataLength = static_cast<uint16_t>(std::min(src.rawLen, static_cast<size_t>(Frame::kTotalFrameSize)));
     if (dst.rawDataLength != 0 && src.rawPtr) {
         std::memcpy(dst.rawData, src.rawPtr, dst.rawDataLength);
@@ -454,7 +441,7 @@ inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
         dstBox.reserved = srcBox.reserved;
         dstBox.bbox = {static_cast<int16_t>(srcBox.bbox.minR), static_cast<int16_t>(srcBox.bbox.maxR),
                        static_cast<int16_t>(srcBox.bbox.minC), static_cast<int16_t>(srcBox.bbox.maxC)};
-        dstBox.area = srcBox.area;
+        dstBox.area = srcBox.areaCells;
         dstBox.signalSum = srcBox.signalSum;
     }
 
@@ -486,7 +473,7 @@ inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
         dstContact.x = srcContact.x;
         dstContact.y = srcContact.y;
         dstContact.state = srcContact.state;
-        dstContact.area = srcContact.area;
+        dstContact.area = srcContact.areaCells;
         dstContact.signalSum = srcContact.signalSum;
         dstContact.sizeMm = srcContact.sizeMm;
         dstContact.isEdge = srcContact.isEdge;
@@ -510,13 +497,9 @@ inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
     dstPoint.valid = srcPoint.valid;
     dstPoint.x = srcPoint.x;
     dstPoint.y = srcPoint.y;
-    dstPoint.reportX = srcPoint.reportX;
-    dstPoint.reportY = srcPoint.reportY;
     dstPoint.pressure = srcPoint.pressure;
     dstPoint.rawPressure = srcPoint.rawPressure;
     dstPoint.mappedPressure = srcPoint.mappedPressure;
-    dstPoint.peakTx1 = srcPoint.peakTx1;
-    dstPoint.peakTx2 = srcPoint.peakTx2;
     dstPoint.tiltValid = srcPoint.tiltValid;
     dstPoint.preTiltX = srcPoint.preTiltX;
     dstPoint.preTiltY = srcPoint.preTiltY;
@@ -524,13 +507,7 @@ inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
     dstPoint.tiltY = srcPoint.tiltY;
     dstPoint.tiltMagnitude = srcPoint.tiltMagnitude;
     dstPoint.tiltAzimuthDeg = srcPoint.tiltAzimuthDeg;
-    dstPoint.tx1X = srcPoint.tx1X;
-    dstPoint.tx1Y = srcPoint.tx1Y;
-    dstPoint.tx2X = srcPoint.tx2X;
-    dstPoint.tx2Y = srcPoint.tx2Y;
     dstPoint.confidence = srcPoint.confidence;
-
-    PopulateLegacyStylusPacketForSharedFrame(dst.stylusPacket, src.stylus);
 
     const auto& stylus = src.stylus;
     const auto& hpp3Runtime = stylus.runtime.hpp3;
@@ -544,7 +521,13 @@ inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
     dst.stylusPressure = stylus.output.pressure;
     for (int i = 0; i < 4; ++i) {
         dst.stylusBtRawPressure[i] = stylus.input.btSample.rawPressure[static_cast<size_t>(i)];
+        dst.stylusBtPressure[i] = stylus.input.btSample.pressure[static_cast<size_t>(i)];
     }
+    dst.stylusBtSeq = stylus.input.btSample.seq;
+    dst.stylusBtFreq1 = stylus.input.btSample.freq1;
+    dst.stylusBtFreq2 = stylus.input.btSample.freq2;
+    dst.stylusBtHasSample = stylus.input.btSample.hasSample;
+    dst.stylusBtHasFreq = stylus.input.btSample.hasFreq;
     PopulateSharedStylusRawGridBlock(dst.stylusRawGrid.tx1, hpp3Runtime.rawGrid.grid.tx1);
     PopulateSharedStylusRawGridBlock(dst.stylusRawGrid.tx2, hpp3Runtime.rawGrid.grid.tx2);
     dst.stylusRecheckEnabled = stylus.interop.recheckEnabled;
@@ -559,6 +542,9 @@ inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
     dst.stylusMaxRawPeak = stylus.interop.maxRawPeak;
     dst.stylusNoPressInk = false;
     dst.stylusPipelineStage = stylus.output.pipelineStage;
+    dst.stylusOutputValid = stylus.output.valid;
+    dst.stylusInRange = stylus.output.inRange;
+    dst.stylusTipDown = stylus.output.tipDown;
 
 #if EGOTOUCH_DIAG
     auto& diag = dst.diag;
@@ -585,7 +571,6 @@ inline void PopulateSharedFrameDataFromSolverFrame(SharedFrameData& dst,
     diag.rawPressure = srcDiag.rawPressure;
     diag.mappedPressure = srcDiag.mappedPressure;
     diag.btSeq = srcDiag.btSeq;
-    diag.predictedAgeFrames = srcDiag.predictedAgeFrames;
     diag.pressureIsReal = srcDiag.pressureIsReal;
     diag.vhfPenState = srcDiag.vhfPenState;
     diag.linearFilterState = srcDiag.linearFilterState;
@@ -680,7 +665,7 @@ inline void PopulateSolverFrameFromSharedFrameData(HeatmapFrame& out,
         dstBox.zoneIndex = srcBox.zoneIndex;
         dstBox.reserved = srcBox.reserved;
         dstBox.bbox = {srcBox.bbox.minR, srcBox.bbox.maxR, srcBox.bbox.minC, srcBox.bbox.maxC};
-        dstBox.area = srcBox.area;
+        dstBox.areaCells = srcBox.area;
         dstBox.signalSum = srcBox.signalSum;
     }
 
@@ -711,7 +696,7 @@ inline void PopulateSolverFrameFromSharedFrameData(HeatmapFrame& out,
         dstContact.x = srcContact.x;
         dstContact.y = srcContact.y;
         dstContact.state = srcContact.state;
-        dstContact.area = srcContact.area;
+        dstContact.areaCells = srcContact.area;
         dstContact.signalSum = srcContact.signalSum;
         dstContact.sizeMm = srcContact.sizeMm;
         dstContact.isEdge = srcContact.isEdge;
@@ -735,13 +720,9 @@ inline void PopulateSolverFrameFromSharedFrameData(HeatmapFrame& out,
     dstPoint.valid = srcPoint.valid;
     dstPoint.x = srcPoint.x;
     dstPoint.y = srcPoint.y;
-    dstPoint.reportX = srcPoint.reportX;
-    dstPoint.reportY = srcPoint.reportY;
     dstPoint.pressure = srcPoint.pressure;
     dstPoint.rawPressure = srcPoint.rawPressure;
     dstPoint.mappedPressure = srcPoint.mappedPressure;
-    dstPoint.peakTx1 = srcPoint.peakTx1;
-    dstPoint.peakTx2 = srcPoint.peakTx2;
     dstPoint.tiltValid = srcPoint.tiltValid;
     dstPoint.preTiltX = srcPoint.preTiltX;
     dstPoint.preTiltY = srcPoint.preTiltY;
@@ -749,13 +730,7 @@ inline void PopulateSolverFrameFromSharedFrameData(HeatmapFrame& out,
     dstPoint.tiltY = srcPoint.tiltY;
     dstPoint.tiltMagnitude = srcPoint.tiltMagnitude;
     dstPoint.tiltAzimuthDeg = srcPoint.tiltAzimuthDeg;
-    dstPoint.tx1X = srcPoint.tx1X;
-    dstPoint.tx1Y = srcPoint.tx1Y;
-    dstPoint.tx2X = srcPoint.tx2X;
-    dstPoint.tx2Y = srcPoint.tx2Y;
     dstPoint.confidence = srcPoint.confidence;
-
-    PopulateStylusPacketFromLegacySharedFrame(out.stylus, src.stylusPacket);
 
     auto& stylus = out.stylus;
     auto& hpp3Runtime = stylus.runtime.SelectHpp3();
@@ -769,7 +744,13 @@ inline void PopulateSolverFrameFromSharedFrameData(HeatmapFrame& out,
     stylus.output.pressure = src.stylusPressure;
     for (int i = 0; i < 4; ++i) {
         stylus.input.btSample.rawPressure[static_cast<size_t>(i)] = src.stylusBtRawPressure[i];
+        stylus.input.btSample.pressure[static_cast<size_t>(i)] = src.stylusBtPressure[i];
     }
+    stylus.input.btSample.seq = src.stylusBtSeq;
+    stylus.input.btSample.freq1 = src.stylusBtFreq1;
+    stylus.input.btSample.freq2 = src.stylusBtFreq2;
+    stylus.input.btSample.hasSample = src.stylusBtHasSample;
+    stylus.input.btSample.hasFreq = src.stylusBtHasFreq;
     PopulateStylusRawGridBlockFromShared(hpp3Runtime.rawGrid.grid.tx1, src.stylusRawGrid.tx1);
     PopulateStylusRawGridBlockFromShared(hpp3Runtime.rawGrid.grid.tx2, src.stylusRawGrid.tx2);
     stylus.interop.recheckEnabled = src.stylusRecheckEnabled;
@@ -783,6 +764,9 @@ inline void PopulateSolverFrameFromSharedFrameData(HeatmapFrame& out,
     stylus.interop.signalY = src.stylusSignalY;
     stylus.interop.maxRawPeak = src.stylusMaxRawPeak;
     stylus.output.pipelineStage = src.stylusPipelineStage;
+    stylus.output.valid = src.stylusOutputValid;
+    stylus.output.inRange = src.stylusInRange;
+    stylus.output.tipDown = src.stylusTipDown;
 
 #if EGOTOUCH_DIAG
     auto& diag = stylus.debug.coord;
@@ -808,7 +792,6 @@ inline void PopulateSolverFrameFromSharedFrameData(HeatmapFrame& out,
     diag.rawPressure = src.diag.rawPressure;
     diag.mappedPressure = src.diag.mappedPressure;
     diag.btSeq = src.diag.btSeq;
-    diag.predictedAgeFrames = src.diag.predictedAgeFrames;
     diag.pressureIsReal = src.diag.pressureIsReal;
     diag.vhfPenState = src.diag.vhfPenState;
     diag.linearFilterState = src.diag.linearFilterState;

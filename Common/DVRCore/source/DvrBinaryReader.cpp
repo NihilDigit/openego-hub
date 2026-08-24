@@ -578,11 +578,6 @@ bool PopulateHeatmapFrameFromRecordBytes(const std::vector<uint8_t>& record,
     if (!TryReadScalarField(record, fields, "stylus.output.confidence", DvrFmt::Dvr2ValueType::Float32, stylusOutput.confidence, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.pipelineStage", DvrFmt::Dvr2ValueType::UInt8, stylusOutput.pipelineStage, outError)) return false;
 
-    if (!TryReadBoolScalarField(record, fields, "stylus.output.packet.valid", stylusOutput.packet.valid, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.output.packet.reportId", DvrFmt::Dvr2ValueType::UInt8, stylusOutput.packet.reportId, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.output.packet.length", DvrFmt::Dvr2ValueType::UInt8, stylusOutput.packet.length, outError)) return false;
-    if (!TryCopyContiguousField(record, fields, "stylus.output.packet.bytes", DvrFmt::Dvr2ValueType::UInt8, DvrFmt::Dvr2FieldRank::Array, sizeof(stylusOutput.packet.bytes), stylusOutput.packet.bytes.data(), outError)) return false;
-
     if (!TryReadScalarField(record, fields, "stylus.signalX", DvrFmt::Dvr2ValueType::UInt16, stylusInterop.signalX, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.signalY", DvrFmt::Dvr2ValueType::UInt16, stylusInterop.signalY, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.maxRawPeak", DvrFmt::Dvr2ValueType::UInt16, stylusInterop.maxRawPeak, outError)) return false;
@@ -598,13 +593,9 @@ bool PopulateHeatmapFrameFromRecordBytes(const std::vector<uint8_t>& record,
     if (!TryReadBoolScalarField(record, fields, "stylus.point.valid", stylusPoint.valid, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.x", DvrFmt::Dvr2ValueType::Float32, stylusPoint.x, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.y", DvrFmt::Dvr2ValueType::Float32, stylusPoint.y, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.reportX", DvrFmt::Dvr2ValueType::UInt16, stylusPoint.reportX, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.reportY", DvrFmt::Dvr2ValueType::UInt16, stylusPoint.reportY, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.pressure", DvrFmt::Dvr2ValueType::UInt16, stylusPoint.pressure, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.rawPressure", DvrFmt::Dvr2ValueType::UInt16, stylusPoint.rawPressure, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.mappedPressure", DvrFmt::Dvr2ValueType::UInt16, stylusPoint.mappedPressure, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.peakTx1", DvrFmt::Dvr2ValueType::UInt16, stylusPoint.peakTx1, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.peakTx2", DvrFmt::Dvr2ValueType::UInt16, stylusPoint.peakTx2, outError)) return false;
     if (!TryReadBoolScalarField(record, fields, "stylus.point.tiltValid", stylusPoint.tiltValid, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.preTiltX", DvrFmt::Dvr2ValueType::Int16, stylusPoint.preTiltX, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.preTiltY", DvrFmt::Dvr2ValueType::Int16, stylusPoint.preTiltY, outError)) return false;
@@ -612,10 +603,6 @@ bool PopulateHeatmapFrameFromRecordBytes(const std::vector<uint8_t>& record,
     if (!TryReadScalarField(record, fields, "stylus.point.tiltY", DvrFmt::Dvr2ValueType::Int16, stylusPoint.tiltY, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.tiltMagnitude", DvrFmt::Dvr2ValueType::Float32, stylusPoint.tiltMagnitude, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.tiltAzimuthDeg", DvrFmt::Dvr2ValueType::Float32, stylusPoint.tiltAzimuthDeg, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.tx1X", DvrFmt::Dvr2ValueType::Float32, stylusPoint.tx1X, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.tx1Y", DvrFmt::Dvr2ValueType::Float32, stylusPoint.tx1Y, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.tx2X", DvrFmt::Dvr2ValueType::Float32, stylusPoint.tx2X, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.point.tx2Y", DvrFmt::Dvr2ValueType::Float32, stylusPoint.tx2Y, outError)) return false;
     if (!TryReadScalarField(record, fields, "stylus.point.confidence", DvrFmt::Dvr2ValueType::Float32, stylusPoint.confidence, outError)) return false;
 
     stylusPressure.btSample = stylusInput.btSample;
@@ -624,7 +611,6 @@ bool PopulateHeatmapFrameFromRecordBytes(const std::vector<uint8_t>& record,
     stylusPressure.outputPressure = stylusOutput.pressure;
     stylusPressure.btSeq = stylusInput.btSample.seq;
     if (!TryReadBoolScalarField(record, fields, "stylus.pressureIsReal", stylusPressure.pressureIsReal, outError)) return false;
-    if (!TryReadScalarField(record, fields, "stylus.predictedAgeFrames", DvrFmt::Dvr2ValueType::UInt8, stylusPressure.predictedAgeFrames, outError)) return false;
     if (!TryReadRawGridBlock(record,
                              fields,
                              "stylus.runtime.hpp3.rawGrid.grid.tx1.valid",
@@ -645,7 +631,6 @@ bool PopulateHeatmapFrameFromRecordBytes(const std::vector<uint8_t>& record,
     dst.stylus.debug.coord.rawPressure = stylusPoint.rawPressure;
     dst.stylus.debug.coord.mappedPressure = stylusPoint.mappedPressure;
     dst.stylus.debug.coord.btSeq = stylusInput.btSample.seq;
-    dst.stylus.debug.coord.predictedAgeFrames = stylusPressure.predictedAgeFrames;
     dst.stylus.debug.coord.pressureIsReal = stylusPressure.pressureIsReal;
 #endif
 
@@ -663,7 +648,7 @@ bool PopulateHeatmapFrameFromRecordBytes(const std::vector<uint8_t>& record,
         if (!TryReadStridedField(record, fields, "contacts[].x", DvrFmt::Dvr2ValueType::Float32, i, tc.x, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].y", DvrFmt::Dvr2ValueType::Float32, i, tc.y, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].state", DvrFmt::Dvr2ValueType::Int32, i, tc.state, outError)) return false;
-        if (!TryReadStridedField(record, fields, "contacts[].area", DvrFmt::Dvr2ValueType::Int32, i, tc.area, outError)) return false;
+        if (!TryReadStridedField(record, fields, "contacts[].area", DvrFmt::Dvr2ValueType::Int32, i, tc.areaCells, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].signalSum", DvrFmt::Dvr2ValueType::Int32, i, tc.signalSum, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].sizeMm", DvrFmt::Dvr2ValueType::Float32, i, tc.sizeMm, outError)) return false;
         if (!TryReadBoolStridedField(record, fields, "contacts[].isEdge", i, tc.isEdge, outError)) return false;
@@ -673,10 +658,10 @@ bool PopulateHeatmapFrameFromRecordBytes(const std::vector<uint8_t>& record,
         if (!TryReadStridedField(record, fields, "contacts[].edgeFlags", DvrFmt::Dvr2ValueType::UInt32, i, tc.edgeFlags, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].centroidEdgeFlags", DvrFmt::Dvr2ValueType::UInt8, i, tc.centroidEdgeFlags, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].ecFlags", DvrFmt::Dvr2ValueType::UInt32, i, tc.ecFlags, outError)) return false;
-        if (!TryReadStridedField(record, fields, "contacts[].edgeDistX", DvrFmt::Dvr2ValueType::Float32, i, tc.edgeDistX, outError)) return false;
-        if (!TryReadStridedField(record, fields, "contacts[].edgeDistY", DvrFmt::Dvr2ValueType::Float32, i, tc.edgeDistY, outError)) return false;
-        if (!TryReadStridedField(record, fields, "contacts[].rawXBeforeEC", DvrFmt::Dvr2ValueType::Float32, i, tc.rawXBeforeEC, outError)) return false;
-        if (!TryReadStridedField(record, fields, "contacts[].rawYBeforeEC", DvrFmt::Dvr2ValueType::Float32, i, tc.rawYBeforeEC, outError)) return false;
+        if (!TryReadStridedField(record, fields, "contacts[].edgeDistX", DvrFmt::Dvr2ValueType::Float32, i, tc.edgeDistXCells, outError)) return false;
+        if (!TryReadStridedField(record, fields, "contacts[].edgeDistY", DvrFmt::Dvr2ValueType::Float32, i, tc.edgeDistYCells, outError)) return false;
+        if (!TryReadStridedField(record, fields, "contacts[].rawXBeforeEC", DvrFmt::Dvr2ValueType::Float32, i, tc.matchXCells, outError)) return false;
+        if (!TryReadStridedField(record, fields, "contacts[].rawYBeforeEC", DvrFmt::Dvr2ValueType::Float32, i, tc.matchYCells, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].ecWidthX", DvrFmt::Dvr2ValueType::UInt8, i, tc.ecWidthX, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].ecWidthY", DvrFmt::Dvr2ValueType::UInt8, i, tc.ecWidthY, outError)) return false;
         if (!TryReadStridedField(record, fields, "contacts[].lifeFlags", DvrFmt::Dvr2ValueType::UInt32, i, tc.lifeFlags, outError)) return false;

@@ -50,8 +50,6 @@ public:
 
     // ── Clear outputs ──
     runtime.post.noiseRejected = false;
-    runtime.post.noiseRejectReason = 0;
-    runtime.post.freqBypassed = false;
 #if EGOTOUCH_DIAG
     runtime.post.noiseValidDim1 = true;
     runtime.post.noiseValidDim2 = true;
@@ -76,7 +74,6 @@ public:
     const uint16_t signalY = runtime.signal.signalY;
     bool peakValidDim1 = true;
     bool peakValidDim2 = true;
-    uint8_t rejectReason = 0;
 
     // ═══════════════════════════════════════════════════════════
     // Gate 1 — Signal ratio abnormal
@@ -86,7 +83,6 @@ public:
         static_cast<uint32_t>(signalX) * m_signalRatioThreshold < signalY) {
       peakValidDim1 = false;
       peakValidDim2 = false;
-      rejectReason |= 1;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -100,7 +96,6 @@ public:
               m_stableSignalY) {
         peakValidDim1 = false;
         peakValidDim2 = false;
-        rejectReason |= 2;
       }
     }
 
@@ -119,7 +114,6 @@ public:
           jumpDim2 > static_cast<uint32_t>(m_coorJumpThreshold)) {
         peakValidDim1 = false;
         peakValidDim2 = false;
-        rejectReason |= 4;
       }
     }
 
@@ -148,7 +142,6 @@ public:
     runtime.post.ratioAnomalyCntDim2 = m_ratioAnomalyCntY;
 #endif
     runtime.post.noiseRejected = !allPassed;
-    runtime.post.noiseRejectReason = rejectReason;
 
     // ── Freeze coordinate on noise — mirrors TSACore bBypassCurFrame ──
     FreezeCoordinate(runtime, !allPassed);

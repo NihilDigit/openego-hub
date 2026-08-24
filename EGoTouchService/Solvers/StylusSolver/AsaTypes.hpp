@@ -40,13 +40,9 @@ struct SolvePoint {
     bool valid = false;
     float x = 0.0f;
     float y = 0.0f;
-    uint16_t reportX = 0;
-    uint16_t reportY = 0;
     uint16_t pressure = 0;
     uint16_t rawPressure = 0;
     uint16_t mappedPressure = 0;
-    uint16_t peakTx1 = 0;
-    uint16_t peakTx2 = 0;
     bool tiltValid = false;
     int16_t preTiltX = 0;
     int16_t preTiltY = 0;
@@ -54,10 +50,6 @@ struct SolvePoint {
     int16_t tiltY = 0;
     float tiltMagnitude = 0.0f;
     float tiltAzimuthDeg = 0.0f;
-    float tx1X = 0.0f;
-    float tx1Y = 0.0f;
-    float tx2X = 0.0f;
-    float tx2Y = 0.0f;
     float confidence = 0.0f;
 };
 
@@ -77,8 +69,6 @@ struct TxRuntime {
 
 struct FlowRuntime {
     bool terminal = false;
-    bool resetPost = false;
-    bool resetNoise = false;
     uint8_t pipelineStage = 0;
     FrameClass frameClass = FrameClass::ShortFrame;
 };
@@ -107,7 +97,6 @@ struct SignalRuntime {
     bool dim2EdgeActive = false;
     uint16_t dim1EdgeSignal = 0;
     uint16_t dim2EdgeSignal = 0;
-    bool overlapLike = false;
 };
 
 struct TiltRuntime {
@@ -136,7 +125,6 @@ struct PressureRuntime {
     uint16_t mappedPressure = 0;
     uint16_t outputPressure = 0;
     uint32_t btSeq = 0;
-    uint8_t predictedAgeFrames = 0;
 #if EGOTOUCH_DIAG
     uint16_t preIirPressure = 0;
     uint8_t polySegment = 0;
@@ -152,39 +140,25 @@ struct DecisionRuntime {
     bool inRangeCandidate = false;
     bool tipDownCandidate = false;
     bool authoritativeDown = false;
-    bool immediateRelease = false;
-    bool keepInRange = false;
     bool touchSuppressCarry = false;
     uint8_t touchSuppressFrames = 0;
-    bool enableCoordFilter = false;
-    bool enableCoorReviser = false;
-    bool enableEdgeCorrect = false;
 };
 
 struct PostRuntime {
     CoorResult postCoor{};
     CoorResult finalCoor{};
     CoorResult edgePostCoor{};
-    CoorResult postIirCoor{};
-    CoorResult predictedCoor{};
     SolvePoint point{};
     bool finalValid = false;
     uint16_t finalPressure = 0;
     float confidence = 0.0f;
     uint8_t linearFilterState = 0;
-    bool linearFilterActive = false;
-    int32_t linearFilterDeltaDim1 = 0;
-    int32_t linearFilterDeltaDim2 = 0;
 
     // ── Protocol/common post outputs ──
     bool noiseRejected = false;
-    uint8_t noiseRejectReason = 0;  // bit0=ratio, bit1=magnitude, bit2=jump
-    bool freqBypassed = false;       // frame bypassed by frequency gate
 
     // ── CoorSpeedProcess outputs ──
     int32_t speedValue = 0;
-    int32_t speedAvgDx = 0;
-    int32_t speedAvgDy = 0;
     int32_t speedShortAvgDist = 0;
     int32_t speedFullAvgDist = 0;
 

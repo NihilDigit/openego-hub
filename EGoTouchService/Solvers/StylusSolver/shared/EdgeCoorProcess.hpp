@@ -62,7 +62,6 @@ public:
         auto& runtime = frame.stylus.runtime.Active();
 
         m_needHighSpeed = false;
-        runtime.decision.enableEdgeCorrect = false;
 
         if (!m_enabled) {
             SnapshotPreFilter(runtime);
@@ -126,7 +125,6 @@ public:
         // Carry previous pressure into current frame on high-speed exit.
         if (m_needHighSpeed) {
             runtime.pressure.outputPressure = m_prevPressure;
-            runtime.decision.enableEdgeCorrect = true;
         }
     }
 

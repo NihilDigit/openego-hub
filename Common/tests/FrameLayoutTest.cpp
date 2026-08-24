@@ -44,7 +44,7 @@ void TestMasterSuffixLoadAndPredicates() {
     PutLe16(bytes.data(), Frame::MasterWord::kDiagStatus, 0x00BB);
     PutLe16(bytes.data(), Frame::MasterWord::kPendingFreqSwitch, 0x0102);
     PutLe16(bytes.data(), Frame::MasterWord::kTpFreq1, 0x0304);
-    PutLe16(bytes.data(), Frame::MasterWord::kTimestamp, 0x0506);
+    PutLe16(bytes.data(), Frame::MasterWord::kTpFreq2, 0x0506);
     PutLe16(bytes.data(), Frame::MasterWord::kPenF0NoiseCount, 0x0708);
     PutLe16(bytes.data(), Frame::MasterWord::kPenF1NoiseCount, 0x090A);
     PutLe16(bytes.data(), Frame::MasterWord::kTouchX, 0x0123);
@@ -58,8 +58,7 @@ void TestMasterSuffixLoadAndPredicates() {
     Require(view.diagStatus() == 0x00BB, "MasterSuffixView should load diagStatus as little-endian u16");
     Require(view.pendingFreqSwitch() == 0x0102, "MasterSuffixView should load pendingFreqSwitch as little-endian u16");
     Require(view.tpFreq1() == 0x0304, "MasterSuffixView should load tpFreq1 as little-endian u16");
-    Require(view.timestamp() == 0x0506 && view.tpFreq2() == 0x0506,
-            "MasterSuffixView timestamp and tpFreq2 should share the confirmed word");
+    Require(view.tpFreq2() == 0x0506, "MasterSuffixView should load tpFreq2 as little-endian u16");
     Require(view.penF0NoiseCount() == 0x0708, "MasterSuffixView should load penF0NoiseCount");
     Require(view.penF1NoiseCount() == 0x090A, "MasterSuffixView should load penF1NoiseCount");
     Require(view.touchX() == 0x0123 && view.touchY() == 0x0456, "MasterSuffixView should load touch coordinates");

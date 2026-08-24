@@ -47,8 +47,8 @@ void TestBinaryRoundTrip() {
                          first.stylus.runtime.hpp3.rawGrid.grid.tx2.anchorCol == 6 &&
                          first.stylus.runtime.hpp3.rawGrid.grid.tx2.grid[4][5] == 2345,
                          "stylus TX2 raw grid should round-trip");
-    DvrCoreTest::Require(first.stylus.output.valid && first.stylus.output.packet.bytes[16] == 0x34, "stylus output packet should round-trip");
-    DvrCoreTest::Require(first.stylus.output.point.valid && first.stylus.output.point.reportX == 125, "stylus point should round-trip");
+    DvrCoreTest::Require(first.stylus.output.point.valid && first.stylus.output.point.mappedPressure == 678,
+                         "stylus point should round-trip");
     DvrCoreTest::Require(first.touch.output.contacts.size() == 1 && first.touch.output.contacts[0].id == 7 && first.touch.output.contacts[0].signalSum == 1000, "contacts should round-trip");
 #if EGOTOUCH_DIAG
     DvrCoreTest::Require(first.rawLen == 4 && first.rawPtr != nullptr && first.rawPtr[3] == 0x40, "raw data should round-trip in diagnostic builds");

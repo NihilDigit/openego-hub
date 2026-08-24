@@ -107,7 +107,6 @@ namespace Himax {
             bool IsStylusConnected() const;
             const std::array<uint8_t, 6000>& GetFrameBuffer() const { return back_data; }
             bool GetLastMasterWasRead() const { return m_lastMasterWasRead; }
-            uint16_t GetLastFrameTimestamp() const;
 
             ChipResult<> SetFrameReadPolicy(bool block, uint8_t timeoutMs);
             ChipResult<> SetFrameReadNormalPolicy();

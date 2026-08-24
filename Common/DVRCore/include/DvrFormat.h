@@ -265,27 +265,14 @@ struct Dvr2TouchPacketRecord {
     uint8_t bytes[32]{};
 };
 
-struct Dvr2StylusPacketRecord {
-    uint8_t valid = 0;
-    uint8_t reportId = 0x08;
-    uint8_t length = 17;
-    uint8_t reserved = 0;
-    uint8_t bytes[17]{};
-    uint8_t reservedTail[3]{};
-};
-
 struct Dvr2StylusPointRecord {
     uint8_t valid = 0;
     uint8_t reserved0[3]{};
     float x = 0.0f;
     float y = 0.0f;
-    uint16_t reportX = 0;
-    uint16_t reportY = 0;
     uint16_t pressure = 0;
     uint16_t rawPressure = 0;
     uint16_t mappedPressure = 0;
-    uint16_t peakTx1 = 0;
-    uint16_t peakTx2 = 0;
     uint8_t tiltValid = 0;
     uint8_t reserved1 = 0;
     int16_t preTiltX = 0;
@@ -294,10 +281,6 @@ struct Dvr2StylusPointRecord {
     int16_t tiltY = 0;
     float tiltMagnitude = 0.0f;
     float tiltAzimuthDeg = 0.0f;
-    float tx1X = 0.0f;
-    float tx1Y = 0.0f;
-    float tx2X = 0.0f;
-    float tx2Y = 0.0f;
     float confidence = 0.0f;
 };
 
@@ -346,10 +329,8 @@ struct Dvr2StylusDataRecord {
     uint8_t touchSuppressActive = 0;
     uint8_t touchSuppressFrames = 0;
     uint8_t pressureIsReal = 0;
-    uint8_t predictedAgeFrames = 0;
-    uint8_t reserved0 = 0;
+    uint8_t reserved0[2]{};
     float outputConfidence = 0.0f;
-    Dvr2StylusPacketRecord packet{};
     Dvr2StylusPointRecord point{};
     Dvr2StylusRawGridRecord rawGrid{};
 };
@@ -390,11 +371,10 @@ static_assert(sizeof(Dvr2IndexEntry) == 32);
 static_assert(sizeof(Dvr2ContactRecord) == 80);
 static_assert(sizeof(Dvr2PeakRecord) == 12);
 static_assert(sizeof(Dvr2TouchPacketRecord) == 36);
-static_assert(sizeof(Dvr2StylusPacketRecord) == 24);
-static_assert(sizeof(Dvr2StylusPointRecord) == 64);
+static_assert(sizeof(Dvr2StylusPointRecord) == 40);
 static_assert(sizeof(Dvr2StylusRawGridBlockRecord) == 168);
 static_assert(sizeof(Dvr2StylusRawGridRecord) == 336);
-static_assert(sizeof(Dvr2StylusDataRecord) == 488);
+static_assert(sizeof(Dvr2StylusDataRecord) == 440);
 static_assert(sizeof(Dvr2DynamicDebugSchemaHeader) == 16);
 static_assert(sizeof(Dvr2DynamicDebugValuesHeader) == 8);
 static_assert(sizeof(Dvr2DynamicDebugFrameHeader) == 8);
@@ -412,11 +392,11 @@ static_assert(offsetof(Dvr2FrameCore, touchPackets) == 5416);
 static_assert(offsetof(Dvr2FrameCore, touchZones) == 5488);
 static_assert(offsetof(Dvr2FrameCore, peakZones) == 7888);
 static_assert(offsetof(Dvr2FrameCore, stylus) == 10288);
-static_assert(offsetof(Dvr2FrameCore, contacts) == 10776);
-static_assert(offsetof(Dvr2FrameCore, peaks) == 11580);
-static_assert(offsetof(Dvr2FramePayload, rawDataLength) == 11944);
-static_assert(offsetof(Dvr2FramePayload, rawData) == 11946);
-static_assert(sizeof(Dvr2FramePayload) == 17352);
+static_assert(offsetof(Dvr2FrameCore, contacts) == 10728);
+static_assert(offsetof(Dvr2FrameCore, peaks) == 11532);
+static_assert(offsetof(Dvr2FramePayload, rawDataLength) == 11896);
+static_assert(offsetof(Dvr2FramePayload, rawData) == 11898);
+static_assert(sizeof(Dvr2FramePayload) == 17304);
 
 inline void CopyFixedString(char* dst, size_t dstSize, std::string_view src) {
     if (dstSize == 0) return;
@@ -491,7 +471,6 @@ inline Dvr2FieldDef MakeField(uint32_t fieldId,
 inline std::vector<Dvr2FieldDef> BuildFrameSchema() {
     constexpr uint32_t core = static_cast<uint32_t>(offsetof(Dvr2FramePayload, frame));
     constexpr uint32_t stylus = core + static_cast<uint32_t>(offsetof(Dvr2FrameCore, stylus));
-    constexpr uint32_t stylusPacket = stylus + static_cast<uint32_t>(offsetof(Dvr2StylusDataRecord, packet));
     constexpr uint32_t stylusPoint = stylus + static_cast<uint32_t>(offsetof(Dvr2StylusDataRecord, point));
     constexpr uint32_t stylusRawGrid = stylus + static_cast<uint32_t>(offsetof(Dvr2StylusDataRecord, rawGrid));
     constexpr uint32_t stylusRawGridTx1 = stylusRawGrid + static_cast<uint32_t>(offsetof(Dvr2StylusRawGridRecord, tx1));
@@ -556,7 +535,6 @@ inline std::vector<Dvr2FieldDef> BuildFrameSchema() {
     fields.push_back(MakeField(id++, stylus + static_cast<uint32_t>(offsetof(Dvr2StylusDataRecord, touchSuppressActive)), sizeof(uint8_t), Dvr2ValueType::Bool, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.interop.touchSuppressActive", "Stylus Touch Suppress Active"));
     fields.push_back(MakeField(id++, stylus + static_cast<uint32_t>(offsetof(Dvr2StylusDataRecord, touchSuppressFrames)), sizeof(uint8_t), Dvr2ValueType::UInt8, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.interop.touchSuppressFrames", "Stylus Touch Suppress Frames"));
     fields.push_back(MakeField(id++, stylus + static_cast<uint32_t>(offsetof(Dvr2StylusDataRecord, pressureIsReal)), sizeof(uint8_t), Dvr2ValueType::Bool, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.pressureIsReal", "Stylus Pressure Is Real"));
-    fields.push_back(MakeField(id++, stylus + static_cast<uint32_t>(offsetof(Dvr2StylusDataRecord, predictedAgeFrames)), sizeof(uint8_t), Dvr2ValueType::UInt8, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.predictedAgeFrames", "Stylus Predicted Age Frames"));
 
     fields.push_back(MakeField(id++, stylusRawGridTx1 + static_cast<uint32_t>(offsetof(Dvr2StylusRawGridBlockRecord, valid)), sizeof(uint8_t), Dvr2ValueType::Bool, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.runtime.hpp3.rawGrid.grid.tx1.valid", "Stylus Raw TX1 Valid"));
     fields.push_back(MakeField(id++, stylusRawGridTx1 + static_cast<uint32_t>(offsetof(Dvr2StylusRawGridBlockRecord, anchorRow)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.runtime.hpp3.rawGrid.grid.tx1.anchorRow", "Stylus Raw TX1 Anchor Row"));
@@ -567,21 +545,13 @@ inline std::vector<Dvr2FieldDef> BuildFrameSchema() {
     fields.push_back(MakeField(id++, stylusRawGridTx2 + static_cast<uint32_t>(offsetof(Dvr2StylusRawGridBlockRecord, anchorCol)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.runtime.hpp3.rawGrid.grid.tx2.anchorCol", "Stylus Raw TX2 Anchor Col"));
     fields.push_back(MakeField(id++, stylusRawGridTx2 + static_cast<uint32_t>(offsetof(Dvr2StylusRawGridBlockRecord, grid)), sizeof(Dvr2StylusRawGridBlockRecord::grid), Dvr2ValueType::Int16, Dvr2FieldRank::Matrix, Dvr2FieldGroup::Stylus, "stylus.runtime.hpp3.rawGrid.grid.tx2.grid", "Stylus Raw TX2 Grid", sizeof(int16_t), kStylusRawGridCells, sizeof(int16_t), kStylusRawGridDim, kStylusRawGridDim));
 
-    fields.push_back(MakeField(id++, stylusPacket + static_cast<uint32_t>(offsetof(Dvr2StylusPacketRecord, valid)), sizeof(uint8_t), Dvr2ValueType::Bool, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.output.packet.valid", "Stylus Packet Valid"));
-    fields.push_back(MakeField(id++, stylusPacket + static_cast<uint32_t>(offsetof(Dvr2StylusPacketRecord, reportId)), sizeof(uint8_t), Dvr2ValueType::UInt8, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.output.packet.reportId", "Stylus Packet Report ID"));
-    fields.push_back(MakeField(id++, stylusPacket + static_cast<uint32_t>(offsetof(Dvr2StylusPacketRecord, length)), sizeof(uint8_t), Dvr2ValueType::UInt8, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.output.packet.length", "Stylus Packet Length"));
-    fields.push_back(MakeField(id++, stylusPacket + static_cast<uint32_t>(offsetof(Dvr2StylusPacketRecord, bytes)), sizeof(Dvr2StylusPacketRecord::bytes), Dvr2ValueType::UInt8, Dvr2FieldRank::Array, Dvr2FieldGroup::Stylus, "stylus.output.packet.bytes", "Stylus Packet Bytes", sizeof(uint8_t), sizeof(Dvr2StylusPacketRecord::bytes)));
 
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, valid)), sizeof(uint8_t), Dvr2ValueType::Bool, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.valid", "Stylus Point Valid"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, x)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.x", "Stylus Point X"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, y)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.y", "Stylus Point Y"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, reportX)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.reportX", "Stylus Report X"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, reportY)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.reportY", "Stylus Report Y"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, pressure)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.pressure", "Stylus Point Pressure"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, rawPressure)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.rawPressure", "Stylus Raw Pressure"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, mappedPressure)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.mappedPressure", "Stylus Mapped Pressure"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, peakTx1)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.peakTx1", "Stylus Peak TX1"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, peakTx2)), sizeof(uint16_t), Dvr2ValueType::UInt16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.peakTx2", "Stylus Peak TX2"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tiltValid)), sizeof(uint8_t), Dvr2ValueType::Bool, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tiltValid", "Stylus Tilt Valid"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, preTiltX)), sizeof(int16_t), Dvr2ValueType::Int16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.preTiltX", "Stylus Pre Tilt X"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, preTiltY)), sizeof(int16_t), Dvr2ValueType::Int16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.preTiltY", "Stylus Pre Tilt Y"));
@@ -589,10 +559,6 @@ inline std::vector<Dvr2FieldDef> BuildFrameSchema() {
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tiltY)), sizeof(int16_t), Dvr2ValueType::Int16, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tiltY", "Stylus Tilt Y"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tiltMagnitude)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tiltMagnitude", "Stylus Tilt Magnitude"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tiltAzimuthDeg)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tiltAzimuthDeg", "Stylus Tilt Azimuth Deg"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tx1X)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tx1X", "Stylus TX1 X"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tx1Y)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tx1Y", "Stylus TX1 Y"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tx2X)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tx2X", "Stylus TX2 X"));
-    fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, tx2Y)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.tx2Y", "Stylus TX2 Y"));
     fields.push_back(MakeField(id++, stylusPoint + static_cast<uint32_t>(offsetof(Dvr2StylusPointRecord, confidence)), sizeof(float), Dvr2ValueType::Float32, Dvr2FieldRank::Scalar, Dvr2FieldGroup::Stylus, "stylus.point.confidence", "Stylus Confidence"));
 
     const uint32_t contactsParentId = id;

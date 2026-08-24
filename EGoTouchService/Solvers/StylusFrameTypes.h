@@ -5,11 +5,12 @@
 
 #include "SolverBuildConfig.h"
 #include "StylusSolver/AsaTypes.hpp"
-#include "StylusSolver/hpp2/Hpp2Runtime.hpp"
 #include "StylusSolver/hpp3/Hpp3Runtime.hpp"
 
 namespace Solvers {
 
+// The VHF report the reporter builds each frame. It is a return value, not
+// frame state: nothing writes it back into StylusOutputState.
 struct StylusPacket {
     bool valid = false;
     uint8_t reportId = 0x08;
@@ -26,16 +27,6 @@ struct StylusInputSnapshot {
     bool tx2BlockValid = false;
     uint32_t status = 0;
 
-    // HPP2 protocol/scalar fields mirror TSACore stylusFrame. They are zero
-    // until the frame bridge/parser starts exposing line-mode stylus payloads.
-    uint32_t auxStatusFlags = 0;
-    uint16_t mainFreq = 0;
-    uint16_t auxFreq = 0;
-    uint16_t framePressure = 0;
-    uint32_t buttonBits = 0;
-    bool hpp2LineValid = false;
-    std::array<uint16_t, 100> hpp2LineData{}; // 60 TX + 40 RX for current preset
-
     Asa::BtInputSnapshot btSample{};
 };
 
@@ -48,7 +39,6 @@ struct StylusOutputState {
     float confidence = 0.0f;
     uint8_t pipelineStage = 0;
     Asa::SolvePoint point{};
-    StylusPacket packet{};
 };
 
 struct StylusTouchInterop {
@@ -68,28 +58,14 @@ struct StylusTouchInterop {
 struct StylusRuntime {
     enum class Protocol : uint8_t {
         None,
-        Hpp2,
         Hpp3,
     };
 
     Protocol activeProtocol = Protocol::None;
-    Stylus::Hpp2::Runtime hpp2{};
     Stylus::Hpp3::Runtime hpp3{};
 
-    Asa::Runtime& Active() {
-        return activeProtocol == Protocol::Hpp2 ? static_cast<Asa::Runtime&>(hpp2)
-                                                : static_cast<Asa::Runtime&>(hpp3);
-    }
-
-    const Asa::Runtime& Active() const {
-        return activeProtocol == Protocol::Hpp2 ? static_cast<const Asa::Runtime&>(hpp2)
-                                                : static_cast<const Asa::Runtime&>(hpp3);
-    }
-
-    Stylus::Hpp2::Runtime& SelectHpp2() {
-        activeProtocol = Protocol::Hpp2;
-        return hpp2;
-    }
+    Asa::Runtime& Active() { return hpp3; }
+    const Asa::Runtime& Active() const { return hpp3; }
 
     Stylus::Hpp3::Runtime& SelectHpp3() {
         activeProtocol = Protocol::Hpp3;
@@ -98,18 +74,15 @@ struct StylusRuntime {
 
     void ResetFrameFlags() {
         activeProtocol = Protocol::None;
-        hpp2.ResetFrameFlags();
         hpp3.ResetFrameFlags();
     }
 
     void ResetPostOutputs() {
-        hpp2.ResetPostOutputs();
         hpp3.ResetPostOutputs();
     }
 
 #if EGOTOUCH_DIAG
     void ResetDiagnosticFields() {
-        hpp2.ResetDiagnosticFields();
         hpp3.ResetDiagnosticFields();
     }
 #endif
@@ -153,7 +126,6 @@ struct StylusDebugFrame {
         uint16_t rawPressure = 0;
         uint16_t mappedPressure = 0;
         uint32_t btSeq = 0;
-        uint8_t predictedAgeFrames = 0;
         bool pressureIsReal = false;
 
         uint8_t vhfPenState = 0;

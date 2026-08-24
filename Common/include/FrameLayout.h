@@ -7,7 +7,6 @@
 // memory, DVR ring buffers, and IPC structures.
 //
 // All offsets validated against Ghidra reverse-engineering of himax_thp_drv.dll.
-// See: docs/逆向/frame_memory_layout.md
 
 #include <cstdint>
 #include <cstring>
@@ -43,8 +42,11 @@ namespace MasterWord {
     constexpr int kDiagStatus        = 3;   // +0x06  0xBB = diagnostic marker
     constexpr int kPendingFreqSwitch = 6;   // +0x0C  !=0 means pending freq switch request
     constexpr int kTpFreq1           = 8;   // +0x10  current TPIC frequency 1
-    constexpr int kTimestamp         = 9;   // +0x12  frame timestamp (u16)
-    constexpr int kTpFreq2           = kTimestamp;
+    // Previously named kTimestamp.  The reverse-engineering notes and the
+    // original consumer both read this word as a frequency code; the timestamp
+    // reading came from a single unexplained rename, and no word in the frame
+    // ever counts monotonically.
+    constexpr int kTpFreq2           = 9;   // +0x12  current TPIC frequency 2
     constexpr int kPenF0NoiseCount   = 14;  // +0x1C  F0 noise count (>5000 triggers switch)
     constexpr int kPenF1NoiseCount   = 16;  // +0x20  F1 noise count (>5000 triggers switch)
     constexpr int kTouchX            = 54;  // +0x6C  touch X coordinate (0xFF = no touch)
@@ -71,7 +73,6 @@ struct MasterSuffixView {
     uint16_t diagStatus()        const { return words[MasterWord::kDiagStatus]; }
     uint16_t pendingFreqSwitch() const { return words[MasterWord::kPendingFreqSwitch]; }
     uint16_t tpFreq1()           const { return words[MasterWord::kTpFreq1]; }
-    uint16_t timestamp()         const { return words[MasterWord::kTimestamp]; }
     uint16_t tpFreq2()           const { return words[MasterWord::kTpFreq2]; }
     uint16_t penF0NoiseCount()   const { return words[MasterWord::kPenF0NoiseCount]; }
     uint16_t penF1NoiseCount()   const { return words[MasterWord::kPenF1NoiseCount]; }

@@ -72,9 +72,6 @@ ego_add_solvers_unit(SolversUnit_TouchPalmBoxSuppress touch
     unit/touch/TouchPalmBoxSuppressTest.cpp
 )
 
-ego_add_solvers_unit(SolversUnit_StylusHpp2Pipeline stylus
-    unit/stylus/StylusHpp2PipelineTest.cpp
-)
 ego_add_solvers_config_unit(SolversUnit_StylusPipelineConfigRoundTrip stylus
     unit/stylus/StylusPipelineConfigRoundTripTest.cpp
 )

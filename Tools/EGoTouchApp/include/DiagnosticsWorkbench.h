@@ -35,7 +35,7 @@ private:
     void DrawStylusServicePolicyPanel();
     void DrawStylusPipelineConfigPanel();
     void DrawStylusCoordinatePanel();
-    void DrawStylusPacketDetails();
+    void DrawStylusParserInputPanel();
     void DrawHeatmap();
     void DrawCoordinateTable();
     void DrawTouchInspectorPanel();
@@ -90,7 +90,7 @@ private:
 
 
     // Playback UI
-    std::filesystem::path m_dvrImportDirectory{"C:/ProgramData/EGoTouchRev/exports"};
+    std::filesystem::path m_dvrImportDirectory{"C:/ProgramData/OpenEGoHub/exports"};
     std::string m_lastDvrImportStatus;
     std::string m_lastCsvExportStatus;
 };

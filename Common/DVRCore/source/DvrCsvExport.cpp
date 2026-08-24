@@ -267,7 +267,7 @@ bool WriteFrameCsvFile(const std::filesystem::path& filePath,
         out << "--- EGoTouch Frame Export ---\n";
         out << "ServiceTimestampRaw," << frame.timestamp << "\n";
         out << "HostReceiveEpochUs," << frame.receiveSystemEpochUs << "\n";
-        out << "MasterSuffixTimestamp," << (frame.masterSuffixValid ? frame.masterSuffix.timestamp() : 0) << "\n";
+        out << "MasterSuffixTpFreq2," << (frame.masterSuffixValid ? frame.masterSuffix.tpFreq2() : 0) << "\n";
         if (!sourceName.empty()) {
             out << "Source," << sourceName << "\n";
         }
@@ -296,7 +296,7 @@ bool WriteFrameCsvFile(const std::filesystem::path& filePath,
             << c.x << ','
             << c.y << ','
             << c.state << ','
-            << c.area << ','
+            << c.areaCells << ','
             << c.signalSum << ','
             << c.sizeMm << ','
             << (c.isReported ? 1 : 0) << ','
@@ -340,7 +340,6 @@ bool WriteFrameCsvFile(const std::filesystem::path& filePath,
             masterRows.push_back({"MasterSuffix_F1Noise", std::to_string(frame.masterSuffix.penF1NoiseCount())});
             masterRows.push_back({"MasterSuffix_TpFreq1", std::to_string(frame.masterSuffix.tpFreq1())});
             masterRows.push_back({"MasterSuffix_TpFreq2", std::to_string(frame.masterSuffix.tpFreq2())});
-            masterRows.push_back({"MasterSuffix_Timestamp", std::to_string(frame.masterSuffix.timestamp())});
         }
         ApplyDynamicRows(masterRows, Ipc::DebugDvrTarget::MasterStatus, dynamicSchema, dynamicFrame);
         WriteCsvKeyValueSection(out, "Master Status", masterRows);
@@ -371,25 +370,16 @@ bool WriteFrameCsvFile(const std::filesystem::path& filePath,
         slaveRows.push_back({"PeakRawTx2", std::to_string(stylusInterop.signalY)});
         slaveRows.push_back({"MaxRawPeak", std::to_string(stylusInterop.maxRawPeak)});
         slaveRows.push_back({"PressureIsReal", stylusRuntimePressure.pressureIsReal ? "1" : "0"});
-        slaveRows.push_back({"PredictedAgeFrames", std::to_string(static_cast<unsigned int>(stylusRuntimePressure.predictedAgeFrames))});
         slaveRows.push_back({"Pressure", std::to_string(stylusOutput.pressure)});
         slaveRows.push_back({"PointValid", stylusPoint.valid ? "1" : "0"});
         slaveRows.push_back({"PointX", std::to_string(stylusPoint.x)});
         slaveRows.push_back({"PointY", std::to_string(stylusPoint.y)});
-        slaveRows.push_back({"ReportX", std::to_string(stylusPoint.reportX)});
-        slaveRows.push_back({"ReportY", std::to_string(stylusPoint.reportY)});
         slaveRows.push_back({"PointConfidence", std::to_string(stylusPoint.confidence)});
         slaveRows.push_back({"RawPressure", std::to_string(stylusPoint.rawPressure)});
         for (int i = 0; i < 4; ++i) {
             slaveRows.push_back({"BtRawPressure" + std::to_string(i), std::to_string(stylusInput.btSample.rawPressure[static_cast<size_t>(i)])});
         }
         slaveRows.push_back({"MappedPressure", std::to_string(stylusPoint.mappedPressure)});
-        slaveRows.push_back({"SignalCompositeTx1", std::to_string(stylusPoint.peakTx1)});
-        slaveRows.push_back({"SignalCompositeTx2", std::to_string(stylusPoint.peakTx2)});
-        slaveRows.push_back({"Tx1X", std::to_string(stylusPoint.tx1X)});
-        slaveRows.push_back({"Tx1Y", std::to_string(stylusPoint.tx1Y)});
-        slaveRows.push_back({"Tx2X", std::to_string(stylusPoint.tx2X)});
-        slaveRows.push_back({"Tx2Y", std::to_string(stylusPoint.tx2Y)});
         slaveRows.push_back({"TiltValid", stylusPoint.tiltValid ? "1" : "0"});
         slaveRows.push_back({"PreTiltX", std::to_string(stylusPoint.preTiltX)});
         slaveRows.push_back({"PreTiltY", std::to_string(stylusPoint.preTiltY)});
@@ -397,8 +387,6 @@ bool WriteFrameCsvFile(const std::filesystem::path& filePath,
         slaveRows.push_back({"TiltY", std::to_string(stylusPoint.tiltY)});
         slaveRows.push_back({"TiltMagnitude", std::to_string(stylusPoint.tiltMagnitude)});
         slaveRows.push_back({"TiltAzimuthDeg", std::to_string(stylusPoint.tiltAzimuthDeg)});
-        slaveRows.push_back({"LegacyPacketValid", stylusOutput.packet.valid ? "1" : "0"});
-        slaveRows.push_back({"LegacyPacketHex", stylusOutput.packet.valid ? FormatCsvPacketBytes(stylusOutput.packet.bytes) : "N/A"});
         ApplyDynamicRows(slaveRows, Ipc::DebugDvrTarget::SlaveSuffix, dynamicSchema, dynamicFrame);
         WriteCsvKeyValueSection(out, "Slave Status", slaveRows);
     }

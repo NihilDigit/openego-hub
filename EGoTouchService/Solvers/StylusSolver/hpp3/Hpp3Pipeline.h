@@ -21,8 +21,6 @@ namespace Solvers::Stylus::Hpp3 {
 // caller is responsible for shared cleanup and commit.
 class Pipeline {
 public:
-    bool m_enabled = true;
-
     // ── HPP3-specific stages (public for ConfigKeys / direct access) ──
     GridFeatureExtractor     m_featureExtractor;
     CoordinateSolver         m_coordinateSolver;
@@ -35,8 +33,7 @@ public:
     bool Process(HeatmapFrame& frame) {
         auto& runtime = frame.stylus.runtime.SelectHpp3();
         auto& flow = runtime.flow;
-        const Settings settings{m_enabled};
-        Context ctx{frame, runtime, settings, m_state};
+        Context ctx{frame, runtime};
 
         // ── Stage 1: Grid feature extraction ──
         m_featureExtractor.Process(ctx);
@@ -71,9 +68,6 @@ public:
         m_tiltProcess.Reset();
         m_postPressure.Reset();
     }
-
-private:
-    State m_state{};
 };
 
 } // namespace Solvers::Stylus::Hpp3

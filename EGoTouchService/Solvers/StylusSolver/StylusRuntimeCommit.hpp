@@ -9,7 +9,6 @@ public:
     inline void Commit(HeatmapFrame& frame) const {
         auto& stylus = frame.stylus;
         auto& runtime = stylus.runtime.Active();
-        const bool isHpp2 = stylus.runtime.activeProtocol == StylusRuntime::Protocol::Hpp2;
         const bool isHpp3 = stylus.runtime.activeProtocol == StylusRuntime::Protocol::Hpp3;
 
         stylus.output = {};
@@ -23,8 +22,10 @@ public:
             runtime.decision.inRangeCandidate && runtime.post.finalValid;
         stylus.output.tipDown =
             runtime.decision.tipDownCandidate && stylus.output.valid;
-        // TODO: Feed buttonActive into the VHF barrel button bit when packet emission is wired.
-        stylus.output.buttonActive = isHpp2 && stylus.runtime.hpp2.buttonPressed && stylus.output.inRange;
+        // buttonActive stays false: the barrel button arrives over the pen's BT link,
+        // not in the heatmap, and nothing decodes it yet. Wiring it up means reading the
+        // BT report here and setting the VHF barrel bit in the packet helper.
+        stylus.output.buttonActive = false;
         stylus.output.pressure = runtime.post.finalPressure;
         stylus.output.confidence = runtime.post.confidence;
         stylus.output.pipelineStage = runtime.flow.pipelineStage;
@@ -69,7 +70,6 @@ public:
         stylus.debug.coord.rawPressure = runtime.pressure.rawPressure;
         stylus.debug.coord.mappedPressure = runtime.pressure.mappedPressure;
         stylus.debug.coord.btSeq = runtime.pressure.btSeq;
-        stylus.debug.coord.predictedAgeFrames = runtime.pressure.predictedAgeFrames;
         stylus.debug.coord.pressureIsReal = runtime.pressure.pressureIsReal;
         stylus.debug.coord.linearFilterState = runtime.post.linearFilterState;
         stylus.debug.coord.tiltDiffX = static_cast<float>(runtime.tilt.diffDim1);
