@@ -62,16 +62,6 @@ void RegisterServiceConfigBindings(Config::ConfigBinder& binder, ServiceConfigSt
         {ServiceMode::Full, "full"},
         {ServiceMode::TouchOnly, "touch_only"},
     }};
-    static const std::array<std::pair<PenButtonMode, std::string>, 3> kPenButtonModeMapping{{
-        {PenButtonMode::OemCustom, "oem_custom"},
-        {PenButtonMode::NativeBarrel, "native_barrel"},
-        {PenButtonMode::NativeEraser, "native_eraser"},
-    }};
-    static const std::array<std::pair<PenButtonRoute, std::string>, 3> kPenButtonRouteMapping{{
-        {PenButtonRoute::VhfOnly, "vhf_only"},
-        {PenButtonRoute::Win32Only, "win32_only"},
-        {PenButtonRoute::VhfAndWin32, "vhf_and_win32"},
-    }};
 
     constexpr auto runtimeBinding = Config::ConfigRuntimeBinding::ManualLiveApply;
     binder.bindEnum("service.mode", &ServiceConfigState::mode, state,
@@ -81,9 +71,9 @@ void RegisterServiceConfigBindings(Config::ConfigBinder& binder, ServiceConfigSt
     binder.bind("service.stylus_vhf_enabled", &ServiceConfigState::stylusVhfEnabled, state,
                 true, {}, "Enable stylus VHF output", runtimeBinding);
     binder.bindEnum("service.pen_button_mode", &ServiceConfigState::penButtonMode, state,
-                    PenButtonMode::OemCustom, std::span<const std::pair<PenButtonMode, std::string>>(kPenButtonModeMapping), "Pen button semantic mode", runtimeBinding);
+                    PenButtonMode::WindowsInk, PenButtonModeMapping(), "Pen button semantic mode", runtimeBinding);
     binder.bindEnum("service.pen_button_route", &ServiceConfigState::penButtonRoute, state,
-                    PenButtonRoute::VhfOnly, std::span<const std::pair<PenButtonRoute, std::string>>(kPenButtonRouteMapping), "Pen button injection route", runtimeBinding);
+                    PenButtonRoute::VhfOnly, PenButtonRouteMapping(), "Pen button injection route", runtimeBinding);
 }
 
 const char* ServiceModeToConfig(ServiceMode mode) {
@@ -92,32 +82,26 @@ const char* ServiceModeToConfig(ServiceMode mode) {
 
 std::optional<PenButtonMode> ParsePenButtonModeValue(const Config::ConfigValue& value) {
     if (const auto* text = std::get_if<std::string>(&value)) {
-        const auto normalized = Normalize(*text);
-        if (normalized == "oem_custom") return PenButtonMode::OemCustom;
-        if (normalized == "native_barrel") return PenButtonMode::NativeBarrel;
-        if (normalized == "native_eraser") return PenButtonMode::NativeEraser;
-        return std::nullopt;
+        return PenButtonModeFromToken(Normalize(*text));
     }
     if (const auto* numeric = std::get_if<int32_t>(&value)) {
-        if (*numeric >= 0 && *numeric <= 2) {
-            return static_cast<PenButtonMode>(*numeric);
-        }
+        return PenButtonModeFromNumeric(*numeric);
     }
     return std::nullopt;
 }
 
 std::optional<PenButtonRoute> ParsePenButtonRouteValue(const Config::ConfigValue& value) {
     if (const auto* text = std::get_if<std::string>(&value)) {
-        const auto normalized = Normalize(*text);
-        if (normalized == "vhf_only") return PenButtonRoute::VhfOnly;
-        if (normalized == "win32_only") return PenButtonRoute::Win32Only;
-        if (normalized == "vhf_and_win32" || normalized == "vhf_win32") return PenButtonRoute::VhfAndWin32;
-        return std::nullopt;
+        auto normalized = Normalize(*text);
+        // 归一化把显示写法 "VHF + Win32" 压成 vhf_win32，而表里的规范名是 vhf_and_win32。
+        // 这是唯一一个两边对不上的 token。
+        if (normalized == "vhf_win32") {
+            normalized = "vhf_and_win32";
+        }
+        return PenButtonRouteFromToken(normalized);
     }
     if (const auto* numeric = std::get_if<int32_t>(&value)) {
-        if (*numeric >= 0 && *numeric <= 2) {
-            return static_cast<PenButtonRoute>(*numeric);
-        }
+        return PenButtonRouteFromNumeric(*numeric);
     }
     return std::nullopt;
 }

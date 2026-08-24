@@ -108,6 +108,33 @@ constexpr const char* ToString(PenModuleModel model) noexcept {
     }
 }
 
+// 面向用户的产品名。代号（ToString）留给日志和诊断，两者不能混用：代号必须稳定可 grep，
+// 产品名则要随华为的叫法走。
+//
+// 对照取自华为官方《手写笔与平板/笔记本适配清单》：
+//   CD52            → M-Pencil（第一代）
+//   CD54 / CD54-L   → M-Pencil（第二代）
+//   CD54-S/-S-L     → M-Pencil（第三代）
+//
+// CD54R 不在那份清单里，它不是零售型号——只出现在华为选件中心的 CD54RPenApp.dll 插件和这里
+// 的 0x01011B。它按第二代显示，依据是实机：MateBook E Go 随附的这支报 0x01011B，而机主确认
+// 手上是第二代。0x01011B 与 CD54 的 0x00011B 只差一个字节，同批 DLL 里还有
+// CD54_VENDOR_SUNWODA / CD54_VENDOR_LONGQI / CD54_L_TYPE，与「二代的某个代工或长短款变体」
+// 一致。
+//
+// 不要拿选件中心的产品图反推代数：65819_00.png（CD54R）与 4468738_00.png（CD54S）逐字节相
+// 同，美术资源是跨型号复用的。这条线索曾指向第三代，是错的——图的颜色（白色）与实物相符，
+// 但两个型号共用一张图这件事本身说明不了它们同代。
+constexpr const char* ToDisplayName(PenModuleModel model) noexcept {
+    switch (model) {
+    case PenModuleModel::Cd52:  return "HUAWEI M-Pencil（第一代）";
+    case PenModuleModel::Cd54:
+    case PenModuleModel::Cd54R: return "HUAWEI M-Pencil（第二代）";
+    case PenModuleModel::Cd54S: return "HUAWEI M-Pencil（第三代）";
+    default: return "";
+    }
+}
+
 constexpr const char* ToString(PenModuleProtocolHint hint) noexcept {
     switch (hint) {
     case PenModuleProtocolHint::Hpp2: return "Hpp2";

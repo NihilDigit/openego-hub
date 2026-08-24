@@ -26,8 +26,9 @@ public:
     /// 注入一次橡皮擦脉冲
     bool InjectEraserPulse(POINT screenPt);
 
-    /// 注入 Win+F22 快捷键
-    bool InjectWinF22Shortcut();
+    // 这里没有键盘快捷键注入。服务在会话 0，SendInput 拿不到可交互的输入桌面，必然以
+    // ERROR_ACCESS_DENIED 失败；笔按键双击 → Windows Ink 的注入在托盘进程里，见
+    // Common/include/PenInkShortcut.h。下面两个走的是合成指针设备，不受此限。
 
     /// 设备是否已就绪
     bool IsReady() const { return m_device != nullptr; }

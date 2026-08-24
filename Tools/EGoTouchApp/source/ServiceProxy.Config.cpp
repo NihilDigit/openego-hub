@@ -57,49 +57,34 @@ std::string NormalizeConfigToken(std::string value) {
 }
 
 const char* ToPenButtonModeConfig(PenButtonMode mode) {
-    switch (mode) {
-    case PenButtonMode::OemCustom: return "oem_custom";
-    case PenButtonMode::NativeBarrel: return "native_barrel";
-    case PenButtonMode::NativeEraser: return "native_eraser";
-    }
-    return "oem_custom";
+    return ToPenButtonModeToken(mode);
 }
 
 const char* ToPenButtonRouteConfig(PenButtonRoute route) {
-    switch (route) {
-    case PenButtonRoute::VhfOnly: return "vhf_only";
-    case PenButtonRoute::Win32Only: return "win32_only";
-    case PenButtonRoute::VhfAndWin32: return "vhf_and_win32";
-    }
-    return "vhf_only";
+    return ToPenButtonRouteToken(route);
 }
 
 std::optional<PenButtonMode> ParsePenButtonModeConfig(const Config::ConfigValue& value) {
     if (const auto* text = std::get_if<std::string>(&value)) {
-        const auto normalized = NormalizeConfigToken(*text);
-        if (normalized == "oem_custom") return PenButtonMode::OemCustom;
-        if (normalized == "native_barrel") return PenButtonMode::NativeBarrel;
-        if (normalized == "native_eraser") return PenButtonMode::NativeEraser;
+        return PenButtonModeFromToken(NormalizeConfigToken(*text));
     }
     if (const auto* numeric = std::get_if<int32_t>(&value)) {
-        if (*numeric >= 0 && *numeric <= 2) {
-            return static_cast<PenButtonMode>(*numeric);
-        }
+        return PenButtonModeFromNumeric(*numeric);
     }
     return std::nullopt;
 }
 
 std::optional<PenButtonRoute> ParsePenButtonRouteConfig(const Config::ConfigValue& value) {
     if (const auto* text = std::get_if<std::string>(&value)) {
-        const auto normalized = NormalizeConfigToken(*text);
-        if (normalized == "vhf_only") return PenButtonRoute::VhfOnly;
-        if (normalized == "win32_only") return PenButtonRoute::Win32Only;
-        if (normalized == "vhf_and_win32" || normalized == "vhf_win32") return PenButtonRoute::VhfAndWin32;
+        auto normalized = NormalizeConfigToken(*text);
+        // 归一化把显示写法 "VHF + Win32" 压成 vhf_win32，表里的规范名是 vhf_and_win32。
+        if (normalized == "vhf_win32") {
+            normalized = "vhf_and_win32";
+        }
+        return PenButtonRouteFromToken(normalized);
     }
     if (const auto* numeric = std::get_if<int32_t>(&value)) {
-        if (*numeric >= 0 && *numeric <= 2) {
-            return static_cast<PenButtonRoute>(*numeric);
-        }
+        return PenButtonRouteFromNumeric(*numeric);
     }
     return std::nullopt;
 }
@@ -272,7 +257,7 @@ struct ServiceSchemaState {
     ServiceModeSchema mode = ServiceModeSchema::Full;
     bool autoMode = true;
     bool stylusVhfEnabled = true;
-    PenButtonMode penButtonMode = PenButtonMode::OemCustom;
+    PenButtonMode penButtonMode = PenButtonMode::WindowsInk;
     PenButtonRoute penButtonRoute = PenButtonRoute::VhfOnly;
 };
 
@@ -282,17 +267,6 @@ void RegisterServiceConfigSchemaBindings(Config::ConfigBinder& binder,
         {ServiceModeSchema::Full, "full"},
         {ServiceModeSchema::TouchOnly, "touch_only"},
     }};
-    static const std::array<std::pair<PenButtonMode, std::string>, 3> kPenButtonModeMapping{{
-        {PenButtonMode::OemCustom, "oem_custom"},
-        {PenButtonMode::NativeBarrel, "native_barrel"},
-        {PenButtonMode::NativeEraser, "native_eraser"},
-    }};
-    static const std::array<std::pair<PenButtonRoute, std::string>, 3> kPenButtonRouteMapping{{
-        {PenButtonRoute::VhfOnly, "vhf_only"},
-        {PenButtonRoute::Win32Only, "win32_only"},
-        {PenButtonRoute::VhfAndWin32, "vhf_and_win32"},
-    }};
-
     constexpr auto runtimeBinding = Config::ConfigRuntimeBinding::ManualLiveApply;
     binder.bindEnum("service.mode", &ServiceSchemaState::mode, state,
                     ServiceModeSchema::Full, std::span<const std::pair<ServiceModeSchema, std::string>>(kModeMapping), "Service runtime topology", runtimeBinding);
@@ -301,17 +275,9 @@ void RegisterServiceConfigSchemaBindings(Config::ConfigBinder& binder,
     binder.bind("service.stylus_vhf_enabled", &ServiceSchemaState::stylusVhfEnabled, state,
                 true, {}, "Enable stylus VHF output", runtimeBinding);
     binder.bindEnum("service.pen_button_mode", &ServiceSchemaState::penButtonMode, state,
-                    PenButtonMode::OemCustom, std::span<const std::pair<PenButtonMode, std::string>>(kPenButtonModeMapping), "Pen button semantic mode", runtimeBinding);
+                    PenButtonMode::WindowsInk, PenButtonModeMapping(), "Pen button semantic mode", runtimeBinding);
     binder.bindEnum("service.pen_button_route", &ServiceSchemaState::penButtonRoute, state,
-                    PenButtonRoute::VhfOnly, std::span<const std::pair<PenButtonRoute, std::string>>(kPenButtonRouteMapping), "Pen button injection route", runtimeBinding);
-}
-
-void PopulateServiceDefaults(Config::ConfigStore& store) {
-    SetValue(store, "service.mode", ToConfigValue("full"));
-    SetValue(store, "service.auto_mode", ToConfigValue(true));
-    SetValue(store, "service.stylus_vhf_enabled", ToConfigValue(true));
-    SetValue(store, "service.pen_button_mode", ToConfigValue(PenButtonMode::OemCustom));
-    SetValue(store, "service.pen_button_route", ToConfigValue(PenButtonRoute::VhfOnly));
+                    PenButtonRoute::VhfOnly, PenButtonRouteMapping(), "Pen button injection route", runtimeBinding);
 }
 
 void PopulateServiceValues(Config::ConfigStore& store,
@@ -401,7 +367,7 @@ void ServiceProxy::InitConfigSchema() {
 
     m_configDraft = ConfigDraft{};
     m_configV3CatalogReady = false;
-    PopulateServiceDefaults(m_configDraft.catalogDefaults);
+    // 默认值全部来自 binder：手工预置一遍再被 writeDefaults 覆盖，只会让两处默认值悄悄分叉。
     binder.writeDefaults(m_configDraft.catalogDefaults);
 
     m_configDraft.editableDraft = Config::ConfigStore{};
@@ -476,7 +442,6 @@ Config::ConfigSchemaSnapshot BuildServiceProxyConfigSchemaSnapshotForTest() {
     Config::registerRuntimeKeyMappings(binder);
 
     Config::ConfigStore defaults;
-    PopulateServiceDefaults(defaults);
     binder.writeDefaults(defaults);
     return Config::BuildMergedSchema(defaults, binder);
 }

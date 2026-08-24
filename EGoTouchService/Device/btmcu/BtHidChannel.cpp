@@ -83,6 +83,7 @@ void BtHidChannel::WorkerFunc() {
                 continue;
             }
             if (!res && res.error() == ChipError::Timeout) {
+                OnIdleTick();
                 continue;
             }
 

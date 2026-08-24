@@ -53,23 +53,6 @@ private:
     return packets[0].valid || packets[1].valid;
 }
 
-void ApplyStylusPostTransform(std::array<uint8_t, 17>& bytes,
-                              uint8_t eraserState) {
-    if (eraserState == 1u) {
-        bytes[1] = static_cast<uint8_t>((bytes[1] & 0xFEu) | 0x0Cu);
-    } else {
-        bytes[1] = static_cast<uint8_t>(bytes[1] & 0xF3u);
-    }
-}
-
-[[nodiscard]] std::array<uint8_t, 17> MakeStylusBytes(
-        const Solvers::StylusPacket& packet,
-        uint8_t eraserState) {
-    auto bytes = packet.bytes;
-    ApplyStylusPostTransform(bytes, eraserState);
-    return bytes;
-}
-
 [[nodiscard]] bool IsStylusActive(const std::array<uint8_t, 17>& bytes) noexcept {
     return (bytes[1] & 0x2Fu) != 0;
 }
@@ -184,13 +167,51 @@ VhfReporter::StylusDispatchPacket VhfReporter::BuildStylusPacket(
     return built;
 }
 
+void VhfReporter::SetInputSuppressed(bool suppressed) {
+    const bool wasSuppressed =
+        m_inputSuppressed.exchange(suppressed, std::memory_order_acq_rel);
+    if (wasSuppressed == suppressed || !suppressed) {
+        return;
+    }
+
+    // 先把闸门置上，再等写锁：已越过入口检查但尚未真正写出的 dispatch 会在
+    // CanDispatchWriteLocked() 的最终检查被挡住。随后发 all-up/neutral，Windows 看到的是
+    // 一次干净的接触结束，而不是一根冻结在屏幕上的手指或笔尖。
+    const bool hadTouch =
+        m_hadTouchLastFrame.exchange(false, std::memory_order_acq_rel);
+    const bool hadStylus =
+        m_hadStylusActiveLastFrame.exchange(false, std::memory_order_acq_rel);
+
+    std::lock_guard<std::mutex> lk(m_mu);
+    if (m_closed) return;
+    if (hadTouch) WriteTouchAllUpLocked();
+    if (hadStylus) WriteStylusNeutralLocked();
+}
+
+VhfReporter::StylusToolPacket VhfReporter::ApplyStylusToolState(
+        const Solvers::StylusPacket& packet) {
+    std::lock_guard<std::mutex> lk(m_stylusToolMu);
+    const auto update = VhfStylusPacket::ApplyEraserToolState(
+        packet,
+        m_eraserRequested.load(std::memory_order_acquire),
+        m_eraserApplied);
+    m_eraserApplied = update.eraserApplied;
+
+    StylusToolPacket result{};
+    result.bytes = update.bytes;
+    result.transitionBytes = update.transitionBytes;
+    result.prependOutOfRange = update.prependOutOfRange;
+    return result;
+}
+
 
 
 // ── 主入口 (legacy) ──
 
 void VhfReporter::Dispatch(Solvers::HeatmapFrame& frame) {
     const auto stylusPacket = BuildStylusPacket(frame.stylus);
-    if (!m_enabled.load(std::memory_order_relaxed)) {
+    if (!m_enabled.load(std::memory_order_relaxed) ||
+        m_inputSuppressed.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -206,13 +227,11 @@ void VhfReporter::Dispatch(Solvers::HeatmapFrame& frame) {
         return;
     }
 
-    std::array<uint8_t, 17> stylusBytes{};
+    StylusToolPacket stylusBytes{};
     if (hasStylus) {
-        stylusBytes = MakeStylusBytes(
-            stylusPacket.packet,
-            m_eraserState.load(std::memory_order_relaxed));
+        stylusBytes = ApplyStylusToolState(stylusPacket.packet);
         m_hadStylusActiveLastFrame.store(
-            IsStylusActive(stylusBytes), std::memory_order_release);
+            IsStylusActive(stylusBytes.bytes), std::memory_order_release);
     }
 
     std::lock_guard<std::mutex> lk(m_mu);
@@ -226,7 +245,11 @@ void VhfReporter::Dispatch(Solvers::HeatmapFrame& frame) {
         WriteTouchPacketsLocked(frame.touch.output.touchPackets);
     }
     if (hasStylus) {
-        WriteStylusPacketLocked(stylusBytes.data(),
+        if (stylusBytes.prependOutOfRange) {
+            WriteStylusPacketLocked(stylusBytes.transitionBytes.data(),
+                                    stylusPacket.packet.length);
+        }
+        WriteStylusPacketLocked(stylusBytes.bytes.data(),
                                 stylusPacket.packet.length);
     }
 }
@@ -238,6 +261,7 @@ void VhfReporter::DispatchStylus(Solvers::HeatmapFrame& frame,
     const auto stylusPacket = BuildStylusPacket(frame.stylus);
     if (!writeEnabled ||
         !m_enabled.load(std::memory_order_relaxed) ||
+        m_inputSuppressed.load(std::memory_order_acquire) ||
         !stylusPacket.packet.valid) {
         if (!writeEnabled) {
             const bool hadStylus = m_hadStylusActiveLastFrame.exchange(
@@ -252,23 +276,26 @@ void VhfReporter::DispatchStylus(Solvers::HeatmapFrame& frame,
         return;
     }
 
-    const auto bytes = MakeStylusBytes(
-        stylusPacket.packet,
-        m_eraserState.load(std::memory_order_relaxed));
+    const auto bytes = ApplyStylusToolState(stylusPacket.packet);
     m_hadStylusActiveLastFrame.store(
-        IsStylusActive(bytes), std::memory_order_release);
+        IsStylusActive(bytes.bytes), std::memory_order_release);
 
     std::lock_guard<std::mutex> lk(m_mu);
     if (!CanDispatchWriteLocked()) {
         return;
     }
-    WriteStylusPacketLocked(bytes.data(), stylusPacket.packet.length);
+    if (bytes.prependOutOfRange) {
+        WriteStylusPacketLocked(bytes.transitionBytes.data(),
+                                stylusPacket.packet.length);
+    }
+    WriteStylusPacketLocked(bytes.bytes.data(), stylusPacket.packet.length);
 }
 
 // ── 独立手指写入 ──
 
 void VhfReporter::DispatchTouch(Solvers::HeatmapFrame& frame) {
-    if (!m_enabled.load(std::memory_order_relaxed)) {
+    if (!m_enabled.load(std::memory_order_relaxed) ||
+        m_inputSuppressed.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -346,7 +373,8 @@ void VhfReporter::WriteStylusPacketLocked(const uint8_t* data, size_t len) {
 // ── 设备 I/O ──
 
 bool VhfReporter::CanDispatchWriteLocked() const {
-    return m_enabled.load(std::memory_order_relaxed) && !m_closed;
+    return m_enabled.load(std::memory_order_relaxed) &&
+           !m_inputSuppressed.load(std::memory_order_acquire) && !m_closed;
 }
 
 bool VhfReporter::EnsureDeviceOpenLocked() {

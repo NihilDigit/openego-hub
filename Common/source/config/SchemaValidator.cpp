@@ -57,20 +57,15 @@ bool isLegacyNumericPenEnumPath(std::string_view yamlPath) {
     return yamlPath == "service.pen_button_mode" || yamlPath == "service.pen_button_route";
 }
 
-bool isValidPenButtonEnumToken(std::string_view yamlPath, const std::string& value) {
-    const auto normalized = normalizePenButtonToken(value);
-    if (yamlPath == "service.pen_button_mode") {
-        return normalized == "oem_custom" ||
-               normalized == "native_barrel" ||
-               normalized == "native_eraser";
+// 归一化会把显示写法 "VHF + Win32" 压成 vhf_win32，而映射表里的规范名是 vhf_and_win32。
+// 这是唯一一个两边对不上的 token，所以单独列出来。其余一律以 binding 的 enumMapping 为准：
+// 这里曾经抄了一份完整的 token 白名单，结果新增 PenButtonMode::WindowsInk 时校验器不认，
+// 服务启动被直接挡下。枚举值的真相只能有一处。
+std::string canonicalizePenButtonAlias(std::string normalized) {
+    if (normalized == "vhf_win32") {
+        return "vhf_and_win32";
     }
-    if (yamlPath == "service.pen_button_route") {
-        return normalized == "vhf_only" ||
-               normalized == "win32_only" ||
-               normalized == "vhf_and_win32" ||
-               normalized == "vhf_win32";
-    }
-    return false;
+    return normalized;
 }
 
 bool enumContainsNumericValue(const BindingEntry& binding, int32_t value) {
@@ -129,9 +124,12 @@ ValidationResult SchemaValidator::validate(const ConfigStore& store, const Confi
             typeMatches = tryGetValue<std::string>(value).has_value();
         } else if (binding.typeName == "enum") {
             if (auto stringValue = tryGetValue<std::string>(value)) {
-                typeMatches = isLegacyNumericPenEnumPath(binding.yamlPath)
-                                  ? isValidPenButtonEnumToken(binding.yamlPath, *stringValue)
-                                  : enumContainsValue(binding, *stringValue);
+                typeMatches = enumContainsValue(binding, *stringValue);
+                if (!typeMatches && isLegacyNumericPenEnumPath(binding.yamlPath)) {
+                    // 笔按键两项历史上还接受 ToString() 的显示写法，归一化后再比一次。
+                    typeMatches = enumContainsValue(
+                        binding, canonicalizePenButtonAlias(normalizePenButtonToken(*stringValue)));
+                }
             } else if (auto intValue = tryGetValue<int32_t>(value)) {
                 // Numeric enum values are only a legacy compatibility path for pen
                 // button IPC/config values. Other enums (e.g. service.mode) remain

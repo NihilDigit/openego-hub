@@ -77,9 +77,12 @@ struct PenStateUpdateResult {
 struct PenButtonAction {
     enum class Type {
         Barrel,
-        Eraser
+        Eraser,
+        DoubleClick,   ///< 侧键双击。离散手势，pressed 对它没有意义
     };
     Type type;
+    // 只对 Barrel/Eraser 有效。DoubleClick 是一次性事件，没有对应的松开——此前把它当成
+    // 「按下且永不释放的 barrel」，那个「不释放的 bug」其实是建模错位，不是 MCU 的问题。
     bool pressed = false;
     uint8_t rawPayload = 0;
 };
@@ -178,6 +181,10 @@ struct RuntimePenState {
 
     Solvers::StylusProtocolHint protocolHint = Solvers::StylusProtocolHint::Auto;
     bool protocolHintFromPenModule = false;
+    // 任何一次提交的状态变化都让 penRevision 前进一格，电量、充电、笔身份不作区分。
+    // 没有消费方需要区分：生产代码只读快照本身，只有单元测试断言这个计数。真正要分辨
+    // 「身份变了」的是 pipelineRevision——它单独计数，且只在 applyToPipeline 时前进。
+    // 代价是拿 penRevision 当「笔换了」的判据会误判成电量刷新，谁要这么用先拆开它。
     uint32_t penRevision = 0;
     uint32_t pipelineRevision = 0;
 
@@ -203,6 +210,15 @@ struct RuntimePenState {
 
     bool hasCurrentFunc = false;
     uint8_t currentFunc = 0;
+
+    bool hasBatteryLevel = false;
+    uint8_t batteryLevel = 0;
+
+    bool hasChargingState = false;
+    bool charging = false;
+
+    bool hasDeviceConnected = false;
+    bool deviceConnected = false;
 };
 
 struct PenAfeCommandPlan {
@@ -278,16 +294,16 @@ public:
     void SetStylusVhfEnabled(bool v) { m_stylusVhfEnabled.store(v); }
     bool IsStylusVhfEnabled() const { return m_stylusVhfEnabled.load(); }
     void ApplyServicePolicy(bool autoMode, bool stylusVhfEnabled,
-                            PenButtonMode penButtonMode = PenButtonMode::OemCustom,
+                            PenButtonMode penButtonMode = PenButtonMode::WindowsInk,
                             PenButtonRoute penButtonRoute = PenButtonRoute::VhfOnly,
                             bool penButtonRouteExplicit = false);
-#if EGOTOUCH_SERVICE_ENABLE_IPC
+    // Config-only, no IPC types involved. Available in every build so Release applies
+    // the declared defaults instead of falling back to member initializers.
     Config::ValidationResult ValidateConfigStore(const Config::ConfigStore& store) const;
     void ApplyConfigStore(const Config::ConfigStore& store);
     void ApplyPipelineConfig(const Config::ConfigStore& store) {
         ApplyConfigStore(store);
     }
-#endif
 
     void SetPenButtonMode(PenButtonMode m) { m_penButtonMode.store(m, std::memory_order_release); }
     PenButtonMode GetPenButtonMode() const { return m_penButtonMode.load(std::memory_order_acquire); }
@@ -301,6 +317,8 @@ public:
     void SetVhfEnabled(bool enabled);
     bool IsVhfEnabled() const;
     bool IsVhfDeviceOpen() const;
+    void SetInputSuppressed(bool suppressed);
+    bool IsInputSuppressed() const;
     void SetVhfTransposeEnabled(bool enabled);
     bool IsVhfTransposeEnabled() const;
     void SetMasterParserOnlyMode(bool enabled);
@@ -336,6 +354,19 @@ public:
     /// MCU 事件 ingress（runtime 内部完成状态/AFE 命令分派）
     void IngestPenEvent(const Himax::Pen::PenEvent& ev);
 
+    /// Invoked after any pen-state change commits, with the lock released. Lets the host
+    /// republish state without polling. Available in every configuration: the pen status
+    /// broadcast has to work in a shipping build, where IPC is compiled out.
+    using PenStateChangedCallback = std::function<void(const RuntimePenState&)>;
+    void SetPenStateChangedCallback(PenStateChangedCallback cb);
+
+    /// 侧键双击。需要用户会话的行为（Windows Ink 快捷键、OneNote 工具同步）只由运行时
+    /// 报告手势，不在服务里执行——服务在会话 0，没有可交互输入桌面。
+    /// 返回值是「手势真的送达了伴随进程」：托盘没在跑、通知事件没建成时返回 false，
+    /// 否则日志会把无声失效记成注入成功。
+    using PenDoubleClickCallback = std::function<bool()>;
+    void SetPenDoubleClickCallback(PenDoubleClickCallback cb);
+
 private:
     friend struct DeviceRuntimePenStateTestAccess;
     StartRequestResult StartStateMachine();
@@ -349,6 +380,9 @@ private:
     void BeginPenReplayInitCycle();
     void ReplayPenStateAfterChipInit();
     void DispatchPenButtonAction(const PenButtonAction& action, const char* source);
+    // 橡皮擦开关的唯一状态源，硬件事件与 ToggleEraser 双击共用。
+    bool IsEraserActive() const;
+    void UpdateEraserState(bool active);
 
     // ── Worker 状态处理（每个状态一个入口，Worker 只做调度） ──
     void OnReady();              // ready → 尝试 auto init
@@ -390,7 +424,7 @@ private:
     std::atomic<bool> m_autoMode{false};
     std::atomic<bool> m_stylusVhfEnabled{true};
     std::atomic<bool> m_masterParserOnly{false};
-    std::atomic<PenButtonMode> m_penButtonMode{PenButtonMode::OemCustom};
+    std::atomic<PenButtonMode> m_penButtonMode{PenButtonMode::WindowsInk};
     std::atomic<PenButtonRoute> m_penButtonRoute{PenButtonRoute::VhfOnly};
     std::atomic<bool> m_penButtonRouteExplicit{false};
     SyntheticPenButtonInjector m_synthPenButton;
@@ -416,10 +450,16 @@ private:
     mutable std::mutex m_workerHookMu;
     std::function<void()> m_workerHookForTesting;
 
+    mutable std::mutex m_penStateChangedCbMu;
+    PenStateChangedCallback m_penStateChangedCb;
+    mutable std::mutex m_penDoubleClickCbMu;
+    PenDoubleClickCallback m_penDoubleClickCb;
+
     std::array<HistoryEntry, kMaxHistoryItems> m_history{};
     size_t m_historyWriteIdx = 0;
     size_t m_historyCount = 0;
     std::array<std::chrono::steady_clock::time_point, 16> m_lastEventByType{};
+
     uint64_t m_lastCmdId = 0;
     std::string m_lastNote;
     std::atomic<uint64_t> m_nextCmdId{1};

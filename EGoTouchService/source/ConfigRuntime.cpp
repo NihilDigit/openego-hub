@@ -27,12 +27,7 @@ uint32_t HashBytes(std::span<const uint8_t> bytes) noexcept;
 namespace {
 
 const char* ToConfigValue(PenButtonMode mode) {
-    switch (mode) {
-    case PenButtonMode::OemCustom: return "oem_custom";
-    case PenButtonMode::NativeBarrel: return "native_barrel";
-    case PenButtonMode::NativeEraser: return "native_eraser";
-    }
-    return "oem_custom";
+    return ToPenButtonModeToken(mode);
 }
 
 const char* ToConfigValue(PenButtonRoute route) {
@@ -111,12 +106,9 @@ decltype(auto) WithRuntimeConfigDefaults(Callback&& callback) {
     stylusDefaults.registerBindings(binder);
     Config::registerRuntimeKeyMappings(binder);
 
+    // 默认值只由 binder 写。手动预置过的那几行写的是 pen_button_mode=oem_custom，与
+    // binder 声明的 WindowsInk 不一致；靠紧随其后的 writeDefaults 覆盖才没出事。
     Config::ConfigStore defaults;
-    defaults.set<std::string>("service.mode", "full");
-    defaults.set<bool>("service.auto_mode", true);
-    defaults.set<bool>("service.stylus_vhf_enabled", true);
-    defaults.set<std::string>("service.pen_button_mode", "oem_custom");
-    defaults.set<std::string>("service.pen_button_route", "vhf_only");
     binder.writeDefaults(defaults);
 
     if constexpr (std::is_void_v<std::invoke_result_t<Callback, Config::ConfigBinder&, Config::ConfigStore&>>) {

@@ -1,12 +1,14 @@
 #include "runtime/DeviceRuntime.h"
 #include "Logger.h"
 #include "SolverTypes.h"
+#include "SystemEpochClock.h"
 #include "config/ConfigBinder.h"
 #include "config/SchemaValidator.h"
 
 
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -24,6 +26,15 @@ struct PenButtonRoutePlan {
   bool win32 = false;
 };
 
+const char* ToString(PenButtonAction::Type type) noexcept {
+  switch (type) {
+  case PenButtonAction::Type::Barrel:      return "Barrel";
+  case PenButtonAction::Type::Eraser:      return "Eraser";
+  case PenButtonAction::Type::DoubleClick: return "DoubleClick";
+  default:                                 return "Unknown";
+  }
+}
+
 PenButtonRoutePlan DefaultPenButtonRouteForMode(PenButtonMode mode) noexcept {
   switch (mode) {
   case PenButtonMode::OemCustom:
@@ -31,6 +42,13 @@ PenButtonRoutePlan DefaultPenButtonRouteForMode(PenButtonMode mode) noexcept {
   case PenButtonMode::NativeBarrel:
   case PenButtonMode::NativeEraser:
     return {.vhf = false, .win32 = true};
+  case PenButtonMode::WindowsInk:
+  case PenButtonMode::ToggleEraser:
+    // 这两个模式只有双击语义，而双击已不经过这张路由表（见 DispatchPenButtonAction）。
+    // 表里剩下的 barrel/eraser 动作在这两个模式下没有接收方，所以两条后端都不开。
+    // 此处原先写的是 WindowsInk「必须走 Win32」，名不副实：显式的 route 配置本来就能
+    // 把它改成 VhfOnly，而那时双击照样得走回调。
+    return {.vhf = false, .win32 = false};
   default:
     return {.vhf = true, .win32 = false};
   }
@@ -301,6 +319,7 @@ DeviceRuntime::StartRequestResult DeviceRuntime::StartStateMachine() {
 
   m_thread = std::thread(&DeviceRuntime::WorkerMain, this);
   LOG_INFO("Runtime", __func__, "ready", "Worker thread launched.");
+
   return StartRequestResult::Started;
 }
 
@@ -417,7 +436,6 @@ void DeviceRuntime::ApplyServicePolicy(bool autoMode, bool stylusVhfEnabled,
       static_cast<int>(penButtonRoute), penButtonRouteExplicit);
 }
 
-#if EGOTOUCH_SERVICE_ENABLE_IPC
 Config::ValidationResult DeviceRuntime::ValidateConfigStore(
     const Config::ConfigStore &store) const {
   std::lock_guard<std::mutex> lk(m_pipelineMu);
@@ -442,8 +460,6 @@ void DeviceRuntime::ApplyConfigStore(const Config::ConfigStore& store) {
   LOG_INFO("Runtime", __func__, "Config", "Applied ConfigStore to touch/stylus pipelines.");
 }
 
-#endif
-
 bool DeviceRuntime::IsShutdownRequested() const {
   return m_stopReason.load() == StopReason::Shutdown;
 }
@@ -465,6 +481,14 @@ bool DeviceRuntime::IsVhfEnabled() const {
 
 bool DeviceRuntime::IsVhfDeviceOpen() const {
   return m_vhfReporter.IsDeviceOpen();
+}
+
+void DeviceRuntime::SetInputSuppressed(bool suppressed) {
+  m_vhfReporter.SetInputSuppressed(suppressed);
+}
+
+bool DeviceRuntime::IsInputSuppressed() const {
+  return m_vhfReporter.IsInputSuppressed();
 }
 
 void DeviceRuntime::SetVhfTransposeEnabled(bool enabled) {
@@ -512,9 +536,21 @@ void DeviceRuntime::ApplyPenStateToStylusPipeline() {
   m_stylusPipeline.ApplyPenSession(session);
 }
 
+void DeviceRuntime::SetPenStateChangedCallback(PenStateChangedCallback cb) {
+  std::lock_guard<std::mutex> lk(m_penStateChangedCbMu);
+  m_penStateChangedCb = std::move(cb);
+}
+
+void DeviceRuntime::SetPenDoubleClickCallback(PenDoubleClickCallback cb) {
+  std::lock_guard<std::mutex> lk(m_penDoubleClickCbMu);
+  m_penDoubleClickCb = std::move(cb);
+}
+
 void DeviceRuntime::UpdatePenState(std::function<void(RuntimePenState&, PenStateUpdateResult&)> updateFn) {
   PenStateUpdateResult result{};
   bool applyToPipeline = false;
+  bool notifyChanged = false;
+  RuntimePenState snapshot{};
   {
     std::lock_guard<std::mutex> lk(m_penStateMu);
     updateFn(m_penState, result);
@@ -526,7 +562,21 @@ void DeviceRuntime::UpdatePenState(std::function<void(RuntimePenState&, PenState
         ++m_penState.pipelineRevision;
         applyToPipeline = true;
       }
+      notifyChanged = true;
+      snapshot = m_penState;
     }
+  }
+
+  // Deliberately outside m_penStateMu: the callback publishes to shared memory and
+  // signals an event, and holding the state lock across that would let a slow reader
+  // stall pen event ingestion.
+  if (notifyChanged) {
+    PenStateChangedCallback cb;
+    {
+      std::lock_guard<std::mutex> lk(m_penStateChangedCbMu);
+      cb = m_penStateChangedCb;
+    }
+    if (cb) cb(snapshot);
   }
 
   if (applyToPipeline) {
@@ -579,6 +629,24 @@ void DeviceRuntime::ReplayPenStateAfterChipInit() {
   m_penReplay.CompleteInitCycle();
 }
 
+// 橡皮擦开关的唯一状态源。硬件 0x7F EraserToggle 和 ToggleEraser 模式下的双击都改这一个
+// 值——各记各的，下一次双击就会从对方看不见的状态上翻转，两个来源互相打架。
+bool DeviceRuntime::IsEraserActive() const {
+  std::lock_guard<std::mutex> lk(m_penStateMu);
+  return m_penState.hasEraserToggle && m_penState.eraserToggle != 0;
+}
+
+void DeviceRuntime::UpdateEraserState(bool active) {
+  const uint8_t next = active ? 1 : 0;
+  UpdatePenState([next](RuntimePenState& state, PenStateUpdateResult& res) {
+    // 橡皮擦不参与 stylus pipeline 的会话身份，只影响 VHF 报文里的一个位。
+    res.applyToPipeline = false;
+    res.stateChanged = !state.hasEraserToggle || state.eraserToggle != next;
+    state.hasEraserToggle = true;
+    state.eraserToggle = next;
+  });
+}
+
 void DeviceRuntime::DispatchPenButtonAction(const PenButtonAction& action, const char* source) {
   const auto mode = GetPenButtonMode();
   const auto route = GetPenButtonRoute();
@@ -589,6 +657,50 @@ void DeviceRuntime::DispatchPenButtonAction(const PenButtonAction& action, const
   bool win32Attempted = false;
   bool win32Ok = false;
 
+  // 双击不看路由计划：它不是「注入到哪个后端」的问题。WindowsInk 要把手势交给用户会话
+  // 里的伴随进程，ToggleEraser 只翻转服务自己的橡皮擦位，两条路都不经过按键注入后端，
+  // 被 plan.vhf/plan.win32 挡住只会让显式 route 配置连带关掉双击。
+  if (action.type == PenButtonAction::Type::DoubleClick) {
+    auto signalUserSession = [this] {
+      PenDoubleClickCallback cb;
+      {
+        std::lock_guard<std::mutex> lk(m_penDoubleClickCbMu);
+        cb = m_penDoubleClickCb;
+      }
+      return cb ? cb() : false;
+    };
+
+    switch (mode) {
+    case PenButtonMode::WindowsInk: {
+      // 服务自己调 SendInput 会以 ERROR_ACCESS_DENIED 失败——会话 0 没有可交互的输入桌面。
+      win32Attempted = true;
+      // 回调返回的是「事件真的送达了托盘」，不是「装过回调」：托盘没跑或事件没建成时
+      // 它返回 false，日志里的 win32_ok 才不会把无声失效记成成功。
+      win32Ok = signalUserSession();
+      break;
+    }
+    case PenButtonMode::ToggleEraser: {
+      const bool next = !IsEraserActive();
+      UpdateEraserState(next);
+      m_vhfReporter.SetEraserState(next ? 1 : 0);
+      vhfQueued = true;
+      // 标准应用直接消费上面的 VHF 状态。桌面 OneNote 不消费虚拟笔的 eraser flags，托盘
+      // 需要在用户会话里同步它自己的绘图工具；先发布状态、再发边沿，托盘才能读到 next。
+      win32Attempted = true;
+      win32Ok = signalUserSession();
+      break;
+    }
+    default:
+      break;
+    }
+
+    LOG_INFO("Runtime", __func__, "MCU",
+             "{}: action={} mode={} route={} vhf={} win32={} win32_ok={}",
+             source, ToString(action.type), ToString(mode), ToString(route),
+             vhfQueued ? 1 : 0, win32Attempted ? 1 : 0, win32Ok ? 1 : 0);
+    return;
+  }
+
   // 1. VHF route
   if (plan.vhf) {
     if (action.type == PenButtonAction::Type::Barrel) {
@@ -598,6 +710,7 @@ void DeviceRuntime::DispatchPenButtonAction(const PenButtonAction& action, const
       }
     } else if (action.type == PenButtonAction::Type::Eraser) {
       if (mode == PenButtonMode::OemCustom || mode == PenButtonMode::NativeEraser) {
+        // 状态已由 ingest 侧的 UpdateEraserState 记下，这里只负责往 VHF 写。
         m_vhfReporter.SetEraserState(action.pressed ? 1 : 0);
         vhfQueued = true;
       }
@@ -607,25 +720,36 @@ void DeviceRuntime::DispatchPenButtonAction(const PenButtonAction& action, const
   // 2. Win32 route
   if (plan.win32) {
     win32Attempted = true;
-    if (action.type == PenButtonAction::Type::Barrel) {
-      if (action.pressed && (mode == PenButtonMode::OemCustom || mode == PenButtonMode::NativeBarrel)) {
-        win32Ok = m_synthPenButton.InjectWinF22Shortcut();
+    // 笔脉冲要落在一个屏幕坐标上；快捷键不需要，所以只在用得到时才取光标位置。
+    auto cursorPoint = [] {
+      POINT pt{};
+      GetCursorPos(&pt);
+      return pt;
+    };
+
+    switch (action.type) {
+    case PenButtonAction::Type::DoubleClick:
+      break;  // 已在上面按 mode 分派完毕并返回，走不到这里。
+    case PenButtonAction::Type::Barrel:
+      // 这里原先发的是 Win+F22，而专做此事的 InjectBarrelPulse 就在旁边且无人调用——
+      // 接错了线。F22 在系统里没有接收方，所以这条路一直是哑的。
+      if (action.pressed &&
+          (mode == PenButtonMode::OemCustom || mode == PenButtonMode::NativeBarrel)) {
+        win32Ok = m_synthPenButton.InjectBarrelPulse(cursorPoint());
       }
-    } else if (action.type == PenButtonAction::Type::Eraser) {
-      if (mode == PenButtonMode::NativeEraser) {
-        POINT pt{};
-        GetCursorPos(&pt);
-        if (action.pressed) {
-          win32Ok = m_synthPenButton.InjectEraserPulse(pt);
-        }
+      break;
+    case PenButtonAction::Type::Eraser:
+      if (action.pressed && mode == PenButtonMode::NativeEraser) {
+        win32Ok = m_synthPenButton.InjectEraserPulse(cursorPoint());
       }
+      break;
     }
   }
 
   LOG_INFO("Runtime", __func__, "MCU",
            "{}: action={} pressed={} mode={} route={} vhf={} win32={} win32_ok={}",
            source,
-           action.type == PenButtonAction::Type::Barrel ? "Barrel" : "Eraser",
+           ToString(action.type),
            action.pressed, ToString(mode), ToString(route),
            vhfQueued ? 1 : 0, win32Attempted ? 1 : 0, win32Ok ? 1 : 0);
 }
@@ -699,10 +823,26 @@ void DeviceRuntime::IngestPolicyEvent(const RuntimePolicyEvent &ev) {
       std::lock_guard<std::mutex> lk(m_mu);
       acceptingCommands = m_acceptExternalAfeCommands;
     }
-    if (m_stopInProgress || !acceptingCommands ||
-        m_stopReason.load(std::memory_order_acquire) == StopReason::Shutdown) {
+    const bool terminating =
+        m_stopInProgress ||
+        m_stopReason.load(std::memory_order_acquire) == StopReason::Shutdown;
+    if (terminating) {
       LOG_INFO("Runtime", __func__, "Policy",
                "Ignoring non-terminal event ({}) while termination is in progress.",
+               ToString(ev.type));
+      return;
+    }
+    if (!acceptingCommands) {
+      // 还没准备好,不是要关。**这一条会丢**:Windows 只在服务注册电源通知的那一刻
+      // 送一次当前的显示/盖子状态,此后不再变化,于是运行时永远进不了 streaming——
+      // 表现是重启服务后触摸整个不工作、工作台热图空白、DVR 录不出帧。
+      //
+      // 在这里补投过一版,被 SystemPowerPolicy 测试挡回来了:Start 发布 running 之后
+      // 到达的 Shutdown 会被这个补投盖掉。补投的正确位置在 ServiceHost——它知道
+      // 当前的显示/盖子状态,且不在 Start 的竞态里。未做。
+      LOG_WARN("Runtime", __func__, "Policy",
+               "Runtime not ready yet; dropping {} event. If this was the only "
+               "display/lid notification, streaming will never start.",
                ToString(ev.type));
       return;
     }
@@ -1120,13 +1260,17 @@ void DeviceRuntime::OnStreaming() {
   Solvers::HeatmapFrame touchFrame;
   touchFrame.rawPtr = rawData.data();
   touchFrame.rawLen = Frame::kTotalFrameSize;
+  // 读到帧的时刻。求解层没有别的时间来源:frame.timestamp 曾经取自 master 后缀
+  // word 9,而那个字是频点码不是戳,赋值链已删。笔画层拿这个量判两次接触是不是
+  // 同一条笔画,没有它就只能数自己被调用了几次——而空闲帧根本不进管线
+  // (ProcessSignalConditioning 提前返回),手指抬起 600 ms 会被数成一帧。
+  touchFrame.receiveSystemEpochUs = Common::CaptureSystemEpochUs();
 #if EGOTOUCH_DIAG
   // Debug/App 模式: 拷贝完整帧数据供 IPC 帧推送
   touchFrame.rawData.assign(rawData.begin(),
                             rawData.begin() + Frame::kTotalFrameSize);
 #endif
   touchFrame.masterWasRead = m_chip.GetLastMasterWasRead();
-  touchFrame.timestamp = m_chip.GetLastFrameTimestamp();
 
   const bool stylusVhfEnabled =
       m_stylusVhfEnabled.load(std::memory_order_relaxed);
@@ -1136,6 +1280,15 @@ void DeviceRuntime::OnStreaming() {
 
     // 3. Stylus pipeline — reads rawPtr, writes frame.stylus
     m_stylusPipeline.Process(touchFrame);
+  }
+
+  // 笔报文在触摸管线之前发出:笔是延迟敏感路径,不为触摸处理买单。触摸管线
+  // 只读 frame.stylus 的 interop/output,DispatchStylus 不改这些字段,顺序
+  // 提前不影响仲裁。代价是 VHF 写入阻塞时会顺延本帧触摸,可接受。
+  m_vhfReporter.DispatchStylus(touchFrame, stylusVhfEnabled);
+
+  {
+    std::lock_guard<std::mutex> lk(m_pipelineMu);
 
     // 4. Touch pipeline — reads frame, writes contacts/packets.
     // Skipped-master frames carry fresh stylus/slave data only; do not feed
@@ -1162,20 +1315,22 @@ void DeviceRuntime::OnStreaming() {
   // VHF dispatch can block on device I/O; keep it outside m_pipelineMu.
   // touchFrame owns processed stylus/contact vectors, and rawPtr references the
   // current chip frame buffer until the next GetFrame() on this worker thread.
-  m_vhfReporter.DispatchStylus(touchFrame, stylusVhfEnabled);
   if (dispatchTouch) {
     m_vhfReporter.DispatchTouch(touchFrame);
   }
 
-#ifdef _DEBUG
-  // 5. Debug frame push (IPC visualization)
-  // Hold callback mutex through invocation so disable() waits for in-flight
-  // callback to finish.
+  // 5. 帧推送(工作台可视化)。回调只在 IPC 进入调试模式时被装上,没装就是没人看,
+  // 所以「装没装」本身就是开关,不需要再按构建类型编译掉。
+  //
+  // 原先这里裹着 #ifdef _DEBUG。它取决于 CRT 选的是哪一档(/MTd 隐式定义 _DEBUG),
+  // 而不是取决于「要不要可视化」——工作台连上了、日志也打了「已进入调试模式」,
+  // 帧却一帧不来,查到最后就是这个宏。可视化通不通不该由 CRT 决定。
+  //
+  // 持锁调用,好让停用侧等到在途回调结束。
   std::lock_guard<std::mutex> lk(m_framePushCbMu);
   if (m_framePushCb) {
     m_framePushCb(touchFrame);
   }
-#endif
 }
 
 // --------------- MCU 事件路由 ---------------
@@ -1216,6 +1371,48 @@ void DeviceRuntime::IngestPenEvent(const Himax::Pen::PenEvent &ev) {
                          state.pairStatus != ev.semantic.pairStatus;
       state.hasPairStatus = true;
       state.pairStatus = ev.semantic.pairStatus;
+    });
+    break;
+  }
+
+  case EC::BatteryStatus:
+  case EC::PenBatteryAfterConn: {
+    if (!ev.semantic.hasBatteryLevel) break;
+    UpdatePenState([&](RuntimePenState& state, PenStateUpdateResult& res) {
+      res.applyToPipeline = false;   // battery has no bearing on the solver
+      res.stateChanged = !state.hasBatteryLevel ||
+                         state.batteryLevel != ev.semantic.batteryLevel;
+      state.hasBatteryLevel = true;
+      state.batteryLevel = ev.semantic.batteryLevel;
+    });
+    break;
+  }
+
+  case EC::ChargingStatus: {
+    if (!ev.semantic.hasChargingState) break;
+    bool changed = false;
+    UpdatePenState([&](RuntimePenState& state, PenStateUpdateResult& res) {
+      res.applyToPipeline = false;
+      changed = !state.hasChargingState || state.charging != ev.semantic.charging;
+      res.stateChanged = changed;
+      state.hasChargingState = true;
+      state.charging = ev.semantic.charging;
+    });
+    if (changed) {
+      LOG_INFO("Runtime", __func__, "MCU", "Pen charging state -> {}.",
+               ev.semantic.charging ? "charging" : "not charging");
+    }
+    break;
+  }
+
+  case EC::DevConnect: {
+    if (!ev.semantic.hasDeviceConnected) break;
+    UpdatePenState([&](RuntimePenState& state, PenStateUpdateResult& res) {
+      res.applyToPipeline = false;
+      res.stateChanged = !state.hasDeviceConnected ||
+                         state.deviceConnected != ev.semantic.deviceConnected;
+      state.hasDeviceConnected = true;
+      state.deviceConnected = ev.semantic.deviceConnected;
     });
     break;
   }
@@ -1467,8 +1664,12 @@ void DeviceRuntime::IngestPenEvent(const Himax::Pen::PenEvent &ev) {
       func = state.currentFunc;
     });
 
+    // 0x25 GetPenKeySupport 在本机返回掩码 1：这支笔只支持一个按键功能，而实测它只在
+    // 双击时发 0x2F（单击和长按什么都不发），payload 恒为 1。所以这里不需要按 payload
+    // 分派手势种类。
     if (func == 1) {
-      DispatchPenButtonAction({PenButtonAction::Type::Barrel, true, func}, "PenCurrentFunc");
+      DispatchPenButtonAction({PenButtonAction::Type::DoubleClick, false, func},
+                              "PenCurrentFunc");
     }
     break;
   }
@@ -1481,18 +1682,21 @@ void DeviceRuntime::IngestPenEvent(const Himax::Pen::PenEvent &ev) {
     break;
 
   case EC::PenGlobalAnnotation:
+    // 只发按下、不发松开，看着像 0x2F 那个「按下且永不释放」的老毛病，实际不是：
+    // VhfReporter::BuildStylusPacket 用 exchange(false) 取 barrel 位，每帧消费一次，
+    // 所以一次 SetBarrelButtonState(true) 天然就是一个报告周期的脉冲，无需配对的复位；
+    // Win32 那条路走的 InjectBarrelPulse 本身也是脉冲。
+    // 约束：消费发生在 packet 构建时，与这一帧有没有笔无关。笔不在范围内时这次脉冲
+    // 被消费掉却不会写进任何报文，等于丢失。要修得先让 barrel 位跨帧保留到写出为止，
+    // 那是 VhfReporter 的改动，不在这里。
     DispatchPenButtonAction({PenButtonAction::Type::Barrel, true, payload0}, "PenGlobalAnnotation");
     break;
 
   case EC::EraserToggle: {
-    uint8_t eraserState = 0;
-    UpdatePenState([&](RuntimePenState& state, PenStateUpdateResult& res) {
-      state.hasEraserToggle = ev.semantic.hasEraserToggle;
-      state.eraserToggle =
-          ev.semantic.hasEraserToggle ? ev.semantic.eraserToggle : 0;
-      eraserState = state.eraserToggle;
-    });
-
+    const uint8_t eraserState =
+        ev.semantic.hasEraserToggle ? ev.semantic.eraserToggle : 0;
+    // 经 UpdateEraserState 落地，与 ToggleEraser 模式的双击共用同一个开关。
+    UpdateEraserState(eraserState != 0);
     DispatchPenButtonAction({PenButtonAction::Type::Eraser, eraserState != 0, eraserState}, "EraserToggle");
     break;
   }

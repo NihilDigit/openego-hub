@@ -11,7 +11,7 @@ constexpr uint16_t kIpcResponseDataBytes = 4096;
 constexpr const wchar_t* kPipeName = L"\\\\.\\pipe\\EGoTouchControl";
 // IPC-related global events
 constexpr const wchar_t* kLogReadyEventName = L"Global\\EGoTouchLogReady";
-constexpr const wchar_t* kPenReadyEventName = L"Global\\EGoTouchPenStatusReady";
+constexpr const wchar_t* kPenReadyEventName = L"Global\\OpenEGoHubPenStatusReady";
 
 // NOTE:
 // - Config commands 40-45 are legacy ABI tombstones. Service connected IPC must
@@ -265,7 +265,6 @@ enum class DebugStylusSourceIndex : int16_t {
     NoPressInkActive = 10,
     TouchSuppressActive = 11,
     BtSeq = 12,
-    PredictedAgeFrames = 13,
     PressureIsReal = 14,
 };
 
@@ -364,6 +363,14 @@ constexpr uint8_t kPenIdentityHasConnectionState = 1u << 7;
 
 constexpr uint8_t kPenIdentityProtocolFromPenModule = 1u << 0;
 constexpr uint8_t kPenIdentityHasPairStatus = 1u << 1;
+// flags is full, so the pen power/attach state lives in protocolFlags. The battery
+// percentage reuses the byte that was reserved next to pairStatus, keeping the wire
+// struct the same size.
+constexpr uint8_t kPenIdentityHasBatteryLevel = 1u << 2;
+constexpr uint8_t kPenIdentityHasChargingState = 1u << 3;
+constexpr uint8_t kPenIdentityCharging = 1u << 4;
+constexpr uint8_t kPenIdentityHasDeviceConnected = 1u << 5;
+constexpr uint8_t kPenIdentityDeviceConnected = 1u << 6;
 
 enum class PenIdentityProtocolHint : uint8_t {
     Auto = 0,
@@ -384,7 +391,7 @@ struct PenIdentityStatusWire {
     uint16_t firmwareVersionUtf8Len = 0;
     uint16_t factoryStatusFlags = 0;
     uint8_t pairStatus = 0;
-    uint8_t _reserved0 = 0;
+    uint8_t batteryLevel = 0;   // percent; valid only with kPenIdentityHasBatteryLevel
     char serialNumberUtf8[128]{};
     char firmwareVersionUtf8[128]{};
 };
@@ -402,6 +409,62 @@ inline bool TryGetPenIdentityPairStatus(const PenIdentityStatusWire& wire,
         return false;
     }
     pairStatus = wire.pairStatus;
+    return true;
+}
+
+inline void SetPenIdentityBatteryLevel(PenIdentityStatusWire& wire,
+                                      uint8_t percent) noexcept {
+    wire.protocolFlags |= kPenIdentityHasBatteryLevel;
+    wire.batteryLevel = percent;
+}
+
+inline bool TryGetPenIdentityBatteryLevel(const PenIdentityStatusWire& wire,
+                                          uint8_t& percent) noexcept {
+    if ((wire.protocolFlags & kPenIdentityHasBatteryLevel) == 0) {
+        percent = 0;
+        return false;
+    }
+    percent = wire.batteryLevel;
+    return true;
+}
+
+inline void SetPenIdentityChargingState(PenIdentityStatusWire& wire,
+                                        bool charging) noexcept {
+    wire.protocolFlags |= kPenIdentityHasChargingState;
+    if (charging) {
+        wire.protocolFlags |= kPenIdentityCharging;
+    } else {
+        wire.protocolFlags &= static_cast<uint8_t>(~kPenIdentityCharging);
+    }
+}
+
+inline bool TryGetPenIdentityChargingState(const PenIdentityStatusWire& wire,
+                                           bool& charging) noexcept {
+    if ((wire.protocolFlags & kPenIdentityHasChargingState) == 0) {
+        charging = false;
+        return false;
+    }
+    charging = (wire.protocolFlags & kPenIdentityCharging) != 0;
+    return true;
+}
+
+inline void SetPenIdentityDeviceConnected(PenIdentityStatusWire& wire,
+                                          bool connected) noexcept {
+    wire.protocolFlags |= kPenIdentityHasDeviceConnected;
+    if (connected) {
+        wire.protocolFlags |= kPenIdentityDeviceConnected;
+    } else {
+        wire.protocolFlags &= static_cast<uint8_t>(~kPenIdentityDeviceConnected);
+    }
+}
+
+inline bool TryGetPenIdentityDeviceConnected(const PenIdentityStatusWire& wire,
+                                             bool& connected) noexcept {
+    if ((wire.protocolFlags & kPenIdentityHasDeviceConnected) == 0) {
+        connected = false;
+        return false;
+    }
+    connected = (wire.protocolFlags & kPenIdentityDeviceConnected) != 0;
     return true;
 }
 

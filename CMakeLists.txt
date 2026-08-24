@@ -205,6 +205,9 @@ add_library(Common STATIC
 )
 
 target_sources(Common PRIVATE
+    "${COMMON_ROOT}/source/PenStatusChannel.cpp"
+    "${COMMON_ROOT}/source/PenControlChannel.cpp"
+    "${COMMON_ROOT}/source/PenInkShortcut.cpp"
     "${COMMON_ROOT}/source/config/ConfigStore.cpp"
     "${COMMON_ROOT}/source/config/ConfigBinder.cpp"
     "${COMMON_ROOT}/source/config/ConfigSchemaSnapshot.cpp"
@@ -423,6 +426,7 @@ add_executable(EGoTouchService
     "${SERVICE_ROOT}/source/ServiceEntry.cpp"
     "${SERVICE_ROOT}/source/ServiceShell.cpp"
     "${SERVICE_ROOT}/source/ServiceHost.cpp"
+    "${SERVICE_ROOT}/source/PenSettingsStore.cpp"
 )
 target_include_directories(EGoTouchService PRIVATE
     "${SERVICE_ROOT}/include"
@@ -512,6 +516,8 @@ if (EGO_BUILD_TESTS)
     ego_add_common_test(CommonHeaderCompileTest Common/tests/HeaderCompileTest.cpp)
     target_include_directories(CommonHeaderCompileTest PRIVATE "${IPC_ROOT}/include")
     ego_add_common_test(CommonConfigCatalogTest Common/tests/ConfigCatalogTest.cpp)
+    ego_add_common_test(CommonPenStatusChannelTest Common/tests/PenStatusChannelTest.cpp)
+    ego_add_common_test(CommonPenControlChannelTest Common/tests/PenControlChannelTest.cpp)
 
     add_executable(HostSystemStateMonitorTest
         EGoTouchService/Host/tests/SystemStateMonitorNamedEventTest.cpp

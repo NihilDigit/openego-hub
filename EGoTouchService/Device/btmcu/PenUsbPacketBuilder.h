@@ -153,6 +153,80 @@ inline bool BuildPenUsbPayloadCommandBuffer(PenUsbCommandId commandId,
     return true;
 }
 
+// 通用帧构造，按 docs/KBDMCU_PROTOCOL.md 修正后的字段语义：byte[1] 恒 0，byte[7] 为 payload
+// 长度。pen 侧的 BuildPenUsbCommandBuffer/BuildPenUsbPayloadCommandBuffer 沿用 THP_Service
+// 抓包得到的写法（byte[1]=0x01、byte[7]=0x20 定长），有实机依据，不走这条；这条只服务键盘
+// 等其它子系统。
+inline PenUsbPacketBuffer BuildBtMcuFrameBuffer(uint8_t destination,
+                                                uint8_t subsystem,
+                                                uint8_t command,
+                                                std::span<const uint8_t> payload) noexcept {
+    PenUsbPacketBuffer packet{};
+    if (payload.size() > kPenUsbPayloadCapacity) {
+        return packet;  // size 保持 0，view() 为空，调用方据此判失败
+    }
+    packet.bytes[0] = destination;
+    packet.bytes[1] = 0x00;
+    packet.bytes[2] = 0x02;
+    packet.bytes[3] = 0x00;
+    packet.bytes[4] = subsystem;
+    packet.bytes[5] = command;
+    packet.bytes[6] = 0x11;
+    packet.bytes[7] = static_cast<uint8_t>(payload.size());
+    std::copy(payload.begin(), payload.end(), packet.bytes.begin() + kPenUsbHeaderSize);
+    packet.size = kPenUsbHeaderSize + payload.size();
+    return packet;
+}
+
+inline PenUsbPacketBuffer BuildKbdDetachSupportGetBuffer() noexcept {
+    return BuildBtMcuFrameBuffer(Kbd::kDetachDestination, kSubsystemDetachSupport,
+                                 Kbd::kCmdDetachSupportGet, {});
+}
+
+inline PenUsbPacketBuffer BuildKbdDetachSupportSetBuffer(bool enable) noexcept {
+    const std::array<uint8_t, 1> payload{static_cast<uint8_t>(enable ? 1 : 0)};
+    return BuildBtMcuFrameBuffer(Kbd::kDetachDestination, kSubsystemDetachSupport,
+                                 Kbd::kCmdDetachSupportSet, payload);
+}
+
+// 键盘状态查询。三条都是 8 字节纯帧头、无 payload，目标地址 0x05、子系统 0x02。
+// 键盘子系统没有 ACK 机制：收到事件不需要回任何东西，详见 docs/KBDMCU_PROTOCOL.md。
+inline PenUsbPacketBuffer BuildKbdConnectStatusGetBuffer() noexcept {
+    return BuildBtMcuFrameBuffer(Kbd::kKeyboardDestination, kSubsystemKeyboard,
+                                 Kbd::kCmdConnectStatus, {});
+}
+
+inline PenUsbPacketBuffer BuildKbdDetachStatusGetBuffer() noexcept {
+    return BuildBtMcuFrameBuffer(Kbd::kKeyboardDestination, kSubsystemKeyboard,
+                                 Kbd::kCmdDetachStatus, {});
+}
+
+inline PenUsbPacketBuffer BuildKbdBatteryGetBuffer() noexcept {
+    return BuildBtMcuFrameBuffer(Kbd::kKeyboardDestination, kSubsystemKeyboard,
+                                 Kbd::kCmdBattery, {});
+}
+
+inline PenUsbPacketBuffer BuildKbdChargingStatusGetBuffer() noexcept {
+    // KeyboardService.dll 原厂实现的 byte[7] 固定为 1，但 WriteFile 实际只写前 8 字节，
+    // 即线上没有 payload。这不是通用帧语义，必须逐字节保留这个已确认的原厂怪例。
+    PenUsbPacketBuffer packet{};
+    packet.bytes[0] = Kbd::kKeyboardDestination;
+    packet.bytes[1] = 0x00;
+    packet.bytes[2] = 0x02;
+    packet.bytes[3] = 0x00;
+    packet.bytes[4] = kSubsystemKeyboard;
+    packet.bytes[5] = Kbd::kCmdCharging;
+    packet.bytes[6] = 0x11;
+    packet.bytes[7] = 0x01;
+    packet.size = kPenUsbHeaderSize;
+    return packet;
+}
+
+inline PenUsbPacketBuffer BuildKbdFirmwareVersionGetBuffer() noexcept {
+    return BuildBtMcuFrameBuffer(Kbd::kKeyboardDestination, kSubsystemKeyboard,
+                                 Kbd::kCmdFirmwareVersion, {});
+}
+
 inline PenUsbPacketBuffer BuildPenUsbEventAckBuffer(uint8_t ackCode) noexcept {
     PenUsbPacketBuffer packet{};
     const std::array<uint8_t, 1> payload{ackCode};

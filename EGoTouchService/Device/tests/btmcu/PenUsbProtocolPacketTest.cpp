@@ -1,7 +1,9 @@
 #include "btmcu/PenUsbPacketBuilder.h"
 #include "btmcu/PenUsbTypes.h"
+#include "penevt/PenEventBridge.h"
 #include "TestRequire.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <iostream>
@@ -63,13 +65,16 @@ void TestInvalidFactoryEventFramesAreRejected() {
     Require(!Himax::Pen::TryParsePenUsbEventFrame(shortPacket).has_value(),
             "short packet should be rejected");
 
-    std::array<uint8_t, 9> wrongSignature{
+    // 原厂 PenService.dll 的读线程只校验 packet[4]，不看 packet[2]。这条钉住这个刻意的放宽：
+    // 收紧回去会丢弃原厂会接受的帧，而键盘共用同一端点之后这种帧是真实存在的。
+    // 与 TestValidFactoryEventFrameParses 的帧逐字节相同，只把 packet[2] 从 0x07 换成 0x02。
+    std::array<uint8_t, 12> otherByteTwo{
         0x00, 0x00, 0x02, 0x00,
-        0x01, 0x71, 0x00, 0x00,
-        0x01,
+        0x01, 0x71, 0x00, 0x04,
+        0x01, 0xAA, 0xBB, 0xCC,
     };
-    Require(!Himax::Pen::TryParsePenUsbEventFrame(wrongSignature).has_value(),
-            "packet with wrong packet[2] signature should be rejected");
+    Require(Himax::Pen::TryParsePenUsbEventFrame(otherByteTwo).has_value(),
+            "packet[2] must not gate parsing; only the subsystem ID at packet[4] does");
 
     std::array<uint8_t, 9> wrongCommandLow{
         0x00, 0x00, 0x07, 0x00,
@@ -93,7 +98,7 @@ void TestInvalidFactoryEventFramesAreRejected() {
         0x01,
     };
     Require(!Himax::Pen::TryParsePenUsbEventFrame(validBytesAtWrongOffsets).has_value(),
-            "factory parser should require signature bytes at packet[2] and packet[4]");
+            "parser must key on the subsystem ID at packet[4], not on bytes that merely look right elsewhere");
 }
 
 void TestMalformedKnownEventsAreRejectedBeforeDispatch() {
@@ -155,8 +160,10 @@ void TestEventCodeNames() {
             "0x71 should map to PenConnStatus");
     Require(PenUsbEventCodeFromRaw(0x7B) == PenUsbEventCode::PenRepParam,
             "0x7B should map to PenRepParam");
-    Require(PenUsbEventCodeFromRaw(0x28) == PenUsbEventCode::Unknown28,
-            "0x28 should keep the documented open-event identity");
+    Require(PenUsbEventCodeFromRaw(0x28) == PenUsbEventCode::PenTopBatteryWindow,
+            "0x28 should map to the top battery window event");
+    Require(PenUsbEventCodeFromRaw(0x2A) == PenUsbEventCode::PenDeviationReminder,
+            "0x2A should map to the pen deviation reminder event");
     Require(PenUsbEventCodeFromRaw(0x55) == PenUsbEventCode::Unknown,
             "unknown event code should map to Unknown");
 
@@ -166,8 +173,10 @@ void TestEventCodeNames() {
             "0x7B should format as PEN_REP_PARAM");
     Require(std::string(ToString(PenUsbEventCode::PenRotateAngle)) == "PEN_ROATE_ANGLE",
             "0x74 should preserve the protocol document spelling");
-    Require(std::string(PenUsbEventNameFromRaw(0x28)) == "UNKNOWN_0x28",
-            "0x28 should format as a named open event, not a raw-only code");
+    Require(std::string(PenUsbEventNameFromRaw(0x28)) == "PEN_TOP_BATTERY_WINDOW",
+            "0x28 should format as the top battery window event");
+    Require(std::string(PenUsbEventNameFromRaw(0x2A)) == "PEN_DEVIATION_REMINDER",
+            "0x2A should format as the pen deviation reminder event");
     Require(std::string(PenUsbEventNameFromRaw(0x55)) == "UNKNOWN_EVENT",
             "unknown event code should format as UNKNOWN_EVENT");
 }
@@ -190,6 +199,18 @@ void TestCommandPacketBuilders() {
     Require(BuildPenUsbCommand(PenUsbCommandId::QueryFirmwareVersion) ==
                 std::vector<uint8_t>({0x07, 0x00, 0x02, 0x00, 0x01, 0x03, 0x11, 0x00}),
             "0x0301 command packet should query pen firmware version");
+    // 下面三条的字节序列直接来自原厂 PenService.dll 里 CommandSendGetPenBattery /
+    // GetPenChargingStatus / GetPenConnectStatus 的栈上立即数，是这几个命令码唯一的
+    // 校验来源 —— 抄错一个字节，笔就只是不回应，没有其他报错。
+    Require(BuildPenUsbCommand(PenUsbCommandId::QueryPenBattery) ==
+                std::vector<uint8_t>({0x07, 0x00, 0x02, 0x00, 0x01, 0x08, 0x11, 0x00}),
+            "0x0801 command packet should match PenService.dll CommandSendGetPenBattery");
+    Require(BuildPenUsbCommand(PenUsbCommandId::QueryChargingStatus) ==
+                std::vector<uint8_t>({0x07, 0x00, 0x02, 0x00, 0x01, 0x09, 0x11, 0x00}),
+            "0x0901 command packet should match PenService.dll CommandSendGetPenChargingStatus");
+    Require(BuildPenUsbCommand(PenUsbCommandId::QueryConnectStatus) ==
+                std::vector<uint8_t>({0x07, 0x00, 0x02, 0x00, 0x01, 0x12, 0x11, 0x00}),
+            "0x1201 command packet should match PenService.dll CommandSendGetPenConnectStatus");
     Require(BuildPenUsbCommand(PenUsbCommandId::QueryPenStatus) ==
                 std::vector<uint8_t>({0x07, 0x00, 0x02, 0x00, 0x01, 0x71, 0x11, 0x00}),
             "0x7101 command packet should match factory bytes");
@@ -289,6 +310,137 @@ void TestFactoryInitParamsPacket() {
             "factory init packet must remain distinct from an all-zero scan-mode command");
 }
 
+// ── 键盘 detach support ──────────────────────────────────────────────────
+void TestKbdDetachSupportCommandBytes() {
+    const auto get = Himax::Pen::BuildKbdDetachSupportGetBuffer();
+    const std::array<uint8_t, 8> expectedGet{
+        0x09, 0x00, 0x02, 0x00, 0x00, 0x35, 0x11, 0x00,
+    };
+    Require(get.size == expectedGet.size(),
+            "detach support Get must be 8 bytes");
+    Require(std::equal(expectedGet.begin(), expectedGet.end(), get.bytes.begin()),
+            "detach support Get bytes must match KBDMCU_PROTOCOL 4.1");
+
+    const auto setOn = Himax::Pen::BuildKbdDetachSupportSetBuffer(true);
+    const std::array<uint8_t, 9> expectedSetOn{
+        0x09, 0x00, 0x02, 0x00, 0x00, 0x34, 0x11, 0x01, 0x01,
+    };
+    Require(setOn.size == expectedSetOn.size(),
+            "detach support Set must be 9 bytes");
+    Require(std::equal(expectedSetOn.begin(), expectedSetOn.end(), setOn.bytes.begin()),
+            "detach support Set(enable) bytes must match KBDMCU_PROTOCOL 4.1");
+
+    const auto setOff = Himax::Pen::BuildKbdDetachSupportSetBuffer(false);
+    Require(setOff.bytes[8] == 0x00, "detach support Set(disable) payload must be 0");
+    // byte[7] 是长度不是定长 tag：Get 为 0，Set 为 1。这正是与 pen payload builder（恒 0x20）
+    // 的关键区别，写死会让 MCU 按错误长度读 payload。
+    Require(get.bytes[7] == 0x00 && setOn.bytes[7] == 0x01,
+            "byte[7] must equal payload length, not a fixed tag");
+}
+
+void TestKbdDetachSupportReplyParsing() {
+    // 内联路径：byte[4]==0x00。
+    const std::array<uint8_t, 9> inlineEnabled{
+        0x02, 0x00, 0x09, 0x00, 0x00, 0x35, 0x11, 0x01, 0x01,
+    };
+    auto a = Himax::Pen::Kbd::TryParseDetachSupportReply(inlineEnabled);
+    Require(a.has_value() && *a == true,
+            "inline-path 0x35 reply with value 1 should parse as enabled");
+
+    // 分发表路径：byte[4]==0x02。
+    const std::array<uint8_t, 9> dispatchDisabled{
+        0x02, 0x00, 0x05, 0x00, 0x02, 0x35, 0x11, 0x01, 0x00,
+    };
+    auto b = Himax::Pen::Kbd::TryParseDetachSupportReply(dispatchDisabled);
+    Require(b.has_value() && *b == false,
+            "dispatch-path 0x35 reply with value 0 should parse as disabled");
+
+    // pen 子系统（byte[4]==0x01）不是 detach 应答。
+    const std::array<uint8_t, 9> penFrame{
+        0x02, 0x00, 0x07, 0x00, 0x01, 0x35, 0x11, 0x01, 0x01,
+    };
+    Require(!Himax::Pen::Kbd::TryParseDetachSupportReply(penFrame).has_value(),
+            "pen-subsystem frame must not be read as a detach reply");
+
+    // 命令码不是 0x35（如 Set 的 0x34）不解析。
+    const std::array<uint8_t, 9> setEcho{
+        0x02, 0x00, 0x09, 0x00, 0x00, 0x34, 0x11, 0x01, 0x01,
+    };
+    Require(!Himax::Pen::Kbd::TryParseDetachSupportReply(setEcho).has_value(),
+            "0x34 echo must not be parsed as a support status");
+
+    // 缺 payload 字节的短帧拒绝。
+    const std::array<uint8_t, 8> noValue{
+        0x02, 0x00, 0x09, 0x00, 0x00, 0x35, 0x11, 0x00,
+    };
+    Require(!Himax::Pen::Kbd::TryParseDetachSupportReply(noValue).has_value(),
+            "reply without a value byte should be rejected");
+}
+
+void TestKbdChargingProtocol() {
+    const auto query = Himax::Pen::BuildKbdChargingStatusGetBuffer();
+    const std::array<uint8_t, 8> expected{
+        0x05, 0x00, 0x02, 0x00, 0x02, 0x09, 0x11, 0x01,
+    };
+    Require(query.size == expected.size(),
+            "keyboard charging query must write exactly 8 bytes despite byte[7]=1");
+    Require(std::equal(expected.begin(), expected.end(), query.bytes.begin()),
+            "keyboard charging query must preserve the factory byte sequence");
+
+    const std::array<uint8_t, 9> charging{
+        0x02, 0x00, 0x05, 0x00, 0x02, 0x09, 0x11, 0x01, 0x01,
+    };
+    const auto on = Himax::Pen::Kbd::TryParseChargingStatus(charging);
+    Require(on.has_value() && *on,
+            "keyboard 0x09 payload 1 should parse as charging");
+
+    auto notCharging = charging;
+    notCharging[8] = 0;
+    const auto off = Himax::Pen::Kbd::TryParseChargingStatus(notCharging);
+    Require(off.has_value() && !*off,
+            "keyboard 0x09 payload 0 should parse as not charging");
+
+    auto wrongSubsystem = charging;
+    wrongSubsystem[4] = Himax::Pen::kSubsystemPen;
+    Require(!Himax::Pen::Kbd::TryParseChargingStatus(wrongSubsystem).has_value(),
+            "pen 0x09 must not be read as keyboard charging");
+
+    const std::array<uint8_t, 8> missingPayload{
+        0x02, 0x00, 0x05, 0x00, 0x02, 0x09, 0x11, 0x00,
+    };
+    Require(!Himax::Pen::Kbd::TryParseChargingStatus(missingPayload).has_value(),
+            "keyboard charging reply without payload must be rejected");
+}
+
+void TestKbdConnectionEdges() {
+    using KbdState = Himax::Pen::PenEventBridge::KbdState;
+    const auto edge = Himax::Pen::PenEventBridge::IsKbdConnectionEdge;
+
+    KbdState unknown{};
+    KbdState initialConnected{};
+    initialConnected.hasPresent = true;
+    initialConnected.present = true;
+    Require(!edge(unknown, initialConnected),
+            "initial keyboard status must establish a baseline without notification");
+
+    KbdState absent = initialConnected;
+    absent.present = false;
+    Require(edge(absent, initialConnected),
+            "keyboard absent-to-present transition should notify");
+    Require(!edge(initialConnected, initialConnected),
+            "duplicate connected status should not notify");
+
+    KbdState detached = initialConnected;
+    detached.hasDetached = true;
+    detached.detached = true;
+    KbdState attached = detached;
+    attached.detached = false;
+    Require(edge(detached, attached),
+            "keyboard detached-to-attached transition should notify");
+    Require(!edge(attached, detached),
+            "keyboard detach transition should not notify");
+}
+
 } // namespace
 
 int main() {
@@ -304,6 +456,10 @@ int main() {
         TestUtf8PayloadDecoding();
         TestType3Encoding();
         TestFactoryInitParamsPacket();
+        TestKbdDetachSupportCommandBytes();
+        TestKbdDetachSupportReplyParsing();
+        TestKbdChargingProtocol();
+        TestKbdConnectionEdges();
         std::cout << "[TEST] Device Pen USB protocol packet tests passed.\n";
         return 0;
     } catch (const std::exception& ex) {

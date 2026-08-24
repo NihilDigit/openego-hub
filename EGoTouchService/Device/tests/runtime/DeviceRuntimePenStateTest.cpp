@@ -27,6 +27,11 @@ struct DeviceRuntimePenStateTestAccess {
             runtime.m_stylusPipeline.m_lastFrameWasTerminal,
         };
     }
+
+    static void DispatchDoubleClick(DeviceRuntime& runtime) {
+        runtime.DispatchPenButtonAction(
+            {PenButtonAction::Type::DoubleClick, true, 0}, "TestDoubleClick");
+    }
 };
 
 namespace {
@@ -50,17 +55,25 @@ PenEvent MakePayloadEvent(PenUsbEventCode code, uint8_t payload) {
     return event;
 }
 
-Solvers::HeatmapFrame MakeWritingHpp2Frame() {
+// Feeds the parser through its slave-suffix path: one 9x9 block per TX with a
+// valid anchor and a single strong cell, which is the least the coordinate
+// solver needs to produce a peak on both axes.
+Solvers::HeatmapFrame MakeWritingFrame() {
     Solvers::HeatmapFrame frame{};
-    auto& input = frame.stylus.input;
-    input.auxStatusFlags = 0x1;
-    input.mainFreq = 0x00b0;
-    input.auxFreq = 0x00fc;
-    input.framePressure = 512;
-    input.hpp2LineValid = true;
-    input.hpp2LineData.fill(10);
-    input.hpp2LineData[12] = 2600;
-    input.hpp2LineData[60 + 7] = 2400;
+    frame.slaveSuffixValid = true;
+
+    const auto fillBlock = [&](int base, int peakRow, int peakCol) {
+        frame.slaveSuffix.words[base + 0] = 4;   // anchorRow
+        frame.slaveSuffix.words[base + 1] = 4;   // anchorCol
+        for (int r = 0; r < Frame::kGridDim; ++r) {
+            for (int c = 0; c < Frame::kGridDim; ++c) {
+                frame.slaveSuffix.words[base + 2 + r * Frame::kGridDim + c] = 200;
+            }
+        }
+        frame.slaveSuffix.words[base + 2 + peakRow * Frame::kGridDim + peakCol] = 3000;
+    };
+    fillBlock(0, 4, 4);
+    fillBlock(Frame::kBlockWords, 4, 4);
     return frame;
 }
 
@@ -213,21 +226,23 @@ void TestPairStatusDuringWritingPreservesPipelineAndBtSample() {
 
     auto module = MakePayloadEvent(PenUsbEventCode::PenModule, 0);
     module.semantic.hasPenModuleModelId = true;
-    module.semantic.penModuleModelId = Himax::Pen::kPenModuleModelIdCd52;
-    module.semantic.penModuleModel = Himax::Pen::PenModuleModel::Cd52;
+    module.semantic.penModuleModelId = Himax::Pen::kPenModuleModelIdCd54S;
+    module.semantic.penModuleModel = Himax::Pen::PenModuleModel::Cd54S;
     module.semantic.hasPenModuleProtocolHint = true;
-    module.semantic.penModuleProtocolHint = Himax::Pen::PenModuleProtocolHint::Hpp2;
+    module.semantic.penModuleProtocolHint = Himax::Pen::PenModuleProtocolHint::Hpp3;
     runtime.IngestPenEvent(module);
 
-    auto writingFrame = MakeWritingHpp2Frame();
-    Require(DeviceRuntimePenStateTestAccess::Process(runtime, writingFrame),
-            "connected HPP2 writing frame should process");
-    Require(writingFrame.stylus.output.valid && writingFrame.stylus.output.tipDown,
-            "test precondition should establish active writing state");
-
+    // Tip pressure arrives over BT, so it has to be in place before the frame
+    // that is supposed to read as writing.
     const std::array<uint16_t, 4> pressure{100, 200, 300, 400};
     const std::array<uint16_t, 4> rawPressure{1000, 2000, 3000, 4000};
     runtime.IngestBtMcuPressurePacket(pressure, rawPressure, 0x12, 0x34);
+
+    auto writingFrame = MakeWritingFrame();
+    Require(DeviceRuntimePenStateTestAccess::Process(runtime, writingFrame),
+            "connected writing frame should process");
+    Require(writingFrame.stylus.output.valid && writingFrame.stylus.output.tipDown,
+            "test precondition should establish active writing state");
 
     const auto penBefore = runtime.GetPenStateSnapshot();
     const auto pipelineBefore = DeviceRuntimePenStateTestAccess::Snapshot(runtime);
@@ -286,6 +301,53 @@ void TestPairStatusFrameProducesSemanticState() {
             "0x12 semantic parsing must not fabricate connection");
 }
 
+void TestToggleEraserPublishesStateBeforeNotifyingUserSession() {
+    auto runtime = MakeRuntime();
+    runtime.SetPenButtonMode(PenButtonMode::ToggleEraser);
+
+    int notifications = 0;
+    bool stateSeenByFirstNotification = false;
+    bool stateSeenBySecondNotification = true;
+    runtime.SetPenDoubleClickCallback([&] {
+        ++notifications;
+        const auto state = runtime.GetPenStateSnapshot();
+        if (notifications == 1) {
+            stateSeenByFirstNotification =
+                state.hasEraserToggle && state.eraserToggle == 1;
+        } else if (notifications == 2) {
+            stateSeenBySecondNotification =
+                state.hasEraserToggle && state.eraserToggle != 0;
+        }
+        return true;
+    });
+
+    DeviceRuntimePenStateTestAccess::DispatchDoubleClick(runtime);
+    DeviceRuntimePenStateTestAccess::DispatchDoubleClick(runtime);
+
+    Require(notifications == 2,
+            "ToggleEraser should notify the user-session companion on every edge");
+    Require(stateSeenByFirstNotification,
+            "the enable state must be published before the first notification");
+    Require(!stateSeenBySecondNotification,
+            "the disable state must be published before the second notification");
+}
+
+void TestOneNoteInputSuppressionIsIndependentFromVhfEnabled() {
+    auto runtime = MakeRuntime();
+    Require(runtime.IsVhfEnabled(), "test precondition: VHF is enabled");
+    Require(!runtime.IsInputSuppressed(),
+            "input is not suppressed by default");
+
+    runtime.SetInputSuppressed(true);
+    Require(runtime.IsInputSuppressed(), "suppression gate turns on");
+    Require(runtime.IsVhfEnabled(),
+            "short suppression must not rewrite the persistent VHF setting");
+
+    runtime.SetInputSuppressed(false);
+    Require(!runtime.IsInputSuppressed(), "suppression gate turns off");
+    Require(runtime.IsVhfEnabled(), "VHF remains enabled after suppression");
+}
+
 } // namespace
 
 int main() {
@@ -295,6 +357,8 @@ int main() {
         TestPairStatusIsIndependentFromConnection();
         TestPairStatusDuringWritingPreservesPipelineAndBtSample();
         TestPairStatusFrameProducesSemanticState();
+        TestToggleEraserPublishesStateBeforeNotifyingUserSession();
+        TestOneNoteInputSuppressionIsIndependentFromVhfEnabled();
         std::cout << "[TEST] DeviceRuntime pen state tests passed.\n";
         return 0;
     } catch (const std::exception& ex) {

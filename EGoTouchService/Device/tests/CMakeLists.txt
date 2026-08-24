@@ -1,3 +1,11 @@
+# Raise the reserved stack for tests that hold a DeviceRuntime (and therefore the whole
+# pipeline) by value. MSVC/link.exe reserve 1 MiB by default, which is not enough.
+function(ego_device_test_big_stack target)
+    if(MSVC)
+        target_link_options(${target} PRIVATE /STACK:16777216)
+    endif()
+endfunction()
+
 function(ego_add_device_test target test_name labels timeout_seconds)
     add_executable(${target} ${ARGN})
     target_include_directories(${target} PRIVATE
@@ -50,6 +58,10 @@ ego_add_device_test(DeviceRuntimeSystemPowerPolicyTest Device.Runtime.SystemPowe
     "Device;Device.Runtime;Device.Win32;Timing;NoHardware" 20
     "${DEVICE_ROOT}/tests/runtime/DeviceRuntimeSystemPowerPolicyTest.cpp")
 target_link_libraries(DeviceRuntimeSystemPowerPolicyTest PRIVATE Device Common)
+# DeviceRuntime embeds the whole touch/stylus pipeline by value (heatmap matrices,
+# tracker state, zone buffers), which overflows MSVC's 1 MiB default stack when the
+# test constructs one as a local. lld-link defaults higher, so this only bites on cl.
+ego_device_test_big_stack(DeviceRuntimeSystemPowerPolicyTest)
 set_tests_properties(Device.Runtime.SystemPowerPolicy PROPERTIES
     RESOURCE_LOCK DeviceRuntimeTiming
 )
@@ -58,3 +70,4 @@ ego_add_device_test(DeviceRuntimePenStateTest Device.Runtime.PenState
     "Device;Device.Runtime;Device.PenUsb;NoHardware" 10
     "${DEVICE_ROOT}/tests/runtime/DeviceRuntimePenStateTest.cpp")
 target_link_libraries(DeviceRuntimePenStateTest PRIVATE Device Common)
+ego_device_test_big_stack(DeviceRuntimePenStateTest)

@@ -61,6 +61,11 @@ protected:
     /// Called for each received packet.
     virtual void OnPacketReceived(std::span<const uint8_t> packet) = 0;
 
+    /// Called each time the blocking read times out with no packet, i.e. roughly once a
+    /// second while the link is idle. Gives a channel a place to poll for state the MCU
+    /// does not push on its own.
+    virtual void OnIdleTick() {}
+
     /// Return a short name for log messages (e.g. "PenEventBridge").
     virtual const char* ChannelName() const = 0;
 

@@ -11,7 +11,7 @@
 namespace App {
 
 namespace {
-constexpr const char* kExportRootDir = "C:/ProgramData/EGoTouchRev/exports";
+constexpr const char* kExportRootDir = "C:/ProgramData/OpenEGoHub/exports";
 
 bool DrawControlPanelConfigSyncGate(ServiceProxy* proxy) {
     if (proxy == nullptr || proxy->IsConfigAdjustmentAllowed()) {

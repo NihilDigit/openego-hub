@@ -40,6 +40,31 @@ void TestEnumStorageValues() {
     Require(static_cast<uint8_t>(PenButtonRoute::VhfAndWin32) == 2, "VhfAndWin32 storage value should remain 2");
 }
 
+// 映射表是解析、校验、binder 和托盘菜单共用的唯一真相，所以它自身的两条不变量要守住：
+// 下标即枚举值（诊断面板的 Combo 直接把下标当模式用），以及 token 与数值双向可逆
+// （配置里写 token 和写数字必须落到同一个模式上）。
+void TestPenButtonModeMappingIsTheSingleSource() {
+    int32_t expectedValue = 0;
+    for (const auto& [mode, token] : PenButtonModeMapping()) {
+        Require(static_cast<int32_t>(mode) == expectedValue,
+                "PenButtonModeMapping must stay ordered by enum value with no gaps");
+        Require(PenButtonModeFromToken(token) == mode,
+                "every mapped token must parse back to its own mode");
+        Require(PenButtonModeFromNumeric(static_cast<int32_t>(mode)) == mode,
+                "every mapped numeric value must parse back to its own mode");
+        RequireString(ToPenButtonModeToken(mode), token,
+                      "ToPenButtonModeToken must return the mapped token");
+        ++expectedValue;
+    }
+
+    Require(PenButtonModeFromToken("toggle_eraser") == PenButtonMode::ToggleEraser,
+            "toggle_eraser is the configuration token for ToggleEraser");
+    Require(!PenButtonModeFromNumeric(expectedValue).has_value(),
+            "a value past the end of the mapping must be rejected, not clamped");
+    Require(!PenButtonModeFromToken("windows ink").has_value(),
+            "unnormalized text is the caller's job to normalize first");
+}
+
 } // namespace
 
 int main() {
@@ -47,6 +72,7 @@ int main() {
         TestPenButtonModeStrings();
         TestPenButtonRouteStrings();
         TestEnumStorageValues();
+        TestPenButtonModeMappingIsTheSingleSource();
         std::cout << "[TEST] CommonPenButtonConfigTest passed.\n";
         return 0;
     } catch (const std::exception& ex) {

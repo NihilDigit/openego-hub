@@ -81,6 +81,12 @@ struct PenIdentityStatus {
     std::string hardwareVersion;
     bool hasFirmwareVersion = false;
     std::string firmwareVersion;
+    bool hasBatteryLevel = false;
+    uint8_t batteryLevel = 0;
+    bool hasChargingState = false;
+    bool charging = false;
+    bool hasDeviceConnected = false;
+    bool deviceConnected = false;
 };
 
 enum class FrameSourceMode {

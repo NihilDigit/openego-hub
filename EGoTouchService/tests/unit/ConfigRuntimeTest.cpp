@@ -290,7 +290,8 @@ int main() {
     assert(explicitRoutePersist.status == Service::ConfigV3MutationStatus::PersistFailed);
     Service::ConfigRuntime explicitRouteRestarted;
     assert(explicitRouteRestarted.Initialize([](const Config::ConfigStore&) { return true; }));
-    assert(explicitRouteRestarted.ServiceState().penButtonMode == PenButtonMode::OemCustom);
+    // 重点是未持久化的 patch 不该跨重启存活，落回的是绑定默认值，不是 NativeBarrel。
+    assert(explicitRouteRestarted.ServiceState().penButtonMode == PenButtonMode::WindowsInk);
     assert(explicitRouteRestarted.ServiceState().penButtonRoute == PenButtonRoute::VhfOnly);
     assert(!explicitRouteRestarted.ServiceState().penButtonRouteExplicit);
 

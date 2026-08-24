@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "PenModuleModelId.h"
 
@@ -48,11 +49,17 @@ struct PenUsbPayloadBuffer {
     }
 };
 
+// 命令低字节与对应应答的事件码同值：QueryPenBattery(0x08) 的应答是 BATTERY_STATUS(0x08)。
+// 这几条取自原厂 PenService.dll 的 CommandSendGetPenXxx 反汇编，每个函数在栈上拼
+// 07 00 02 00 | 01 <code> 11 00，与这里的构造完全一致。
 enum class PenUsbCommandId : uint16_t {
     QueryPenModule = 0x0001,
     QueryPenSerialNo = 0x0101,
     QueryHardwareVersion = 0x0201,
     QueryFirmwareVersion = 0x0301,
+    QueryPenBattery = 0x0801,       // PenService: CommandSendGetPenBattery
+    QueryChargingStatus = 0x0901,   // PenService: CommandSendGetPenChargingStatus
+    QueryConnectStatus = 0x1201,    // PenService: CommandSendGetPenConnectStatus
     QueryPenStatus = 0x7101,
     QueryPenInfo = 0x7701,
     InitParamSet = 0x7D01,
@@ -64,6 +71,74 @@ struct ParsedPenUsbEventFrame {
     uint8_t eventCode = 0;
     std::span<const uint8_t> payload{};
 };
+
+// ── 键盘 / detach 子系统 ──────────────────────────────────────────────────
+// 键盘与 pen 共用同一个 USB 端点，帧结构相同，靠 byte[0] 目标地址与 byte[4] 子系统 ID
+// 区分。逆向结论见 docs/KBDMCU_PROTOCOL.md。本文件覆盖 detach support 以及设备页使用的
+// 键盘连接、电量、充电、分离和固件状态。
+// byte[4] 子系统 ID。笔与键盘共用同一个端点，这张表是双方的分流依据，不属于任何一方，
+// 所以放在外层而不是 Kbd 里。(byte[0], byte[4]) 严格成对：pen=(0x07,0x01)、
+// 键盘状态=(0x05,0x02)、detach 开关=(0x09,0x00)。
+inline constexpr uint8_t kSubsystemPen           = 0x01;
+inline constexpr uint8_t kSubsystemKeyboard      = 0x02;
+inline constexpr uint8_t kSubsystemDetachSupport = 0x00;
+
+namespace Kbd {
+
+inline constexpr uint8_t kDetachDestination   = 0x09;  // byte[0]
+inline constexpr uint8_t kCmdDetachSupportGet = 0x35;  // byte[5]，查询
+inline constexpr uint8_t kCmdDetachSupportSet = 0x34;  // byte[5]，设置
+
+inline constexpr uint8_t kKeyboardDestination = 0x05;  // byte[0]，键盘状态类命令
+inline constexpr uint8_t kCmdFirmwareVersion  = 0x03;  // 字符串应答，型号靠它的平台前缀判定
+inline constexpr uint8_t kCmdBattery          = 0x08;  // packet[8] 是百分比
+inline constexpr uint8_t kCmdCharging         = 0x09;  // packet[8]：0=未充电，非 0=正在充电
+inline constexpr uint8_t kCmdConnectStatus    = 0x12;  // packet[8] ∈ {1,2,3} 均视为已连接
+inline constexpr uint8_t kCmdDetachStatus     = 0x31;  // 实机：非 0=已吸附，0=已分离
+
+// 固件串的平台前缀是唯一可靠的型号判据：MCU 的模组查询对键盘返回 0，而宿主那条「按主机机型
+// 查表」的路判的是主机不是键盘。两个已证实的前缀见下；其余一律当未知型号，绝不猜测——
+// RX04 Glide 是另一种外形、另一张产品图，猜错会显示错误的设备。详见 docs/KEYBOARD_IDENTITY.md。
+inline constexpr const char* kModelNameGaokun = "HUAWEI 智能磁吸键盘";
+inline constexpr const char* kModelNameDiracR = "HUAWEI 智能磁吸键盘";
+
+// RX0H 与 RX0I 的产品图字节完全相同，原厂对这一系列就用同一张，所以两者共用一个显示名不是
+// 妥协。真正需要分开的是 Glide 那类另有外形的型号，而它落进「未知」分支。
+inline std::string_view KeyboardModelNameFromFirmware(std::string_view firmware) noexcept {
+    if (firmware.find("GAOKUN") != std::string_view::npos) return kModelNameGaokun;
+    if (firmware.find("DIRACR") != std::string_view::npos) return kModelNameDiracR;
+    return {};
+}
+
+// detach support 查询应答：MCU 可能走 ProcPipeMsg 内联路径回显 byte[4]==0x00，也可能走
+// 分发表 byte[4]==0x02，两者都携带 byte[5]==0x35，值在 byte[8]（0=禁用，非 0=启用）。
+// Set(0x34) 的应答会被原厂读线程的过滤规则丢弃，所以不解析它，Set 之后靠重新 Get 确认。
+inline std::optional<bool> TryParseDetachSupportReply(
+        std::span<const uint8_t> packet) noexcept {
+    if (packet.size() < kPenUsbHeaderSize + 1) {
+        return std::nullopt;
+    }
+    if (packet[4] != kSubsystemDetachSupport && packet[4] != kSubsystemKeyboard) {
+        return std::nullopt;
+    }
+    if (packet[5] != kCmdDetachSupportGet) {
+        return std::nullopt;
+    }
+    return packet[kPenUsbHeaderSize] != 0;
+}
+
+inline std::optional<bool> TryParseChargingStatus(
+        std::span<const uint8_t> packet) noexcept {
+    if (packet.size() < kPenUsbHeaderSize + 1 ||
+        packet[4] != kSubsystemKeyboard ||
+        packet[5] != kCmdCharging ||
+        packet[7] < 1) {
+        return std::nullopt;
+    }
+    return packet[kPenUsbHeaderSize] != 0;
+}
+
+} // namespace Kbd
 
 constexpr std::size_t GetPenUsbEventMinimumPayloadLength(uint8_t eventCode) noexcept {
     switch (eventCode) {
@@ -105,7 +180,11 @@ inline std::optional<ParsedPenUsbEventFrame> TryParsePenUsbEventFrame(
     if (packet.size() < kPenUsbHeaderSize) {
         return std::nullopt;
     }
-    if (packet[2] != 0x07 || packet[4] != 0x01) {
+    // 只按子系统 ID 分流，与原厂读线程一致：PenService.dll 只校验 packet[4]，不看
+    // packet[0]/[2]/[6]。这里曾经额外要求 packet[2]==0x07，比原厂更严——键盘与笔共用同一个
+    // 端点之后，严格的方向是反的：多校验一个字节只会丢弃原厂会接受的帧，换不来任何安全性，
+    // 因为非笔子系统在调用到这里之前就已经被 PenEventBridge 分流走了。
+    if (packet[4] != kSubsystemPen) {
         return std::nullopt;
     }
 
@@ -154,7 +233,9 @@ enum class PenUsbEventCode : uint8_t {
     PenDockStatus = 0x21,
     PenUpdateStatus = 0x23,
     PenKeyFuncGet = 0x27,
-    Unknown28 = 0x28,               // 抓包出现；原厂可见 switch 未定位，不自动 ACK
+    PenTopBatteryWindow = 0x28,     // 原厂请求宿主显示连接/电量浮层
+    PenCloseConnectWindow = 0x29,   // 原厂请求关闭连接浮层
+    PenDeviationReminder = 0x2A,    // 笔未正确吸附的瞬时提醒
     PenBatteryAfterConn = 0x2C,
     PenPairDetectAck = 0x2E,
     PenCurrentFunc = 0x2F,
@@ -228,7 +309,9 @@ constexpr PenUsbEventCode PenUsbEventCodeFromRaw(uint8_t code) noexcept {
     case 0x21: return PenUsbEventCode::PenDockStatus;
     case 0x23: return PenUsbEventCode::PenUpdateStatus;
     case 0x27: return PenUsbEventCode::PenKeyFuncGet;
-    case 0x28: return PenUsbEventCode::Unknown28;
+    case 0x28: return PenUsbEventCode::PenTopBatteryWindow;
+    case 0x29: return PenUsbEventCode::PenCloseConnectWindow;
+    case 0x2A: return PenUsbEventCode::PenDeviationReminder;
     case 0x2C: return PenUsbEventCode::PenBatteryAfterConn;
     case 0x2E: return PenUsbEventCode::PenPairDetectAck;
     case 0x2F: return PenUsbEventCode::PenCurrentFunc;
@@ -263,7 +346,9 @@ constexpr const char* ToString(PenUsbEventCode code) noexcept {
     case PenUsbEventCode::PenDockStatus: return "PEN_DOCK_STATUS";
     case PenUsbEventCode::PenUpdateStatus: return "PEN_UPDATE_STATUS";
     case PenUsbEventCode::PenKeyFuncGet: return "PEN_KEY_FUNC_GET";
-    case PenUsbEventCode::Unknown28: return "UNKNOWN_0x28";
+    case PenUsbEventCode::PenTopBatteryWindow: return "PEN_TOP_BATTERY_WINDOW";
+    case PenUsbEventCode::PenCloseConnectWindow: return "PEN_CLOSE_CONNECT_WINDOW";
+    case PenUsbEventCode::PenDeviationReminder: return "PEN_DEVIATION_REMINDER";
     case PenUsbEventCode::PenBatteryAfterConn: return "PEN_BATTERY_AFTER_CONN";
     case PenUsbEventCode::PenPairDetectAck: return "PEN_PAIR_DETECT_ACK";
     case PenUsbEventCode::PenCurrentFunc: return "PEN_CURRENT_FUNC";
@@ -375,6 +460,20 @@ struct PenSemanticState {
 
     bool hasCurrentFunc = false;
     uint8_t currentFunc = 0;
+
+    // BatteryStatus / ChargingStatus / DevConnect were reaching the default branch and
+    // being logged only, so the pen's charge state was observable in the log but nowhere
+    // in the runtime state.
+    bool hasBatteryLevel = false;
+    uint8_t batteryLevel = 0;      // percent as reported by the MCU
+
+    bool hasChargingState = false;
+    bool charging = false;
+
+    // Distinct from PenConnStatus (0x71), which reports the stylus link. DevConnect
+    // (0x10) reports the MCU's own device-level attach state.
+    bool hasDeviceConnected = false;
+    bool deviceConnected = false;
 };
 
 struct PenEvent {

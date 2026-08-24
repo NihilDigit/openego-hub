@@ -41,6 +41,13 @@ public:
     bool IsEnabled() const { return m_enabled.load(std::memory_order_relaxed); }
     void FlushTouchAllUp();
 
+    // OneNote 兼容操作期间的短时输出闸门。它与长期 VHF enabled 配置正交：冻结时先终止
+    // 已上报的触摸和笔接触，再丢弃后续报告；解除后下一帧自然恢复。
+    void SetInputSuppressed(bool suppressed);
+    bool IsInputSuppressed() const {
+        return m_inputSuppressed.load(std::memory_order_acquire);
+    }
+
     void SetTransposeEnabled(bool v) {
         m_transpose.store(v, std::memory_order_relaxed);
     }
@@ -49,7 +56,7 @@ public:
     }
 
     void SetEraserState(uint8_t v) {
-        m_eraserState.store(v, std::memory_order_relaxed);
+        m_eraserRequested.store(v == 1u, std::memory_order_release);
     }
 
     void SetBarrelButtonState(bool pressed) {
@@ -65,9 +72,17 @@ private:
         uint8_t penState = 0;
     };
 
+    struct StylusToolPacket {
+        std::array<uint8_t, 17> bytes{};
+        std::array<uint8_t, 17> transitionBytes{};
+        bool prependOutOfRange = false;
+    };
+
     bool UpdateTouchState(bool hasTouch);
     StylusDispatchPacket BuildStylusPacket(
         const Solvers::StylusFrameData& stylus);
+    StylusToolPacket ApplyStylusToolState(
+        const Solvers::StylusPacket& packet);
 
 
     void WriteTouchPacketsLocked(
@@ -86,11 +101,17 @@ private:
     static constexpr auto kReopenBackoff = std::chrono::milliseconds(200);
 
     std::atomic<bool> m_enabled{true};
+    std::atomic<bool> m_inputSuppressed{false};
     std::atomic<bool> m_transpose{false};
     std::atomic<bool> m_hadTouchLastFrame{false};
     std::atomic<bool> m_hadStylusActiveLastFrame{false};
-    std::atomic<uint8_t> m_eraserState{0};
+    std::atomic<bool> m_eraserRequested{false};
     std::atomic<bool> m_barrelButtonState{false};
+
+    // requested 由按键/配置线程写，applied 只在报文路径推进。单独加锁是为了兼容 legacy
+    // Dispatch 与独立 DispatchStylus 被不同调用方使用的情况。
+    std::mutex m_stylusToolMu;
+    bool m_eraserApplied = false;
 
     int m_stylusSensorRows = 40;
     int m_stylusSensorCols = 60;

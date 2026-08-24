@@ -157,7 +157,42 @@ int main() {
             "PersistConfigV3ResponseWire counters default zero");
 
     PenIdentityStatusWire penIdentity{};
+    // Battery/charging/device-attach were added by spending spare protocolFlags bits and
+    // the byte that used to be _reserved0, so the wire size must not have moved.
     Require(sizeof(PenIdentityStatusWire) == 404, "PenIdentityStatusWire layout remains fixed");
+
+    {
+        PenIdentityStatusWire w{};
+        uint8_t percent = 0;
+        bool charging = true;
+        bool attached = true;
+        Require(!TryGetPenIdentityBatteryLevel(w, percent), "battery absent by default");
+        Require(!TryGetPenIdentityChargingState(w, charging), "charging state absent by default");
+        Require(!charging, "absent charging state reads as false");
+        Require(!TryGetPenIdentityDeviceConnected(w, attached), "device state absent by default");
+
+        SetPenIdentityBatteryLevel(w, 42);
+        SetPenIdentityChargingState(w, true);
+        SetPenIdentityDeviceConnected(w, false);
+
+        Require(TryGetPenIdentityBatteryLevel(w, percent) && percent == 42, "battery round-trips");
+        Require(TryGetPenIdentityChargingState(w, charging) && charging, "charging round-trips");
+        Require(TryGetPenIdentityDeviceConnected(w, attached) && !attached,
+                "a present-but-false device state stays distinguishable from absent");
+
+        // Clearing must drop the value bit while keeping the presence bit.
+        SetPenIdentityChargingState(w, false);
+        Require(TryGetPenIdentityChargingState(w, charging) && !charging, "charging clears");
+
+        // The pre-existing pair-status accessor shares protocolFlags; adding bits must
+        // not have disturbed it.
+        uint8_t pair = 0;
+        Require(!TryGetPenIdentityPairStatus(w, pair), "pair status stays absent");
+        SetPenIdentityPairStatus(w, 7);
+        Require(TryGetPenIdentityPairStatus(w, pair) && pair == 7, "pair status still round-trips");
+        Require(TryGetPenIdentityBatteryLevel(w, percent) && percent == 42,
+                "battery survives an unrelated protocolFlags write");
+    }
     Require(penIdentity.wireVersion == kIpcProtocolVersion, "PenIdentityStatusWire version defaults to protocol version");
     Require(penIdentity.flags == 0, "PenIdentityStatusWire flags default empty");
     Require(penIdentity.stylusId == 0, "PenIdentityStatusWire stylus id defaults zero");
@@ -170,7 +205,7 @@ int main() {
     Require(kPenIdentityHasPairStatus == (1u << 1), "PenIdentityStatusWire pair status presence bit remains fixed");
     Require(offsetof(PenIdentityStatusWire, factoryStatusFlags) == 144, "PenIdentityStatusWire factory status flags offset remains fixed");
     Require(offsetof(PenIdentityStatusWire, pairStatus) == 146, "PenIdentityStatusWire pair status occupies the first legacy reserved byte");
-    Require(offsetof(PenIdentityStatusWire, _reserved0) == 147, "PenIdentityStatusWire remaining reserved byte offset remains fixed");
+    Require(offsetof(PenIdentityStatusWire, batteryLevel) == 147, "PenIdentityStatusWire battery level takes over the last legacy reserved byte");
     Require(offsetof(PenIdentityStatusWire, serialNumberUtf8) == 148, "PenIdentityStatusWire serial buffer offset remains fixed");
     Require(offsetof(PenIdentityStatusWire, firmwareVersionUtf8) == 276, "PenIdentityStatusWire firmware buffer offset remains fixed");
 

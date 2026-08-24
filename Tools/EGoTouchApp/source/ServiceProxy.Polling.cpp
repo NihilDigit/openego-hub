@@ -1,6 +1,7 @@
 #include "ServiceProxyInternal.h"
 #include "GuiLogSink.h"
 #include "FrameLayout.h"
+#include "SystemEpochClock.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -23,28 +24,8 @@ void PopulateRawHeatmapFromFrameData(Solvers::HeatmapFrame& frame) {
     }
 }
 
-uint64_t CaptureSystemEpochUs() {
-    static LARGE_INTEGER frequency = [] {
-        LARGE_INTEGER value{};
-        QueryPerformanceFrequency(&value);
-        return value;
-    }();
-    static const uint64_t qpcAtEpochUs = [] {
-        LARGE_INTEGER counter{};
-        QueryPerformanceCounter(&counter);
-        const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        const uint64_t elapsedUs = (static_cast<uint64_t>(counter.QuadPart) * 1000000ull) /
-            static_cast<uint64_t>(frequency.QuadPart);
-        return static_cast<uint64_t>(nowUs) - elapsedUs;
-    }();
-
-    LARGE_INTEGER counter{};
-    QueryPerformanceCounter(&counter);
-    const uint64_t elapsedUs = (static_cast<uint64_t>(counter.QuadPart) * 1000000ull) /
-        static_cast<uint64_t>(frequency.QuadPart);
-    return qpcAtEpochUs + elapsedUs;
-}
+// 服务端也要打同一个戳,两边的 QPC 锚点必须是同一个,所以取法搬到 Common。
+using Common::CaptureSystemEpochUs;
 
 } // namespace
 
@@ -141,6 +122,19 @@ void ServiceProxy::PollLoop() {
                     m_dvrBuffer->PushOverwriting(slot);
                     latestDvrSeq = slot.dvrSeq;
                     latestDvrTimestamp = slot.timestamp;
+
+                    if (m_dvrSessionActive.load(std::memory_order_relaxed)) {
+                        std::lock_guard<std::mutex> sessionLk(m_dvrSessionMu);
+                        if (m_dvrSessionWriter && m_dvrSessionWriter->IsActive()) {
+                            if (m_dvrSessionWriter->Append(slot)) {
+                                m_dvrSessionFrames.store(m_dvrSessionWriter->FrameCount(),
+                                                         std::memory_order_relaxed);
+                            } else {
+                                m_dvrSessionActive.store(false, std::memory_order_relaxed);
+                                m_dvrSessionStatus = "Session recording aborted: disk write failed.";
+                            }
+                        }
+                    }
                 }
             }
             if (wt == WaitType::Log) {
@@ -290,6 +284,12 @@ void ServiceProxy::PollLoop() {
                     identity.factoryStatusFlags = wire.factoryStatusFlags;
                     identity.hasPairStatus = Ipc::TryGetPenIdentityPairStatus(
                         wire, identity.pairStatus);
+                    identity.hasBatteryLevel = Ipc::TryGetPenIdentityBatteryLevel(
+                        wire, identity.batteryLevel);
+                    identity.hasChargingState = Ipc::TryGetPenIdentityChargingState(
+                        wire, identity.charging);
+                    identity.hasDeviceConnected = Ipc::TryGetPenIdentityDeviceConnected(
+                        wire, identity.deviceConnected);
                     auto assignUtf8Field = [](bool& present,
                                                std::string& target,
                                                uint16_t textLenWire,

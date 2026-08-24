@@ -657,7 +657,7 @@ void TestPublicSettersNoOpUntilConfigSyncReady() {
     Require(!proxy.IsConfigAdjustmentAllowed(), "public setters should not enable editing before config sync");
     Require(proxy.IsSrvStylusVhfEnabled(), "stylus VHF setter should be ignored before config sync");
     Require(proxy.IsSrvAutoMode(), "auto mode setter should be ignored before config sync");
-    Require(proxy.GetPenButtonMode() == PenButtonMode::OemCustom,
+    Require(proxy.GetPenButtonMode() == PenButtonMode::WindowsInk,
             "pen button mode setter should be ignored before config sync");
     Require(proxy.GetPenButtonRoute() == PenButtonRoute::VhfOnly,
             "pen button route setter should be ignored before config sync");
