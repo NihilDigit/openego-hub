@@ -8,13 +8,19 @@ namespace Solvers { namespace Touch {
 
 class StylusTouchSuppressor {
 public:
-    bool  m_stylusSuppressGlobalEnabled = false;
-    bool  m_stylusSuppressLocalEnabled = false;
+    // These must match the defaults declared in TouchPipeline::registerBindings().
+    // Config injection is one path for both build configurations now, but a member
+    // initializer is still what runs whenever that path does not reach a field: no config
+    // file present, the store rejected during validation, or the key simply never bound.
+    // Drift between the two turns those cases into a different algorithm rather than into
+    // the declared default. SolversUnit_PipelineDefaultsConsistency guards it.
+    bool  m_stylusSuppressGlobalEnabled = true;
+    bool  m_stylusSuppressLocalEnabled = true;
     float m_stylusSuppressLocalDistance = 2.5f;
     int   m_stylusSuppressPenPeakThreshold = 1500;
     int   m_stylusSuppressTouchSignalKeep = 6000;
     int   m_stylusSuppressTouchAreaKeep = 12;
-    bool  m_stylusAftEnabled = false;
+    bool  m_stylusAftEnabled = true;
     int   m_stylusAftDebounceFrames = 3;
     int   m_stylusAftWeakSignalThreshold = 240;
     float m_stylusAftWeakSizeThresholdMm = 1.2f;
@@ -57,11 +63,8 @@ inline float StylusTouchSuppressor::DistanceSq(float x1, float y1, float x2, flo
 
 inline float StylusTouchSuppressor::EstimateSizeMm(const TouchContact& touch) const {
     if (touch.sizeMm > 0.0f) return touch.sizeMm;
-    if (touch.signalSum > 0)
-        return std::max(m_fallbackSizeMm, std::cbrt(static_cast<float>(touch.signalSum)) * m_sizeSignalScale);
-    if (touch.area > 0)
-        return std::max(m_fallbackSizeMm, std::sqrt(static_cast<float>(touch.area)) * m_sizeAreaScale);
-    return m_fallbackSizeMm;
+    return EstimateContactSizeMm(touch.areaCells, touch.signalSum, m_fallbackSizeMm,
+                                 m_sizeAreaScale, m_sizeSignalScale);
 }
 
 inline StylusTouchSuppressor::StylusNoiseEvidence StylusTouchSuppressor::BuildStylusNoiseEvidence(
@@ -108,18 +111,27 @@ inline StylusTouchSuppressor::StylusNoiseEvidence StylusTouchSuppressor::BuildSt
 
 inline bool StylusTouchSuppressor::IsStrongTouchCandidate(const TouchContact& touch) const {
     return (touch.signalSum >= m_stylusSuppressTouchSignalKeep) &&
-           (touch.area >= m_stylusSuppressTouchAreaKeep);
+           (touch.areaCells >= m_stylusSuppressTouchAreaKeep);
 }
 
 inline bool StylusTouchSuppressor::Process(HeatmapFrame& frame) {
     auto& interop = frame.stylus.interop;
+
+    // StylusTouchArbiter (pen pipeline, runs earlier in the frame) has already published
+    // its screen-wide verdict here. Capture it before this stage writes its own local
+    // conclusion, and fold it back in at the end, so TouchTracker downstream can still
+    // see that a pen is active — including during the linger tail, when the tip signal
+    // is gone and every tip-distance test necessarily fails.
+    const bool penModeActive = interop.touchSuppressActive;
+    const uint8_t penModeFrames = interop.touchSuppressFrames;
+
     const bool localEnabled = m_stylusSuppressGlobalEnabled && m_stylusSuppressLocalEnabled;
     const bool aftEnabled = m_stylusSuppressGlobalEnabled && m_stylusAftEnabled;
     if (!localEnabled && !aftEnabled) {
         interop.recheckOverlap = false;
         interop.touchNullLike = false;
-        interop.touchSuppressActive = false;
-        interop.touchSuppressFrames = 0;
+        interop.touchSuppressActive = penModeActive;
+        interop.touchSuppressFrames = penModeFrames;
         return false;
     }
 
@@ -138,13 +150,17 @@ inline bool StylusTouchSuppressor::Process(HeatmapFrame& frame) {
     interop.recheckThreshold =
         static_cast<uint16_t>(std::clamp(finalThreshold, 0, 0xFFFF));
     interop.touchNullLike = false;
-    interop.touchSuppressActive = false;
-    interop.touchSuppressFrames = 0;
+    interop.touchSuppressActive = penModeActive;
+    interop.touchSuppressFrames = penModeFrames;
 
     const StylusNoiseEvidence evidence =
         BuildStylusNoiseEvidence(frame, finalThreshold);
     interop.recheckPassed = interop.recheckPassed && evidence.stable;
-    if (!localEnabled || !evidence.pointValid) return false;
+    if (!localEnabled || !evidence.pointValid) {
+        // penModeActive/Frames stay as written above — the arbiter's verdict outlives the
+        // tip signal by design.
+        return false;
+    }
 
     const float radiusSq = m_stylusSuppressLocalDistance * m_stylusSuppressLocalDistance;
     const float overlapRadius = std::min(m_stylusSuppressLocalDistance, 1.25f);
@@ -167,7 +183,7 @@ inline bool StylusTouchSuppressor::Process(HeatmapFrame& frame) {
             const bool weakTouch =
                 (c.signalSum < m_stylusAftWeakSignalThreshold) ||
                 (sizeMm < m_stylusAftWeakSizeThresholdMm) ||
-                (c.area < std::max(1, m_stylusSuppressTouchAreaKeep / 2));
+                (c.areaCells < std::max(1, m_stylusSuppressTouchAreaKeep / 2));
             const bool suppressNow =
                 overlap &&
                 !strongTouch &&
@@ -185,12 +201,19 @@ inline bool StylusTouchSuppressor::Process(HeatmapFrame& frame) {
     interop.touchNullLike =
         evidence.active && interop.recheckOverlap;
     interop.touchSuppressActive =
-        evidence.active || suppressedCount > 0;
+        penModeActive || evidence.active || suppressedCount > 0;
     if (interop.recheckOverlap && evidence.active) {
         interop.recheckPassed = false;
     }
+    // touchSuppressFrames carries two different quantities and this max() mixes them:
+    // penModeFrames is the arbiter's linger countdown (how much longer the pen side will
+    // keep asserting on its own), holdFrames is this stage's debounce (how long a contact
+    // it just erased should stay erased). Neither is a remaining-frames count for the
+    // other. The max is safe because every consumer treats the field as "suppression is
+    // warranted for at least this many more frames" and only ever reads it as a lower
+    // bound — do not start doing arithmetic on it without separating the two sources.
     interop.touchSuppressFrames = static_cast<uint8_t>(
-        std::clamp(holdFrames, 0, 255));
+        std::clamp(std::max(holdFrames, static_cast<int>(penModeFrames)), 0, 255));
     return false;
 }
 

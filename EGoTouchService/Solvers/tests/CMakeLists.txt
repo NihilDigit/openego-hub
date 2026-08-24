@@ -84,6 +84,18 @@ ego_add_solvers_unit(SolversUnit_TouchStrokeAggregator touch
     unit/touch/TouchStrokeAggregatorTest.cpp
 )
 
+ego_add_solvers_unit(SolversUnit_TouchPenModeSuppress touch
+    unit/touch/TouchPenModeSuppressTest.cpp
+)
+
 ego_add_solvers_config_unit(SolversUnit_StylusPipelineConfigRoundTrip stylus
     unit/stylus/StylusPipelineConfigRoundTripTest.cpp
+)
+
+ego_add_solvers_config_unit(SolversUnit_PipelineDefaultsConsistency config
+    unit/config/PipelineDefaultsConsistencyTest.cpp
+)
+
+ego_add_solvers_unit(SolversUnit_StylusTouchArbiter stylus
+    unit/stylus/StylusTouchArbiterTest.cpp
 )

@@ -18,7 +18,7 @@ using Solvers::Touch::TouchTracker;
 struct ContactSpec {
     float x = 0.0f;
     float y = 0.0f;
-    int area = 0;
+    int areaCells = 0;
     int signalSum = 0;
     float sizeMm = 0.0f;
 };
@@ -55,7 +55,7 @@ struct TrackerHarness {
             TouchContact contact;
             contact.x = spec.x;
             contact.y = spec.y;
-            contact.area = spec.area;
+            contact.areaCells = spec.areaCells;
             contact.signalSum = spec.signalSum;
             contact.sizeMm = spec.sizeMm;
             frame.touch.output.contacts.push_back(contact);
@@ -218,6 +218,89 @@ void TestGlobalDisableClearsExistingAftSuppressionHold() {
     Require(disabledFrame.stylus.interop.touchSuppressFrames == 0, "global-off should clear previous suppress frames");
 }
 
+// ── StylusTouchSuppressor as a relay ────────────────────────────────────────────
+//
+// The stage sits between StylusTouchArbiter (which writes the screen-wide verdict into
+// interop) and TouchTracker (which consumes it), and it rewrites the same two fields from
+// its own local-radius conclusion. Erasing what arrived is the failure mode that matters:
+// the arbiter's verdict is the only thing covering the linger tail, where the tip signal
+// is gone and every distance test here necessarily comes back negative.
+HeatmapFrame RunSuppressorOnly(StylusTouchSuppressor& suppressor,
+                               bool penModeActive,
+                               uint8_t penModeFrames,
+                               std::initializer_list<ContactSpec> contacts,
+                               const StylusSpec& stylus) {
+    HeatmapFrame frame;
+    frame.stylus.interop.touchSuppressActive = penModeActive;
+    frame.stylus.interop.touchSuppressFrames = penModeFrames;
+    for (const auto& spec : contacts) {
+        TouchContact contact;
+        contact.x = spec.x;
+        contact.y = spec.y;
+        contact.areaCells = spec.areaCells;
+        contact.signalSum = spec.signalSum;
+        contact.sizeMm = spec.sizeMm;
+        frame.touch.output.contacts.push_back(contact);
+    }
+    frame.stylus.output.valid = stylus.valid;
+    frame.stylus.output.inRange = stylus.valid;
+    frame.stylus.output.tipDown = stylus.tipDown;
+    frame.stylus.output.pressure = stylus.pressure;
+    frame.stylus.output.point.valid = stylus.valid;
+    frame.stylus.output.point.x = stylus.x * 1024.0f;
+    frame.stylus.output.point.y = stylus.y * 1024.0f;
+    frame.stylus.interop.signalX = stylus.signalX;
+    frame.stylus.interop.signalY = stylus.signalY;
+    frame.stylus.interop.maxRawPeak = std::max(stylus.signalX, stylus.signalY);
+    suppressor.Process(frame);
+    return frame;
+}
+
+void TestSuppressorCarriesPenModeVerdictWithNoTipSignal() {
+    StylusTouchSuppressor suppressor;
+
+    // The linger tail: flag asserted, no stylus point at all. Every local test bails out,
+    // and the incoming verdict has to come out the other side untouched.
+    const auto frame = RunSuppressorOnly(suppressor, true, 33, {
+        ContactSpec{24.0f, 20.0f, 10, 1200, 1.9f}
+    }, StylusSpec{});
+
+    Require(frame.stylus.interop.touchSuppressActive,
+            "pen-mode verdict must survive a frame with no tip signal");
+    Require(frame.stylus.interop.touchSuppressFrames == 33,
+            "the arbiter's linger countdown must survive unchanged");
+    Require(frame.touch.output.contacts.size() == 1,
+            "carrying the verdict must not erase contacts by itself");
+}
+
+void TestSuppressorTakesMaxOfPenModeAndOwnHold() {
+    const StylusSpec stylus = MakeStylusSpec(true, 12.5f, 7.75f, 180, 500, 2200, true);
+    const ContactSpec weakOverlap{12.5f, 7.75f, 3, 160, 0.8f};
+
+    StylusTouchSuppressor lowIncoming;
+    const auto ownWins = RunSuppressorOnly(lowIncoming, true, 5, {weakOverlap}, stylus);
+    Require(ownWins.touch.output.contacts.empty(), "weak overlap contact should be erased");
+    Require(ownWins.stylus.interop.touchSuppressFrames > 5,
+            "this stage's own hold must not be capped by a shorter incoming countdown");
+
+    StylusTouchSuppressor highIncoming;
+    const auto incomingWins = RunSuppressorOnly(highIncoming, true, 200, {weakOverlap}, stylus);
+    Require(incomingWins.stylus.interop.touchSuppressFrames == 200,
+            "a longer incoming countdown must not be shortened to this stage's hold");
+}
+
+void TestSuppressorInventsNothingWithoutEvidence() {
+    StylusTouchSuppressor suppressor;
+    const auto frame = RunSuppressorOnly(suppressor, false, 0, {
+        ContactSpec{24.0f, 20.0f, 10, 1200, 1.9f}
+    }, StylusSpec{});
+
+    Require(!frame.stylus.interop.touchSuppressActive,
+            "no pen and no evidence must leave the verdict clear");
+    Require(frame.stylus.interop.touchSuppressFrames == 0,
+            "no pen and no evidence must leave the countdown at zero");
+}
+
 } // namespace
 
 int main() {
@@ -229,6 +312,9 @@ int main() {
         TestAftKeepsSuppressingRecentWeakTouchAfterStylusLeaves();
         TestGlobalDisableBypassesLocalAndAftSuppression();
         TestGlobalDisableClearsExistingAftSuppressionHold();
+        TestSuppressorCarriesPenModeVerdictWithNoTipSignal();
+        TestSuppressorTakesMaxOfPenModeAndOwnHold();
+        TestSuppressorInventsNothingWithoutEvidence();
         std::cout << "[TEST] TouchTracker stylus suppress tests passed.\n";
         return 0;
     } catch (const std::exception& ex) {
