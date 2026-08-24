@@ -72,7 +72,7 @@ enum class ConfigKeyId : uint16_t {
     TouchZoneContactMaxTouches    = 0x0130,
     TouchZoneContactEdgeWidthThreshold = 0x0131,
     TouchZoneContactTouchSizePixelPitchMm = 0x0132,
-    TouchZoneContactTouchSizeUnitPerSigMm2 = 0x0133,
+    TouchZoneContactTouchSizeFallbackMm = 0x0133,
     TouchEdgeEnabled              = 0x0134,
     TouchEdgeCompStrength         = 0x0135,
     TouchEdgeFullCompRange        = 0x0136,
@@ -113,6 +113,29 @@ enum class ConfigKeyId : uint16_t {
     TouchPalmBoxPalmLikelyOnly    = 0x0159,
     TouchPalmBoxKeepUntilNoPeakDomainInside = 0x015A,
     TouchPalmBoxMaxHoldFrames     = 0x015B,
+    TouchZoneContactTouchSizeAreaScale = 0x015C,
+    TouchZoneContactTouchSizeSignalScale = 0x015D,
+    TouchZoneContactTouchSizeRowPitchMm = 0x015E,
+
+    // ── Touch: 笔画层(第 5 级)与调理级的无触摸判据 ──
+    // 没有键 id 的键会被 ConfigCatalog 丢掉:工作台看不到、IPC 也送不进去。
+    // 加旋钮时**必须**同时在这里登记,否则它只能在 DvrReplay 的 --set 里用。
+    TouchStrokeEnabled                  = 0x015F,
+    TouchStrokeContinueMaxGapMs         = 0x0160,
+    TouchStrokeContinueMaxDistanceCells = 0x0161,
+    TouchStrokeContinueMinSizeRatio     = 0x0162,
+    TouchStrokeContinueMaxSizeRatio     = 0x0163,
+    TouchStrokeHoldMinPeakSignal        = 0x0164,
+    TouchStrokeDecideMaxSamples         = 0x0165,
+    TouchStrokePalmMinConcurrentStrokes = 0x0166,
+    // 0x0167..0x016A 曾是移入修正的四个键,随该功能一同删除。号段留空不重编,
+    // 已经发出去的配置里可能还带着这些 id。
+    TouchStrokeNominalFrameIntervalUs   = 0x016B,
+    TouchSignalCondBaselineTrustTracks  = 0x016C,
+    TouchSignalCondBaselineNoFingerGraceFrames = 0x016D,
+    TouchSignalCondBaselineNoFingerMaxSignal   = 0x016E,
+    TouchPeakDetectionClosePeakMinSaddleDrop   = 0x016F,
+    TouchPeakDetectionClosePeakMinSaddleRatio  = 0x0170,
 
     // ── Stylus: reserved legacy HPP2 config key range (0x0200-0x022F) ──
 
@@ -159,6 +182,9 @@ enum class ConfigKeyId : uint16_t {
     StylusSpLockSensorTxCount             = 0x0256,
     StylusSpLockSensorRxCount             = 0x0257,
     StylusSpLockBypass                    = 0x0258,
+    StylusSpTiltCalibOffset               = 0x0259,
+    StylusSpTiltCalibScale                = 0x025A,
+    StylusSpTiltMaxDiffJump               = 0x025B,
 
     // ── Sentinel ──
     MaxKeyId = 0x0300,

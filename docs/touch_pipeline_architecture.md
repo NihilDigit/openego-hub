@@ -2,7 +2,17 @@
 
 > 基于 [TouchPipeline.h](../EGoTouchService/Solvers/TouchSolver/TouchPipeline.h) / [TouchPipeline.cpp](../EGoTouchService/Solvers/TouchSolver/TouchPipeline.cpp) 的全线性编排分析
 >
-> 最后更新：2026-06-05
+> 最后更新：2026-06-05；2026-08-24 补入笔画层与早退判据的变化。
+
+> **这份文档是模块编排的走查，不是行为的权威。** 正文成稿于 2026-06-05，此后管线有过
+> 多轮改动，只有下面这几处已经核对并更正，其余段落可能与代码不一致：
+>
+> - 跟踪与手势之间**多了一级 `StrokeAggregator`（笔画层）**，见下面 Phase 5.5。
+> - 早退判据已不再是「固件 `hasFinger` 或有存活轨迹」，改成本帧自算的信号极值判，
+>   固件标志只当否决票。
+> - 调理产物写在 `frame.touch.conditioned`，原始热图整帧不动（契约 4）。
+>
+> 任何关于**行为、阈值、判据、验收数字**的问题以 [touch_stack.md](touch_stack.md) 为准。
 
 ---
 
@@ -97,7 +107,7 @@ flowchart LR
     PSC --> GEN["GenerateContacts<br/>Phase 3 + 4"]
     GEN --> POST["PostProcessContacts<br/>Phase 4 续"]
     POST --> CACHE["UpdateContactCaches"]
-    CACHE --> TG["ProcessTrackingAndGesture<br/>Phase 5 + 6"]
+    CACHE --> TG["ProcessTrackingAndGesture<br/>Phase 5 + 5.5 + 6"]
 ```
 
 ---
@@ -403,7 +413,7 @@ flowchart TB
 | `gapRelinkWindowFrames` | 4 | 间隙重连窗口 |
 | `touchDownDebounceFrames` | 1 | 基础 TouchDown 去抖帧数 |
 | `dynamicDebounceEnabled` | true | 动态去抖（弱信号/小面积/边缘额外加帧） |
-| `touchDownDebounceMaxExtra` | 4 | 动态去抖最大附加帧数 |
+| `touchDownDebounceMaxExtra` | 2 | 动态去抖最大附加帧数 |
 | `useHungarian` | true | 使用匈牙利算法（否则贪心最近邻） |
 
 **TouchDown Reject 逻辑：**
@@ -438,18 +448,33 @@ flowchart TB
 
 $$\alpha = \frac{1}{1 + \tau \cdot rate}, \quad \tau = \frac{1}{2\pi \cdot cutoff}$$
 
-$$cutoff = minCutoff + \beta \cdot |\dot{v}|$$
+$$cutoff = minCutoff + \beta \cdot |\dot{v}|^2$$
 
 | 参数 | 默认值 | 效果 |
 |------|--------|------|
-| `minCutoff` | 4.404 | 静止时平滑强度（值越小越平滑） |
-| `beta` | 0.5 | 速度自适应系数（值越大运动时延迟越低） |
-| `dCutoff` | 1.0 | 速度估计的平滑截止频率 |
+| `minCutoff` | 1.0 | 静止时平滑强度（值越小越平滑） |
+| `beta` | 150.0 | 速度平方项系数（值越大运动时延迟越低） |
+| `dCutoff` | 100.0 | 速度估计的平滑截止频率 |
 
-> [!NOTE]
-> 相较旧版（`minCutoff=5.0`, `beta=0.05`），新默认值显著降低了运动延迟。`beta` 从 0.05 提高到 0.5，意味着手指移动时频率截止点上升更快、滤波更少。
+> [!IMPORTANT]
+> 本实现的 cutoff 用的是**速度平方**项，不是教科书 1-Euro 的线性项（见 `CoordinateFilter::Process` 中的 `velocityMag * velocityMag`）。因此 `beta` 的量纲与线性版本不可比：线性版常见的 `beta ≈ 0.05~0.5` 在平方响应下几乎不产生自适应效果。上表默认值只对当前的平方实现有效。
 
 ---
+
+### Phase 5.5: 笔画层 — [StrokeAggregator](../EGoTouchService/Solvers/TouchSolver/StrokeAggregator.hpp)
+
+跑在跟踪与坐标滤波之后、手势状态机之前。厂商实现里没有对应物，是有意分歧。
+
+它把跨帧的证据聚合到「笔画」上：轨迹会断，笔画不该断，所以笔画自己编号，并按
+时间间隔 / 位置距离 / 尺寸比三条判据决定一条断掉的轨迹算不算同一条笔画的延续。
+掌判在这一级按整条笔画做一次，输出的不是「报或不报」这个布尔，而是笔画阶段
+（`Holding` / `Active` / `Cancelled`），由手势层据此驱动事件。
+
+手势层补发的抬起事件是在轨迹消失之后另建的接触点，不经过笔画层主循环，所以归属要在
+手势层跑完之后由 `StampLateContacts` 补盖一次——只盖章不记证据，那一帧的位置与面积
+来自槽位里的陈旧副本。
+
+判据、参数与标定过程见 [touch_stack.md](touch_stack.md) 第三节。
 
 ### Phase 6: 手势与输出
 

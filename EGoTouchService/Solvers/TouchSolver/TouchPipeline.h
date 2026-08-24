@@ -32,7 +32,8 @@
 #include "TouchTracker.hpp"
 #include "CoordinateFilter.hpp"
 
-// ── Phase 6: Gesture & Output ──
+// ── Phase 6: Stroke, Gesture & Output ──
+#include "StrokeAggregator.hpp"
 #include "TouchGestureStateMachine.hpp"
 
 #include <atomic>
@@ -90,6 +91,7 @@ public:
     Touch::StylusTouchSuppressor     m_stylusSuppress;
     Touch::TouchTracker              m_tracker;
     Touch::CoordinateFilter          m_coordFilter;
+    Touch::StrokeAggregator          m_strokes;
     Touch::TouchGestureStateMachine  m_gesture;
 
 private:

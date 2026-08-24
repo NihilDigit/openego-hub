@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace Solvers {
 
@@ -13,6 +14,10 @@ namespace Solvers {
 // ══════════════════════════════════════════════════════════════════════
 bool TouchPipeline::ProcessMasterParserOnly(HeatmapFrame& frame) {
     m_frameParser.Process(frame);
+    // 这条路不跑调理级,而工作台看的是调理图(IPC 那一路送的就是它)。不填的话
+    // 「只跑解析器」模式下热图会是全空,而不是像以前那样显示原始图。
+    std::memcpy(&frame.touch.conditioned[0][0], &frame.heatmapMatrix[0][0],
+                sizeof(frame.touch.conditioned));
     ResetIdleOutputs(frame);
     return true;
 }
@@ -42,6 +47,9 @@ void TouchPipeline::ReserveContactCapacity(HeatmapFrame& frame) const {
 
 bool TouchPipeline::ProcessFrameParser(HeatmapFrame& frame) {
     // ── Phase 1: Frame Parsing ──────────────────────────────────────
+    // 上一帧的轨迹位置在整帧内都有效，在这里一次性挂上。基线级也要用它（见
+    // BaselineTracker 的维持门槛），而它跑在候选生成之前。
+    frame.touch.runtime.prevTrackAnchors = m_tracker.GetTrackAnchors();
     m_frameParser.Process(frame);
     if (m_frameParser.m_enabled) return true;
 
@@ -57,6 +65,7 @@ bool TouchPipeline::ProcessSignalConditioning(HeatmapFrame& frame) {
 
     // ── Phase 2: Signal Conditioning ────────────────────────────────
     m_baseline.Process(frame, hasCurrentFinger);
+
     if (hasCurrentFinger || hasLiveTouchState) {
         m_cmf.Process(frame);
         return true;
@@ -70,6 +79,8 @@ void TouchPipeline::GenerateContacts(HeatmapFrame& frame) {
     // ── Phase 3: Candidate Generation ───────────────────────────────
     frame.touch.output.contacts.clear();
     frame.touch.runtime.peakThreshold = m_peakDet.m_threshold;
+    // prevTrackAnchors 在 ProcessFrameParser 里已挂好：m_tracker.Process 在本帧还没跑，
+    // 取到的是上一帧的轨迹位置——检测级与基线级的迟滞判据要的正是这个。
 
     m_macroZoneDet.Process(frame);
     m_peakDet.Process(frame);
@@ -102,7 +113,11 @@ void TouchPipeline::UpdateContactCaches(HeatmapFrame& frame) {
 bool TouchPipeline::ProcessTrackingAndGesture(HeatmapFrame& frame) {
     m_tracker.Process(frame);
     m_coordFilter.Process(frame);
+    // 笔画层在跟踪之后、上报语义之前。它读轨迹、写笔画归属，不改任何上报决定；
+    // 判定与 hold / cancel 在 5.3、5.4 接上，见设计文档第九节。
+    m_strokes.Process(frame);
     const bool success = ProcessGestureOutput(frame);
+    m_strokes.StampLateContacts(frame);
 
     // 缓存跨帧状态并消除反向状态查询
     frame.touch.runtime.hasLiveTouchState = m_tracker.HasLiveTracks() || m_gesture.HasLiveState();
@@ -195,6 +210,18 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
                 &Touch::BaselineTracker::m_peakThreshold, m_baseline,
                 static_cast<int32_t>(305), ConfigRange{1, 2000},
                 "Baseline freeze threshold");
+    binder.bind("touch.signal_cond.baseline_sustain_threshold",
+                &Touch::BaselineTracker::m_sustainThreshold, m_baseline,
+                static_cast<int32_t>(100), ConfigRange{1, 2000},
+                "Baseline freeze sustain threshold near an edge-hugging track");
+    binder.bind("touch.signal_cond.baseline_sustain_radius_cells",
+                &Touch::BaselineTracker::m_sustainRadiusCells, m_baseline,
+                2.5f, ConfigRange{0.0, 10.0},
+                "Radius around a live track where the sustain threshold applies");
+    binder.bind("touch.signal_cond.baseline_sustain_edge_only_cells",
+                &Touch::BaselineTracker::m_sustainEdgeOnlyCells, m_baseline,
+                2.0f, ConfigRange{-1.0, 10.0},
+                "Only tracks this close to a boundary lower the freeze threshold; negative applies to all");
     binder.bind("touch.signal_cond.baseline_release_hold_frames",
                 &Touch::BaselineTracker::m_releaseHoldFrames, m_baseline,
                 static_cast<int32_t>(60), ConfigRange{0, 255},
@@ -250,6 +277,17 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
     binder.bind("touch.signal_cond.baseline_noise_tracking_enabled",
                 &Touch::BaselineTracker::m_noiseTrackingEnabled, m_baseline,
                 true, {}, "Enable baseline tracking inside noise deadband");
+    binder.bind("touch.signal_cond.baseline_trust_tracks_over_firmware_flag",
+                &Touch::BaselineTracker::m_trustTracksOverFirmwareFlag, m_baseline,
+                true, {}, "Keep conditioning while tracks are alive even if the firmware flag drops");
+    binder.bind("touch.signal_cond.baseline_no_finger_grace_frames",
+                &Touch::BaselineTracker::m_noFingerGraceFrames, m_baseline,
+                static_cast<int32_t>(8), ConfigRange{0, 255},
+                "Frames of conditioning kept after the last live track");
+    binder.bind("touch.signal_cond.baseline_no_finger_max_signal",
+                &Touch::BaselineTracker::m_noFingerMaxSignal, m_baseline,
+                static_cast<int32_t>(200), ConfigRange{0, 2000},
+                "Own-signal level that overrides the firmware's no-finger flag; 0 trusts the flag");
 
     binder.bind("touch.signal_cond.cmf_enabled",
                 &Touch::CMFProcessor::m_enabled, m_cmf,
@@ -293,12 +331,28 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
                 true, {}, "Enable close-peak saddle suppression");
     binder.bind("touch.peak_detection.close_peak_radius",
                 &Touch::PeakDetector::m_closePeakRadius, m_peakDet,
-                static_cast<int32_t>(2), ConfigRange{1, 8},
+                static_cast<int32_t>(3), ConfigRange{1, 8},
                 "Close-peak saddle radius");
+    binder.bind("touch.peak_detection.close_peak_min_saddle_drop",
+                &Touch::PeakDetector::m_closePeakMinSaddleDrop, m_peakDet,
+                static_cast<int32_t>(80), ConfigRange{0, 2000},
+                "Absolute valley depth needed to keep two close peaks apart");
+    binder.bind("touch.peak_detection.close_peak_min_saddle_ratio",
+                &Touch::PeakDetector::m_closePeakMinSaddleRatio, m_peakDet,
+                0.50f, ConfigRange{0.0, 1.0},
+                "Valley depth as a fraction of the weaker peak");
     binder.bind("touch.peak_detection.macro_zone_min_area",
                 &Touch::PeakDetector::m_macroZoneMinArea, m_peakDet,
                 static_cast<int32_t>(3), ConfigRange{1, 64},
-                "Minimum macro-zone area for peaks");
+                "Minimum macro-zone areaCells for peaks");
+    binder.bind("touch.peak_detection.macro_zone_hold_area",
+                &Touch::PeakDetector::m_macroZoneHoldArea, m_peakDet,
+                static_cast<int32_t>(1), ConfigRange{1, 64},
+                "Macro-zone areaCells kept under an existing track");
+    binder.bind("touch.peak_detection.track_hold_radius",
+                &Touch::PeakDetector::m_trackHoldRadius, m_peakDet,
+                2.0f, ConfigRange{0.0f, 8.0f},
+                "Track-to-peak distance that enables the hold areaCells");
 
     binder.bind("touch.classifier.enabled",
                 &Touch::TouchClassifier::m_enabled, m_touchClassifier,
@@ -312,7 +366,7 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
     binder.bind("touch.classifier.area_threshold",
                 &Touch::TouchClassifier::m_areaThreshold, m_touchClassifier,
                 static_cast<int32_t>(50), ConfigRange{0, 500},
-                "Touch area threshold");
+                "Touch areaCells threshold");
     binder.bind("touch.classifier.signal_sum_threshold",
                 &Touch::TouchClassifier::m_signalSumThreshold, m_touchClassifier,
                 static_cast<int32_t>(80000), ConfigRange{0, 1000000},
@@ -384,7 +438,7 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
                 true, {}, "Enable zone dilate/erode cleanup");
     binder.bind("touch.zone_contact.max_touches",
                 &Touch::ZoneExpander::m_maxTouches, m_contactExtractor.m_zoneExp,
-                static_cast<int32_t>(10), ConfigRange{1, 20},
+                static_cast<int32_t>(20), ConfigRange{1, 20},
                 "Maximum contacts after zone extraction");
     binder.bind("touch.zone_contact.edge_width_threshold",
                 &Touch::ZoneExpander::m_edgeWidthThreshold, m_contactExtractor.m_zoneExp,
@@ -393,11 +447,23 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
     binder.bind("touch.zone_contact.touch_size_pixel_pitch_mm",
                 &Touch::ContactExtractor::TouchSizeCalculator::m_pixelPitchMm, m_contactExtractor.m_touchSize,
                 4.5f, ConfigRange{0.1, 20.0},
-                "Touch size pixel pitch in millimeters");
-    binder.bind("touch.zone_contact.touch_size_unit_per_sig_mm2",
-                &Touch::ContactExtractor::TouchSizeCalculator::m_unitPerSigMm2, m_contactExtractor.m_touchSize,
-                static_cast<int32_t>(128), ConfigRange{1, 4096},
-                "Touch size signal scale");
+                "Sensor column pitch in millimeters");
+    binder.bind("touch.zone_contact.touch_size_row_pitch_mm",
+                &Touch::ContactExtractor::TouchSizeCalculator::m_rowPitchMm, m_contactExtractor.m_touchSize,
+                4.125f, ConfigRange{0.1, 20.0},
+                "Sensor row pitch in millimeters; the grid is not square");
+    binder.bind("touch.zone_contact.touch_size_fallback_mm",
+                &Touch::ContactExtractor::TouchSizeCalculator::m_fallbackSizeMm, m_contactExtractor.m_touchSize,
+                1.0f, ConfigRange{0.1, 20.0},
+                "Touch size fallback in millimeters");
+    binder.bind("touch.zone_contact.touch_size_area_scale",
+                &Touch::ContactExtractor::TouchSizeCalculator::m_sizeAreaScale, m_contactExtractor.m_touchSize,
+                0.22f, ConfigRange{0.01, 5.0},
+                "Touch size scale applied to sqrt(areaCells)");
+    binder.bind("touch.zone_contact.touch_size_signal_scale",
+                &Touch::ContactExtractor::TouchSizeCalculator::m_sizeSignalScale, m_contactExtractor.m_touchSize,
+                0.35f, ConfigRange{0.01, 5.0},
+                "Touch size scale applied to cbrt(signalSum)");
 
     binder.bind("touch.edge.enabled",
                 &Touch::EdgeCompensator::m_enabled, m_edgeComp,
@@ -408,11 +474,11 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
                 "Edge compensation strength");
     binder.bind("touch.edge.full_comp_range",
                 &Touch::EdgeCompensator::m_ecFullCompRange, m_edgeComp,
-                0.5f, ConfigRange{0.0, 5.0},
+                1.0f, ConfigRange{0.0, 5.0},
                 "Edge full compensation range");
     binder.bind("touch.edge.blend_range",
                 &Touch::EdgeCompensator::m_ecBlendRange, m_edgeComp,
-                0.505f, ConfigRange{0.0, 5.0},
+                0.25f, ConfigRange{0.0, 5.0},
                 "Edge compensation blend range");
     binder.bind("touch.edge.reject_enabled",
                 &Touch::EdgeRejector::m_enabled, m_edgeReject,
@@ -444,6 +510,9 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
                 &Touch::TouchTracker::m_gapRelinkWindowFrames, m_tracker,
                 static_cast<int32_t>(4), ConfigRange{0, 30},
                 "Gap relink window in frames");
+    binder.bind("touch.tracking.report_during_gap",
+                &Touch::TouchTracker::m_reportDuringGap, m_tracker,
+                true, {}, "Keep reporting a track while it is inside the relink window");
     binder.bind("touch.tracking.touch_down_debounce_frames",
                 &Touch::TouchTracker::m_touchDownDebounceFrames, m_tracker,
                 static_cast<int32_t>(1), ConfigRange{0, 30},
@@ -480,22 +549,66 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
                 &Touch::TouchTracker::m_stylusAftRadius, m_tracker,
                 2.8f, ConfigRange{0.0, 30.0},
                 "After-stylus suppression radius");
+    binder.bind("touch.stylus_suppress.pen_mode_enabled",
+                &Touch::TouchTracker::m_penModeSuppressEnabled, m_tracker,
+                true, {},
+                "Reject large contacts screen-wide while a pen is active or lingering");
 
     binder.bind("touch.coord_filter.enabled",
                 &Touch::CoordinateFilter::m_enabled, m_coordFilter,
                 true, {}, "Coordinate filter enable switch");
+    // CoordinateFilter drives cutoff off velocity SQUARED, not the textbook 1-Euro
+    // linear term. These defaults and ranges are scaled for that quadratic response —
+    // linear-1-Euro values (min_cutoff 4.4 / beta 0.5) behave completely differently
+    // here. Keep them in sync with the member initializers in CoordinateFilter.hpp.
     binder.bind("touch.coord_filter.min_cutoff",
                 &Touch::CoordinateFilter::m_minCutoff, m_coordFilter,
-                4.404f, ConfigRange{0.0, 50.0},
-                "Coordinate filter minimum cutoff");
+                1.0f, ConfigRange{0.0, 50.0},
+                "Coordinate filter minimum cutoff (still-hand smoothing)");
     binder.bind("touch.coord_filter.beta",
                 &Touch::CoordinateFilter::m_beta, m_coordFilter,
-                0.5f, ConfigRange{0.0, 10.0},
-                "Coordinate filter beta");
+                150.0f, ConfigRange{0.0, 500.0},
+                "Coordinate filter beta (quadratic velocity slope)");
     binder.bind("touch.coord_filter.d_cutoff",
                 &Touch::CoordinateFilter::m_dCutoff, m_coordFilter,
-                1.0f, ConfigRange{0.0, 50.0},
+                100.0f, ConfigRange{0.0, 200.0},
                 "Coordinate filter derivative cutoff");
+
+    binder.bind("touch.stroke.enabled",
+                &Touch::StrokeAggregator::m_enabled, m_strokes,
+                true, {}, "Stroke aggregation enable switch");
+    binder.bind("touch.stroke.continue_max_gap_ms",
+                &Touch::StrokeAggregator::m_continueMaxGapMs, m_strokes,
+                100.0f, ConfigRange{0.0, 500.0},
+                "Max time gap for a new track to continue an existing stroke");
+    binder.bind("touch.stroke.continue_max_distance_cells",
+                &Touch::StrokeAggregator::m_continueMaxDistanceCells, m_strokes,
+                2.0f, ConfigRange{0.0, 30.0},
+                "Max distance for a new track to continue an existing stroke");
+    binder.bind("touch.stroke.continue_min_size_ratio",
+                &Touch::StrokeAggregator::m_continueMinSizeRatio, m_strokes,
+                0.5f, ConfigRange{0.0, 1.0},
+                "Lower size ratio bound for stroke continuation");
+    binder.bind("touch.stroke.continue_max_size_ratio",
+                &Touch::StrokeAggregator::m_continueMaxSizeRatio, m_strokes,
+                2.0f, ConfigRange{1.0, 10.0},
+                "Upper size ratio bound for stroke continuation");
+    binder.bind("touch.stroke.hold_min_peak_signal",
+                &Touch::StrokeAggregator::m_holdMinPeakSignal, m_strokes,
+                static_cast<int32_t>(800), ConfigRange{0, 32767},
+                "Hold a stroke until its peak signal reaches this; 0 reports everything");
+    binder.bind("touch.stroke.decide_max_samples",
+                &Touch::StrokeAggregator::m_decideMaxSamples, m_strokes,
+                static_cast<int32_t>(4), ConfigRange{1, 60},
+                "Sample count at which a stroke that never gathered evidence is called palm");
+    binder.bind("touch.stroke.palm_min_concurrent_strokes",
+                &Touch::StrokeAggregator::m_palmMinConcurrentStrokes, m_strokes,
+                static_cast<int32_t>(1), ConfigRange{1, 20},
+                "A weak stroke is only called palm when this many strokes coexist with it");
+    binder.bind("touch.stroke.nominal_frame_interval_us",
+                &Touch::StrokeAggregator::m_nominalFrameIntervalUs, m_strokes,
+                static_cast<int32_t>(8333), ConfigRange{1000, 50000},
+                "Clock step used while frame timestamps are still zero");
 
     binder.bind("touch.gesture.enabled",
                 &Touch::TouchGestureStateMachine::m_enabled, m_gesture,
@@ -508,6 +621,10 @@ void TouchPipeline::registerBindings(Config::ConfigBinder& binder) {
                 &Touch::TouchGestureStateMachine::m_dragThreshold, m_gesture,
                 0.8f, ConfigRange{0.0, 20.0},
                 "Drag threshold");
+    binder.bind("touch.gesture.drag_offset_decay_frames",
+                &Touch::TouchGestureStateMachine::m_dragOffsetDecayFrames, m_gesture,
+                static_cast<int32_t>(10), ConfigRange{0, 120},
+                "Frames the drag slop offset takes to decay to zero");
     binder.bind("touch.gesture.long_press_frames",
                 &Touch::TouchGestureStateMachine::m_longPressFrames, m_gesture,
                 static_cast<int32_t>(46), ConfigRange{0, 300},
@@ -529,6 +646,9 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     m_baseline.m_positiveDeadband = store.getOr<int32_t>("touch.signal_cond.baseline_positive_deadband", 14);
     m_baseline.m_negativeDeadband = store.getOr<int32_t>("touch.signal_cond.baseline_negative_deadband", 13);
     m_baseline.m_peakThreshold = store.getOr<int32_t>("touch.signal_cond.baseline_peak_threshold", 305);
+    m_baseline.m_sustainThreshold = store.getOr<int32_t>("touch.signal_cond.baseline_sustain_threshold", 100);
+    m_baseline.m_sustainRadiusCells = store.getOr<float>("touch.signal_cond.baseline_sustain_radius_cells", 2.5f);
+    m_baseline.m_sustainEdgeOnlyCells = store.getOr<float>("touch.signal_cond.baseline_sustain_edge_only_cells", 2.0f);
     m_baseline.m_releaseHoldFrames = store.getOr<int32_t>("touch.signal_cond.baseline_release_hold_frames", 60);
     m_baseline.m_positiveAlphaShift = store.getOr<int32_t>("touch.signal_cond.baseline_positive_alpha_shift", 7);
     m_baseline.m_negativeAlphaShift = store.getOr<int32_t>("touch.signal_cond.baseline_negative_alpha_shift", 5);
@@ -543,6 +663,12 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     m_baseline.m_recoveryMaxFrames = store.getOr<int32_t>("touch.signal_cond.baseline_recovery_max_frames", 30);
     m_baseline.m_recoveryMaxStep = store.getOr<int32_t>("touch.signal_cond.baseline_recovery_max_step", 256);
     m_baseline.m_noiseTrackingEnabled = store.getOr<bool>("touch.signal_cond.baseline_noise_tracking_enabled", true);
+    m_baseline.m_trustTracksOverFirmwareFlag =
+        store.getOr<bool>("touch.signal_cond.baseline_trust_tracks_over_firmware_flag", true);
+    m_baseline.m_noFingerGraceFrames =
+        store.getOr<int32_t>("touch.signal_cond.baseline_no_finger_grace_frames", 8);
+    m_baseline.m_noFingerMaxSignal =
+        store.getOr<int32_t>("touch.signal_cond.baseline_no_finger_max_signal", 200);
 
     m_cmf.m_enabled = store.getOr<bool>("touch.signal_cond.cmf_enabled", true);
     m_cmf.m_exclusionThreshold = store.getOr<int32_t>("touch.signal_cond.cmf_exclusion_threshold", 2000);
@@ -556,8 +682,14 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     m_peakDet.m_z8Filter = store.getOr<bool>("touch.peak_detection.z8_filter_enabled", true);
     m_peakDet.m_z1Filter = store.getOr<bool>("touch.peak_detection.z1_filter_enabled", true);
     m_peakDet.m_closePeakSaddleFilter = store.getOr<bool>("touch.peak_detection.close_peak_saddle_filter_enabled", true);
-    m_peakDet.m_closePeakRadius = store.getOr<int32_t>("touch.peak_detection.close_peak_radius", 2);
+    m_peakDet.m_closePeakRadius = store.getOr<int32_t>("touch.peak_detection.close_peak_radius", 3);
+    m_peakDet.m_closePeakMinSaddleDrop =
+        store.getOr<int32_t>("touch.peak_detection.close_peak_min_saddle_drop", 80);
+    m_peakDet.m_closePeakMinSaddleRatio =
+        store.getOr<float>("touch.peak_detection.close_peak_min_saddle_ratio", 0.50f);
     m_peakDet.m_macroZoneMinArea = store.getOr<int32_t>("touch.peak_detection.macro_zone_min_area", 3);
+    m_peakDet.m_macroZoneHoldArea = store.getOr<int32_t>("touch.peak_detection.macro_zone_hold_area", 1);
+    m_peakDet.m_trackHoldRadius = store.getOr<float>("touch.peak_detection.track_hold_radius", 2.0f);
 
     m_touchClassifier.m_enabled = store.getOr<bool>("touch.classifier.enabled", true);
     m_touchClassifier.m_analyzerEnabled = store.getOr<bool>("touch.classifier.analyzer_enabled", true);
@@ -572,8 +704,8 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     m_contactExtractor.m_zoneExp.m_fingerInPalmMaxRadius = store.getOr<int32_t>("touch.classifier.finger_in_palm_max_radius", 3);
 
     m_palmBoxSuppressor.m_enabled = store.getOr<bool>("touch.palm_box.enabled", true);
-    m_palmBoxSuppressor.m_expandRows = store.getOr<int32_t>("touch.palm_box.expand_rows", 1);
-    m_palmBoxSuppressor.m_expandCols = store.getOr<int32_t>("touch.palm_box.expand_cols", 1);
+    m_palmBoxSuppressor.m_expandRows = store.getOr<int32_t>("touch.palm_box.expand_rows", 9);
+    m_palmBoxSuppressor.m_expandCols = store.getOr<int32_t>("touch.palm_box.expand_cols", 10);
     m_palmBoxSuppressor.m_matchCenterDistance = store.getOr<float>("touch.palm_box.match_center_distance", 6.0f);
     m_palmBoxSuppressor.m_matchIoUThreshold = store.getOr<float>("touch.palm_box.match_iou_threshold", 0.10f);
     m_palmBoxSuppressor.m_palmLikelyOnly = store.getOr<bool>("touch.palm_box.palm_likely_only", true);
@@ -583,15 +715,18 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     m_contactExtractor.m_zoneExp.m_tholdScaleNumer = store.getOr<int32_t>("touch.zone_contact.threshold_scale_numer", 0x40);
     m_contactExtractor.m_zoneExp.m_tholdScaleShift = store.getOr<int32_t>("touch.zone_contact.threshold_scale_shift", 7);
     m_contactExtractor.m_zoneExp.m_dilateErode = store.getOr<bool>("touch.zone_contact.dilate_erode_enabled", true);
-    m_contactExtractor.m_zoneExp.m_maxTouches = store.getOr<int32_t>("touch.zone_contact.max_touches", 10);
+    m_contactExtractor.m_zoneExp.m_maxTouches = store.getOr<int32_t>("touch.zone_contact.max_touches", 20);
     m_contactExtractor.m_zoneExp.m_edgeWidthThreshold = store.getOr<int32_t>("touch.zone_contact.edge_width_threshold", 300);
     m_contactExtractor.m_touchSize.m_pixelPitchMm = store.getOr<float>("touch.zone_contact.touch_size_pixel_pitch_mm", 4.5f);
-    m_contactExtractor.m_touchSize.m_unitPerSigMm2 = store.getOr<int32_t>("touch.zone_contact.touch_size_unit_per_sig_mm2", 128);
+    m_contactExtractor.m_touchSize.m_rowPitchMm = store.getOr<float>("touch.zone_contact.touch_size_row_pitch_mm", 4.125f);
+    m_contactExtractor.m_touchSize.m_fallbackSizeMm = store.getOr<float>("touch.zone_contact.touch_size_fallback_mm", 1.0f);
+    m_contactExtractor.m_touchSize.m_sizeAreaScale = store.getOr<float>("touch.zone_contact.touch_size_area_scale", 0.22f);
+    m_contactExtractor.m_touchSize.m_sizeSignalScale = store.getOr<float>("touch.zone_contact.touch_size_signal_scale", 0.35f);
 
     m_edgeComp.m_enabled = store.getOr<bool>("touch.edge.enabled", true);
     m_edgeComp.m_ecStrength = store.getOr<float>("touch.edge.comp_strength", 1.0f);
-    m_edgeComp.m_ecFullCompRange = store.getOr<float>("touch.edge.full_comp_range", 0.5f);
-    m_edgeComp.m_ecBlendRange = store.getOr<float>("touch.edge.blend_range", 0.505f);
+    m_edgeComp.m_ecFullCompRange = store.getOr<float>("touch.edge.full_comp_range", 1.0f);
+    m_edgeComp.m_ecBlendRange = store.getOr<float>("touch.edge.blend_range", 0.25f);
     m_edgeReject.m_enabled = store.getOr<bool>("touch.edge.reject_enabled", true);
     m_edgeReject.m_edgeMargin = store.getOr<int32_t>("touch.edge.reject_margin", 2);
 
@@ -605,6 +740,7 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     m_tracker.m_alwaysMatchDistance = store.getOr<float>("touch.tracking.always_match_distance", 2.0f);
     m_tracker.m_gapRelinkEnabled = store.getOr<bool>("touch.tracking.gap_relink_enabled", true);
     m_tracker.m_gapRelinkWindowFrames = store.getOr<int32_t>("touch.tracking.gap_relink_window_frames", 4);
+    m_tracker.m_reportDuringGap = store.getOr<bool>("touch.tracking.report_during_gap", true);
     m_tracker.m_touchDownDebounceFrames = store.getOr<int32_t>("touch.tracking.touch_down_debounce_frames", 1);
     m_tracker.m_dynamicDebounceEnabled = store.getOr<bool>("touch.tracking.dynamic_debounce_enabled", true);
     m_tracker.m_useHungarian = store.getOr<bool>("touch.tracking.use_hungarian", true);
@@ -616,11 +752,33 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     m_stylusSuppress.m_stylusAftEnabled = store.getOr<bool>("touch.stylus_suppress.aft_enabled", true);
     m_tracker.m_stylusAftRecentFrames = store.getOr<int32_t>("touch.stylus_suppress.aft_recent_frames", 24);
     m_tracker.m_stylusAftRadius = store.getOr<float>("touch.stylus_suppress.aft_radius", 2.8f);
+    m_tracker.m_penModeSuppressEnabled = store.getOr<bool>("touch.stylus_suppress.pen_mode_enabled", true);
 
     m_coordFilter.m_enabled = store.getOr<bool>("touch.coord_filter.enabled", true);
-    m_coordFilter.m_minCutoff = store.getOr<float>("touch.coord_filter.min_cutoff", 4.404f);
-    m_coordFilter.m_beta = store.getOr<float>("touch.coord_filter.beta", 0.5f);
-    m_coordFilter.m_dCutoff = store.getOr<float>("touch.coord_filter.d_cutoff", 1.0f);
+    m_coordFilter.m_minCutoff = store.getOr<float>("touch.coord_filter.min_cutoff", 1.0f);
+    m_coordFilter.m_beta = store.getOr<float>("touch.coord_filter.beta", 150.0f);
+    m_coordFilter.m_dCutoff = store.getOr<float>("touch.coord_filter.d_cutoff", 100.0f);
+
+    const bool oldStrokeEnabled = m_strokes.m_enabled;
+    m_strokes.m_enabled = store.getOr<bool>("touch.stroke.enabled", true);
+    if (m_strokes.m_enabled != oldStrokeEnabled) {
+        m_strokes.ClearLiveState();
+    }
+    m_strokes.m_continueMaxGapMs = store.getOr<float>("touch.stroke.continue_max_gap_ms", 100.0f);
+    m_strokes.m_continueMaxDistanceCells =
+        store.getOr<float>("touch.stroke.continue_max_distance_cells", 2.0f);
+    m_strokes.m_continueMinSizeRatio =
+        store.getOr<float>("touch.stroke.continue_min_size_ratio", 0.5f);
+    m_strokes.m_continueMaxSizeRatio =
+        store.getOr<float>("touch.stroke.continue_max_size_ratio", 2.0f);
+    m_strokes.m_holdMinPeakSignal =
+        store.getOr<int32_t>("touch.stroke.hold_min_peak_signal", 800);
+    m_strokes.m_decideMaxSamples =
+        store.getOr<int32_t>("touch.stroke.decide_max_samples", 4);
+    m_strokes.m_palmMinConcurrentStrokes =
+        store.getOr<int32_t>("touch.stroke.palm_min_concurrent_strokes", 1);
+    m_strokes.m_nominalFrameIntervalUs =
+        store.getOr<int32_t>("touch.stroke.nominal_frame_interval_us", 8333);
 
     const bool oldGestureEnabled = m_gesture.m_enabled;
     m_gesture.m_enabled = store.getOr<bool>("touch.gesture.enabled", true);
@@ -629,6 +787,8 @@ void TouchPipeline::applyConfig(const Config::ConfigStore& store) {
     }
     m_gesture.m_pressCandidateFrames = store.getOr<int32_t>("touch.gesture.press_candidate_frames", 1);
     m_gesture.m_dragThreshold = store.getOr<float>("touch.gesture.drag_threshold", 0.8f);
+    m_gesture.m_dragOffsetDecayFrames =
+        store.getOr<int32_t>("touch.gesture.drag_offset_decay_frames", 10);
     m_gesture.m_longPressFrames = store.getOr<int32_t>("touch.gesture.long_press_frames", 46);
     m_gesture.m_releasePendingFrames = store.getOr<int32_t>("touch.gesture.release_pending_frames", 0);
     m_gesture.m_bypassStateMachine = store.getOr<bool>("touch.gesture.bypass_state_machine", false);}

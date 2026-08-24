@@ -3,6 +3,7 @@
 #include "TouchSolver/TouchTracker.hpp"
 #include "TouchSolver/TouchPipeline.h"
 
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <iostream>
@@ -39,6 +40,12 @@ struct PipelineHarness {
     }
 
     HeatmapFrame Run(std::initializer_list<std::pair<float, float>> points) {
+        return RunFlagged(points, false);
+    }
+
+    // edgeRejected 由 EdgeRejector 在 tracker 之前写入，这里直接置位以隔离 tracker 的取用逻辑。
+    HeatmapFrame RunFlagged(std::initializer_list<std::pair<float, float>> points,
+                            bool edgeRejected) {
         HeatmapFrame frame;
         timestamp += 8;
         frame.timestamp = timestamp;
@@ -46,8 +53,9 @@ struct PipelineHarness {
             TouchContact c;
             c.x = x;
             c.y = y;
-            c.area = 12;
+            c.areaCells = 12;
             c.signalSum = 1200;
+            c.edgeRejected = edgeRejected;
             frame.touch.output.contacts.push_back(c);
         }
         tracker.Process(frame);
@@ -83,6 +91,71 @@ void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+// EdgeRejector 只写标记，真正丢弃发生在 tracker。这条测试锁住那段接线：判定正确但没人取用，
+// 正是这个功能长期形同虚设的原因。
+void TestEdgeRejectedContactNeverBecomesTrack() {
+    PipelineHarness h;
+    const auto f1 = h.RunFlagged({{1.0f, 20.0f}}, true);
+    Require(VisibleContacts(f1).empty(), "edge-rejected contact should not be reported");
+    Require(f1.touch.output.contacts.empty(), "edge-rejected contact should not create a track");
+
+    // 拒绝不是黏性的：同一位置不再带标记时，正常走触摸落下。
+    const auto f2 = h.RunFlagged({{1.0f, 20.0f}}, false);
+    const auto v2 = VisibleContacts(f2);
+    Require(v2.size() == 1 && v2[0]->reportEvent == TouchReportDown, "unflagged contact should report Down");
+}
+
+// 已建立的轨迹不看这个标记，否则贴边滑动会被中途掐断成一串 up/down。
+void TestEdgeRejectedFlagDoesNotKillEstablishedTrack() {
+    PipelineHarness h;
+    const int id = VisibleContacts(h.Run({{10.0f, 20.0f}}))[0]->id;
+    const auto f2 = h.RunFlagged({{11.0f, 20.0f}}, true);
+    const auto* moved = FindVisibleById(f2, id);
+    Require(moved != nullptr, "established track should survive a later edge rejection");
+    Require(moved->reportEvent == TouchReportMove, "established track should continue as Move");
+}
+
+// PressCandidate 阶段输出钉在 anchor 上，越过 m_dragThreshold 才开始跟随。断言的是「越界那一帧
+// 输出的位移不超过手指的位移」——不复述补偿公式，换个补偿方式仍应通过，而直接跳到指尖真实位置
+// 必然失败。按默认阈值那一跳约合屏幕上三十多个像素。
+// 越界之后的契约见函数尾部：输出逐帧追上指尖，而不是永久落后一个阈值。
+void TestDragStartDoesNotJumpOutput() {
+    PipelineHarness h;
+    h.filter.m_enabled = false;  // 1-Euro 会改写坐标，这里要比对的是状态机自己的输出
+
+    const auto f1 = h.Run({{10.0f, 10.0f}});
+    const auto v1 = VisibleContacts(f1);
+    Require(v1.size() == 1, "frame1 should report one contact");
+    const float anchorX = v1[0]->x;
+
+    // 阈值内：输出应当纹丝不动。
+    const auto f2 = h.Run({{10.5f, 10.0f}});
+    const auto v2 = VisibleContacts(f2);
+    Require(v2.size() == 1 && v2[0]->x == anchorX, "sub-threshold move should not move the output");
+
+    // 越过阈值的那一帧：手指走了 0.5，输出不该走得更多。
+    const auto f3 = h.Run({{11.0f, 10.0f}});
+    const auto v3 = VisibleContacts(f3);
+    Require(v3.size() == 1, "frame3 should still report one contact");
+    const float outputStep = v3[0]->x - anchorX;
+    Require(outputStep > 0.0f, "crossing the threshold should start moving the output");
+    Require(outputStep <= 0.5f + 1e-4f, "output must not outrun the finger when dragging starts");
+
+    // 补偿不是只补一帧，也不是永久保留：后续每帧输出追上一点点，追赶量不超过
+    // 阈值/消解帧数。永久保留会让指针够不到起手方向那一侧的屏幕边缘，见
+    // SolversUnit_TouchDragReach。
+    const float catchUpPerFrame = h.gesture.m_dragThreshold /
+                                  static_cast<float>(h.gesture.m_dragOffsetDecayFrames);
+    const float beforeX = v3[0]->x;
+    const auto f4 = h.Run({{12.0f, 10.0f}});
+    const auto v4 = VisibleContacts(f4);
+    Require(v4.size() == 1, "frame4 should still report one contact");
+    const float steadyStep = v4[0]->x - beforeX;
+    Require(steadyStep >= 1.0f - 1e-4f, "an established drag must not fall further behind the finger");
+    Require(steadyStep <= 1.0f + catchUpPerFrame + 1e-4f,
+            "catch-up must not exceed one decay step per frame");
+}
+
 void TestSingleFingerSilentGapRelink() {
     PipelineHarness h;
     const auto f1 = h.Run({{10.0f, 10.0f}});
@@ -94,11 +167,16 @@ void TestSingleFingerSilentGapRelink() {
     const auto v2 = VisibleContacts(f2);
     Require(v2.size() == 1 && v2[0]->id == id && v2[0]->reportEvent == TouchReportMove, "frame2 should keep same id as Move");
 
+    // 空档帧照常上报，而且位置停在最后一个真实位置。不报的话主机看到的是接触点消失
+    // 又出现，即一次断开——重连窗口存在的意义正是不让短暂的信号丢失变成一次抬起。
     const auto f3 = h.Run({});
-    Require(VisibleContacts(f3).empty(), "gap frame should stay silent");
     const auto* hidden = FindContactById(f3, id);
     Require(hidden != nullptr, "silent gap contact should stay in frame");
-    Require(!hidden->isReported && (hidden->lifeFlags & TouchLifeSilentGap) != 0, "silent gap contact should be hidden");
+    Require((hidden->lifeFlags & TouchLifeSilentGap) != 0, "gap frame should be marked as silent gap");
+    Require(hidden->isReported, "a track inside the relink window must stay reported");
+    // 手指从 10 走到 12。位置保持的话空档帧仍在 12 附近；按速度外推会走到 14 上下。
+    // 界限放在 13 是因为这里读到的是手势层改写过的坐标，带着拖动偏移的消解量。
+    Require(hidden->x < 13.0f, "gap position should hold, not extrapolate past the finger");
 
     const auto f4 = h.Run({{14.0f, 10.0f}});
     const auto* resumed = FindVisibleById(f4, id);
@@ -114,7 +192,7 @@ void TestFastSingleFingerGapRelinkUsesPrediction() {
     Require(v2.size() == 1 && v2[0]->id == id, "fast frame2 should keep original id to seed prediction");
 
     const auto gap = h.Run({});
-    Require(VisibleContacts(gap).empty(), "fast gap frame should stay silent");
+    Require(FindVisibleById(gap, id) != nullptr, "fast gap frame should keep reporting the track");
     Require(FindContactById(gap, id) != nullptr, "fast gap should keep hidden contact");
 
     const auto resume = h.Run({{28.0f, 10.0f}});
@@ -173,7 +251,11 @@ void TestTwoFingerRelinkKeepsOtherFinger() {
     const auto gap = h.Run({{26.0f, 10.0f}});
     Require(FindVisibleById(gap, idB) != nullptr, "remaining finger should keep visible id");
     const auto* hiddenA = FindContactById(gap, idA);
-    Require(hiddenA != nullptr && !hiddenA->isReported, "missing finger should enter hidden silent gap");
+    // 空档期照常上报，主机才看不到断开。所以这里断言的是「进入了空档状态」，
+    // 不是「被藏起来了」——后者正是重连窗口失效的表现。
+    Require(hiddenA != nullptr && (hiddenA->lifeFlags & TouchLifeSilentGap) != 0,
+            "missing finger should enter silent gap");
+    Require(hiddenA->isReported, "a track inside the relink window must stay reported");
 
     const auto resume = h.Run({{14.0f, 10.0f}, {24.0f, 10.0f}});
     Require(FindVisibleById(resume, idA) != nullptr, "recovered finger should relink to original id");
@@ -194,14 +276,16 @@ void TestAmbiguousSilentGapDoesNotHijackOldIds() {
 
     const auto ambiguous = h.Run({{15.0f, 10.0f}, {15.0f, 10.0f}});
     const auto visible = VisibleContacts(ambiguous);
-    Require(visible.size() == 2, "ambiguous frame should still output two current contacts");
+    size_t fresh = 0;
     for (const auto* c : visible) {
-        Require(c->id != oldA && c->id != oldB, "ambiguous relink should not hijack old ids");
+        if (c->id != oldA && c->id != oldB) ++fresh;
     }
-    const auto* hiddenA = FindContactById(ambiguous, oldA);
-    const auto* hiddenB = FindContactById(ambiguous, oldB);
-    Require(hiddenA != nullptr && !hiddenA->isReported, "oldA should stay hidden when relink is ambiguous");
-    Require(hiddenB != nullptr && !hiddenB->isReported, "oldB should stay hidden when relink is ambiguous");
+    // 这个用例守的是「歧义时不要把旧 id 安到新接触点头上」，不是「旧轨迹被藏起来」。
+    // 旧轨迹仍在重连窗口内，按新规则照常上报;它们与两个新接触点同时出现在输出里，
+    // 这是重连窗口的已知代价，记在 docs/touch_stack.md。
+    Require(fresh == 2, "ambiguous frame should output two contacts carrying new ids");
+    Require(FindContactById(ambiguous, oldA) != nullptr, "oldA should still be alive in its relink window");
+    Require(FindContactById(ambiguous, oldB) != nullptr, "oldB should still be alive in its relink window");
 }
 
 TouchContact MakeGestureContact(int id, float x, float y, int state, bool reported) {
@@ -210,7 +294,7 @@ TouchContact MakeGestureContact(int id, float x, float y, int state, bool report
     c.x = x;
     c.y = y;
     c.state = state;
-    c.area = 12;
+    c.areaCells = 12;
     c.signalSum = 1200;
     c.sizeMm = 2.0f;
     c.isReported = reported;
@@ -298,7 +382,7 @@ TouchContact MakeTrackerContact(float x, float y, uint8_t sourcePeakId) {
     TouchContact c;
     c.x = x;
     c.y = y;
-    c.area = 12;
+    c.areaCells = 12;
     c.signalSum = 1200;
     c.sizeMm = 2.0f;
     c.sourcePeakId = sourcePeakId;
@@ -415,6 +499,9 @@ void TestTrackerKeepsLifecycleEventsBeyondReportCapacity() {
 
 int main() {
     try {
+        TestEdgeRejectedContactNeverBecomesTrack();
+        TestEdgeRejectedFlagDoesNotKillEstablishedTrack();
+        TestDragStartDoesNotJumpOutput();
         TestSingleFingerSilentGapRelink();
         TestFastSingleFingerGapRelinkUsesPrediction();
         TestFastSingleFingerTwoGapRelinkUsesPrediction();

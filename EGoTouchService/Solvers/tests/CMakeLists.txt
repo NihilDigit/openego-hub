@@ -77,6 +77,12 @@ ego_add_solvers_unit(SolversUnit_TouchPalmBoxSuppress touch
 ego_add_solvers_unit(SolversUnit_TouchPeakHold touch
     unit/touch/TouchPeakHoldTest.cpp
 )
+ego_add_solvers_unit(SolversUnit_TouchDragReach touch
+    unit/touch/TouchDragReachTest.cpp
+)
+ego_add_solvers_unit(SolversUnit_TouchStrokeAggregator touch
+    unit/touch/TouchStrokeAggregatorTest.cpp
+)
 
 ego_add_solvers_config_unit(SolversUnit_StylusPipelineConfigRoundTrip stylus
     unit/stylus/StylusPipelineConfigRoundTripTest.cpp

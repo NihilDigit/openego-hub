@@ -83,6 +83,7 @@ std::string deriveModuleTag(std::string_view yamlPath)
     if (startsWith(yamlPath, "touch.stylus_suppress.")) return "Touch / Stylus Suppress";
     if (startsWith(yamlPath, "touch.coord_filter.")) return "Touch / Coordinate Filter";
     if (startsWith(yamlPath, "touch.gesture.")) return "Touch / Gesture";
+    if (startsWith(yamlPath, "touch.stroke.")) return "Touch / Stroke";
     if (startsWith(yamlPath, "stylus.sp.frame_parser")) return "Stylus / Frame Parser";
 
     if (startsWith(yamlPath, "stylus.sp.peak_") ||

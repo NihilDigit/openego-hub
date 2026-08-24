@@ -22,6 +22,8 @@ public:
     float m_predictionScale = 1.0f;
     bool  m_gapRelinkEnabled = true;
     int   m_gapRelinkWindowFrames = 4;
+    // 空档期是否照常上报。见 BuildSilentGapContact 处的说明与实测数字。
+    bool  m_reportDuringGap = true;
     int   m_touchDownDebounceFrames = 1;
     bool  m_dynamicDebounceEnabled = true;
     int   m_touchDownDebounceMaxExtra = 2;
@@ -49,6 +51,10 @@ public:
     bool  m_stylusAftEnabled = true;
     int   m_stylusAftRecentFrames = 24;
     float m_stylusAftRadius = 2.8f;
+    // Screen-wide pen mode, driven by StylusTouchArbiter rather than by tip distance.
+    // m_stylusAftRadius (~11 mm) can never reach a palm resting 30-80 mm from the tip,
+    // which is why local suppression alone never behaved like a palm rejector.
+    bool  m_penModeSuppressEnabled = true;
     int   m_stylusAftDebounceFrames = 3;
     int   m_stylusAftWeakSignalThreshold = 240;
     float m_stylusAftWeakSizeThresholdMm = 1.2f;
@@ -61,6 +67,12 @@ public:
     inline bool HasLiveTracks() const { return m_trackCount > 0; }
     inline void ClearLiveState();
 
+    // 本帧结束时活跃轨迹的位置。管线在下一帧的检测级之前把它挂进 runtime，
+    // 检测级据此对已被跟踪的峰放宽维持判据。
+    inline std::span<const TrackAnchor> GetTrackAnchors() const {
+        return {m_trackAnchors, static_cast<size_t>(m_trackAnchorCount)};
+    }
+
 private:
     static constexpr int kMaxTracks = 20;
     static constexpr float kGapRelinkSecondBestMarginSq = 4.0f;
@@ -69,6 +81,16 @@ private:
     static constexpr float kGapRelinkHardCapScale = 2.0f;
     static constexpr float kActiveBootstrapGateScale = 1.25f;
     static constexpr float kStylusTouchCoordScale = 1.0f / 1024.0f;
+    // A pen-mode episode survives this many consecutive frames without the flag before it
+    // is considered over. The gap being tolerated is external: any frame that carries no
+    // stylus payload leaves interop zeroed, and treating that as the end of the episode
+    // restarts m_penModeFramesElapsed at 1, which hands every surviving track the
+    // "predates the pen" exemption for good — a palm that was already being rejected turns
+    // into reported input one frame later. A genuine pen departure never lands inside this
+    // window: StylusTouchArbiter holds its flag for 40 linger frames after the tip leaves,
+    // so anything shorter than that is a dropout, not an ending.
+    static constexpr int kPenModeGapToleranceFrames = 5;
+    static constexpr int kPenModeElapsedCap = 1000000;
 
     enum class TrackPhase : uint8_t { Active = 0, SilentGap = 1 };
 
@@ -89,18 +111,21 @@ private:
     struct TrackState {
         int id = 0;
         float x = 0, y = 0, vx = 0, vy = 0;
-        int area = 0, signalSum = 0;
+        int areaCells = 0, signalSum = 0;
         float sizeMm = 0;
         int age = 0, missed = 0, downDebounceFrames = 0;
-        bool upEventEmitted = false;
         bool isEdge = false;
         uint32_t edgeFlags = 0;
         uint8_t centroidEdgeFlags = 0;
         uint32_t ecFlags = 0;
-        float edgeDistX = 0.0f;
-        float edgeDistY = 0.0f;
-        float rawXBeforeEC = 0.0f;
-        float rawYBeforeEC = 0.0f;
+        float edgeDistXCells = 0.0f;
+        float edgeDistYCells = 0.0f;
+        // 匹配坐标与它自己的速度。与 x/y/vx/vy 分开维护：后者是补偿后的上报量，
+        // 补偿量随 grip 比例逐帧抖动，拿它做配对等于给匹配器喂并不存在的位移。
+        float matchXCells = 0.0f;
+        float matchYCells = 0.0f;
+        float matchVxCellsPerFrame = 0.0f;
+        float matchVyCellsPerFrame = 0.0f;
         uint8_t ecWidthX = 0;
         uint8_t ecWidthY = 0;
         int stylusSuppressFrames = 0;
@@ -112,8 +137,17 @@ private:
 
     TrackState m_tracks[kMaxTracks];
     int m_trackCount = 0;
+    TrackAnchor m_trackAnchors[kMaxTracks]{};
+    int m_trackAnchorCount = 0;
     int m_nextIdSeed = 1;
     int m_stylusFramesSinceActive = 1000000;
+    bool m_penModeActive = false;
+    // How long the current pen-mode episode has lasted. A track older than this existed
+    // before the pen arrived, so it is an in-progress gesture and must be left alone.
+    // Counted in frames elapsed, not in frames the flag was asserted: see
+    // kPenModeGapToleranceFrames.
+    int m_penModeFramesElapsed = 0;
+    int m_penModeGapFrames = 0;
     float m_lastStylusX = 0, m_lastStylusY = 0;
 
     static inline float DistanceSq(float x1, float y1, float x2, float y2);
@@ -122,7 +156,7 @@ private:
     static inline void StoreEdgeMetadata(TrackState& track, const TouchContact& touch);
     static inline void RestoreEdgeMetadata(TouchContact& touch, const TrackState& track);
     inline void GetMatchReference(const TrackState& track, float& outX, float& outY) const;
-    inline float EstimateSizeMm(int area, int signalSum) const;
+    inline float EstimateSizeMm(int areaCells, int signalSum) const;
     inline int ComputeTouchDownDebounceFrames(const TouchContact& touch) const;
     inline float ComputeTrackGateSq(const TrackState& track, const TouchContact& contact, int cols, int rows, float edgeMargin) const;
     inline float ComputeAssignmentCost(const TrackState& track, const TouchContact& contact, int cols, int rows, float edgeMargin) const;
@@ -140,6 +174,7 @@ private:
                                                         int recheckThreshold) const;
     inline bool IsStrongTouchCandidate(const TouchContact& touch, const StylusTouchSuppressor* ss) const;
     inline bool ResolveStylusAftContext(const HeatmapFrame& frame, float& outX, float& outY, const StylusTouchSuppressor* ss);
+    inline bool ShouldPenModeSuppress(const TouchContact& touch, int touchAge) const;
     inline bool ShouldStylusAftSuppress(const TouchContact& touch, int touchAge, float stylusX, float stylusY, int& outHoldFrames, const StylusTouchSuppressor* ss) const;
     inline void SolveAssignment(const float* cost, int n, int m, int* rowToCol) const;
 };
@@ -149,7 +184,11 @@ inline void TouchTracker::ClearLiveState() {
         track = TrackState{};
     }
     m_trackCount = 0;
+    m_trackAnchorCount = 0;
     m_stylusFramesSinceActive = 1000000;
+    m_penModeActive = false;
+    m_penModeFramesElapsed = 0;
+    m_penModeGapFrames = 0;
     m_lastStylusX = 0.0f;
     m_lastStylusY = 0.0f;
 }
@@ -166,7 +205,7 @@ inline bool TouchTracker::IsEdgeTouch(float x, float y, int cols, int rows, floa
 
 inline bool TouchTracker::IsEdgeContact(const TouchContact& touch, int cols, int rows, float em) {
     return touch.isEdge ||
-           IsEdgeTouch(touch.x, touch.y, cols, rows, em) ||
+           IsEdgeTouch(touch.matchXCells, touch.matchYCells, cols, rows, em) ||
            (touch.edgeFlags & (0x20 | 0x80000)) != 0 ||
            touch.centroidEdgeFlags != 0;
 }
@@ -178,10 +217,10 @@ inline void TouchTracker::StoreEdgeMetadata(TrackState& track, const TouchContac
     track.edgeFlags = touch.edgeFlags;
     track.centroidEdgeFlags = touch.centroidEdgeFlags;
     track.ecFlags = touch.ecFlags;
-    track.edgeDistX = touch.edgeDistX;
-    track.edgeDistY = touch.edgeDistY;
-    track.rawXBeforeEC = touch.rawXBeforeEC;
-    track.rawYBeforeEC = touch.rawYBeforeEC;
+    track.edgeDistXCells = touch.edgeDistXCells;
+    track.edgeDistYCells = touch.edgeDistYCells;
+    track.matchXCells = touch.matchXCells;
+    track.matchYCells = touch.matchYCells;
     track.ecWidthX = touch.ecWidthX;
     track.ecWidthY = touch.ecWidthY;
 }
@@ -191,10 +230,10 @@ inline void TouchTracker::RestoreEdgeMetadata(TouchContact& touch, const TrackSt
     touch.edgeFlags = track.edgeFlags;
     touch.centroidEdgeFlags = track.centroidEdgeFlags;
     touch.ecFlags = track.ecFlags;
-    touch.edgeDistX = track.edgeDistX;
-    touch.edgeDistY = track.edgeDistY;
-    touch.rawXBeforeEC = track.rawXBeforeEC;
-    touch.rawYBeforeEC = track.rawYBeforeEC;
+    touch.edgeDistXCells = track.edgeDistXCells;
+    touch.edgeDistYCells = track.edgeDistYCells;
+    touch.matchXCells = track.matchXCells;
+    touch.matchYCells = track.matchYCells;
     touch.ecWidthX = track.ecWidthX;
     touch.ecWidthY = track.ecWidthY;
 }
@@ -204,16 +243,13 @@ inline void TouchTracker::GetMatchReference(const TrackState& track, float& outX
     if (track.phase == TrackPhase::SilentGap) {
         framesAhead = m_predictionScale * static_cast<float>(std::max(1, track.gapFrames + 1));
     }
-    outX = track.x + track.vx * framesAhead;
-    outY = track.y + track.vy * framesAhead;
+    outX = track.matchXCells + track.matchVxCellsPerFrame * framesAhead;
+    outY = track.matchYCells + track.matchVyCellsPerFrame * framesAhead;
 }
 
-inline float TouchTracker::EstimateSizeMm(int area, int signalSum) const {
-    if (signalSum > 0)
-        return std::max(m_fallbackSizeMm, std::cbrt(static_cast<float>(signalSum)) * m_sizeSignalScale);
-    if (area > 0)
-        return std::max(m_fallbackSizeMm, std::sqrt(static_cast<float>(area)) * m_sizeAreaScale);
-    return m_fallbackSizeMm;
+inline float TouchTracker::EstimateSizeMm(int areaCells, int signalSum) const {
+    return EstimateContactSizeMm(areaCells, signalSum, m_fallbackSizeMm,
+                                 m_sizeAreaScale, m_sizeSignalScale);
 }
 
 inline int TouchTracker::ComputeTouchDownDebounceFrames(const TouchContact& touch) const {
@@ -237,7 +273,7 @@ inline float TouchTracker::ComputeTrackGateSq(const TrackState& track,
                       IsEdgeContact(contact, cols, rows, edgeMargin);
     const float speed = std::sqrt(track.vx * track.vx + track.vy * track.vy);
     if (edge) gateDist *= m_edgeTrackBoost;
-    const float sizeMm = std::max(track.sizeMm, EstimateSizeMm(contact.area, contact.signalSum));
+    const float sizeMm = std::max(track.sizeMm, EstimateSizeMm(contact.areaCells, contact.signalSum));
     if (sizeMm <= m_accBoostSizeMm) {
         const bool young = track.age <= 2;
         const bool movingFast = speed > (m_maxTrackDistance * 0.5f);
@@ -268,17 +304,17 @@ inline float TouchTracker::ComputeAssignmentCost(const TrackState& track,
                                                  float edgeMargin) const {
     float refX = 0.0f, refY = 0.0f;
     GetMatchReference(track, refX, refY);
-    const float distanceSq = DistanceSq(contact.x, contact.y, refX, refY);
+    const float distanceSq = DistanceSq(contact.matchXCells, contact.matchYCells, refX, refY);
     const float gateSq = ComputeTrackGateSq(track, contact, cols, rows, edgeMargin);
     if (distanceSq > gateSq) return 1.0e12f;
 
     float cost = distanceSq;
-    const float dx = contact.x - track.x;
-    const float dy = contact.y - track.y;
+    const float dx = contact.matchXCells - track.matchXCells;
+    const float dy = contact.matchYCells - track.matchYCells;
     const float moveSq = dx * dx + dy * dy;
-    const float prevSpeedSq = track.vx * track.vx + track.vy * track.vy;
+    const float prevSpeedSq = track.matchVxCellsPerFrame * track.matchVxCellsPerFrame + track.matchVyCellsPerFrame * track.matchVyCellsPerFrame;
     if (track.age > 1 && moveSq > 0.01f && prevSpeedSq > 0.04f) {
-        const float dot = dx * track.vx + dy * track.vy;
+        const float dot = dx * track.matchVxCellsPerFrame + dy * track.matchVyCellsPerFrame;
         if (dot < 0.0f) cost += std::min(25.0f, -dot * 1.5f);
         const float speedDelta = std::abs(std::sqrt(moveSq) - std::sqrt(prevSpeedSq));
         if (speedDelta > m_maxTrackDistance * 0.5f) {
@@ -291,11 +327,11 @@ inline float TouchTracker::ComputeAssignmentCost(const TrackState& track,
         const float denom = static_cast<float>(std::max(track.signalSum, contact.signalSum));
         cost += (std::abs(track.signalSum - contact.signalSum) / denom) * 6.0f;
     }
-    if (track.area > 0 && contact.area > 0) {
-        const float denom = static_cast<float>(std::max(track.area, contact.area));
-        cost += (std::abs(track.area - contact.area) / denom) * 4.0f;
+    if (track.areaCells > 0 && contact.areaCells > 0) {
+        const float denom = static_cast<float>(std::max(track.areaCells, contact.areaCells));
+        cost += (std::abs(track.areaCells - contact.areaCells) / denom) * 4.0f;
     }
-    const float contactSize = EstimateSizeMm(contact.area, contact.signalSum);
+    const float contactSize = EstimateSizeMm(contact.areaCells, contact.signalSum);
     if (track.sizeMm > 0.0f && contactSize > 0.0f) {
         const float diff = std::abs(track.sizeMm - contactSize);
         cost += std::min(9.0f, diff * diff * 0.5f);
@@ -313,15 +349,16 @@ inline bool TouchTracker::PassActiveBootstrapGate(const TrackState& track,
                                                   int rows,
                                                   float edgeMargin) const {
     if (track.phase != TrackPhase::Active || track.age > 1 || track.missed != 0) return false;
-    if (track.isEdge || IsEdgeTouch(track.x, track.y, cols, rows, edgeMargin)) return false;
+    if (track.isEdge || IsEdgeTouch(track.matchXCells, track.matchYCells, cols, rows, edgeMargin)) return false;
     if (IsEdgeContact(contact, cols, rows, edgeMargin)) return false;
     if (contact.signalSum < m_touchDownWeakSignalThreshold * 2) return false;
-    if (EstimateSizeMm(contact.area, contact.signalSum) <= m_touchDownSmallSizeThresholdMm) return false;
+    if (EstimateSizeMm(contact.areaCells, contact.signalSum) <= m_touchDownSmallSizeThresholdMm) return false;
 
     float refX = 0.0f, refY = 0.0f;
     GetMatchReference(track, refX, refY);
     const float bootstrapGate = m_maxTrackDistance * kActiveBootstrapGateScale;
-    return DistanceSq(contact.x, contact.y, refX, refY) <= bootstrapGate * bootstrapGate;
+    return DistanceSq(contact.matchXCells, contact.matchYCells, refX, refY) <=
+           bootstrapGate * bootstrapGate;
 }
 
 inline void TouchTracker::MatchAgainstSubset(std::span<const TouchContact> contacts,
@@ -401,8 +438,10 @@ inline void TouchTracker::ApplyCrossingGuard(std::span<const TouchContact> conta
             if (preB < 0 || preA == preB) continue;
             const TrackState& trackA = m_tracks[preA];
             const TrackState& trackB = m_tracks[preB];
-            if (!SegmentsCross(trackA.x, trackA.y, contacts[a].x, contacts[a].y,
-                               trackB.x, trackB.y, contacts[b].x, contacts[b].y)) {
+            if (!SegmentsCross(trackA.matchXCells, trackA.matchYCells,
+                               contacts[a].matchXCells, contacts[a].matchYCells,
+                               trackB.matchXCells, trackB.matchYCells,
+                               contacts[b].matchXCells, contacts[b].matchYCells)) {
                 continue;
             }
 
@@ -447,28 +486,44 @@ inline TouchContact TouchTracker::BuildSilentGapContact(const TrackState& track,
                                                         int cols,
                                                         int rows,
                                                         float edgeMargin) const {
-    float hiddenX = track.x;
-    float hiddenY = track.y;
     const bool predicted = m_predictionScale > 0.0f;
-    if (predicted) {
-        const float framesAhead = m_predictionScale * static_cast<float>(std::max(1, track.gapFrames));
-        hiddenX = std::clamp(track.x + track.vx * framesAhead, 0.0f, static_cast<float>(cols));
-        hiddenY = std::clamp(track.y + track.vy * framesAhead, 0.0f, static_cast<float>(rows));
-    }
 
     TouchContact hidden;
     hidden.id = track.id;
-    hidden.x = hiddenX;
-    hidden.y = hiddenY;
+    // 上报位置停在最后一个真实位置，不外推。空档的成因是信号丢了，不是手指一定还在动;
+    // 真抬起时外推会让指针在手指离开之后继续滑出去几帧。外推只用于匹配（见下面对
+    // matchXCells 的处理），那里越准越好，而这里越保守越好。
+    hidden.x = track.x;
+    hidden.y = track.y;
     hidden.state = TouchStateMove;
-    hidden.area = track.area;
+    hidden.areaCells = track.areaCells;
     hidden.signalSum = track.signalSum;
     hidden.sizeMm = track.sizeMm;
     hidden.sourcePeakId = track.sourcePeakId;
     hidden.sourcePeakAge = track.sourcePeakAge;
     RestoreEdgeMetadata(hidden, track);
+    // RestoreEdgeMetadata 搬来的是上一次真实匹配的坐标。这一帧的位置是外推出来的，
+    // 匹配坐标要按匹配空间自己的速度同样外推，否则两份坐标会越走越远。
+    if (predicted) {
+        const float framesAhead = m_predictionScale * static_cast<float>(std::max(1, track.gapFrames));
+        hidden.matchXCells = std::clamp(track.matchXCells + track.matchVxCellsPerFrame * framesAhead,
+                                         0.0f, static_cast<float>(cols));
+        hidden.matchYCells = std::clamp(track.matchYCells + track.matchVyCellsPerFrame * framesAhead,
+                                         0.0f, static_cast<float>(rows));
+    }
     hidden.isEdge = hidden.isEdge || IsEdgeTouch(hidden.x, hidden.y, cols, rows, edgeMargin);
-    hidden.isReported = false;
+    // 空档期不上报，主机看到的就是接触点消失又出现，即一次断开——而重连窗口存在的
+    // 全部意义正是不让短暂的信号丢失变成一次抬起。厂商在这几帧里照常上报：抬起防抖期
+    // 的事件码是 8，而 TouchReport_ToBeReported 只排除 1（按下防抖）与 0x20（作废），
+    // 8 不在其列。
+    //
+    // 实测四份语料上，中途断开从 11 / 62 / 65 / 746 次降到 0 / 0 / 0 / 14 次，
+    // 厂商是 0 / 0 / 2 / 5。位置残差与接触点数一致率基本不动。数字见
+    // docs/touch_stack.md。
+    //
+    // 起效还需要手势层不要再无条件压制空档接触点——那里曾经有一条
+    // `lifeFlags & TouchLifeSilentGap` 的判据，盖过本级的决定，使整个重连窗口形同虚设。
+    hidden.isReported = m_reportDuringGap;
     hidden.prevIndex = prevIndex;
     hidden.debugFlags = predicted ? 0x28 : 0x20;
     hidden.lifeFlags = TouchLifeMapped | TouchLifeSilentGap;
@@ -488,7 +543,7 @@ inline TouchContact TouchTracker::BuildLiftOffContact(const TrackState& track,
     up.x = track.x;
     up.y = track.y;
     up.state = TouchStateUp;
-    up.area = track.area;
+    up.areaCells = track.areaCells;
     up.signalSum = track.signalSum;
     up.sizeMm = track.sizeMm;
     up.sourcePeakId = track.sourcePeakId;
@@ -573,12 +628,36 @@ inline bool TouchTracker::IsStrongTouchCandidate(const TouchContact& touch, cons
     const int keepSignal = ss ? ss->m_stylusSuppressTouchSignalKeep : m_stylusSuppressTouchSignalKeep;
     const int keepArea = ss ? ss->m_stylusSuppressTouchAreaKeep : m_stylusSuppressTouchAreaKeep;
     return (touch.signalSum >= keepSignal) &&
-           (touch.area >= keepArea);
+           (touch.areaCells >= keepArea);
 }
 
 inline bool TouchTracker::ResolveStylusAftContext(const HeatmapFrame& frame, float& outX, float& outY, const StylusTouchSuppressor* ss) {
     const bool globalEnabled = ss ? ss->m_stylusSuppressGlobalEnabled : m_stylusSuppressGlobalEnabled;
     const bool aftEnabled = ss ? ss->m_stylusAftEnabled : m_stylusAftEnabled;
+
+    // Latch the arbiter's screen-wide verdict once per frame. StylusTouchSuppressor
+    // preserves it through the touch stage precisely so it is readable here.
+    m_penModeActive = globalEnabled && m_penModeSuppressEnabled &&
+                      frame.stylus.interop.touchSuppressActive;
+    if (m_penModeActive) {
+        m_penModeGapFrames = 0;
+    } else if (m_penModeFramesElapsed > 0) {
+        ++m_penModeGapFrames;
+    }
+    // The episode outlives short dropouts (kPenModeGapToleranceFrames), and its length
+    // keeps advancing across them. Counting only asserted frames would let track age
+    // outrun the episode by exactly the number of dropped frames, which is the same
+    // permanent exemption by a slower route.
+    const bool episodeAlive =
+        m_penModeActive ||
+        (m_penModeFramesElapsed > 0 && m_penModeGapFrames <= kPenModeGapToleranceFrames);
+    if (episodeAlive) {
+        if (m_penModeFramesElapsed < kPenModeElapsedCap) ++m_penModeFramesElapsed;
+    } else {
+        m_penModeFramesElapsed = 0;
+        m_penModeGapFrames = 0;
+    }
+
     if (!globalEnabled || !aftEnabled) {
         m_stylusFramesSinceActive = 1000000;
         return false;
@@ -611,6 +690,27 @@ inline bool TouchTracker::ResolveStylusAftContext(const HeatmapFrame& frame, flo
     return true;
 }
 
+// Screen-wide pen-mode rejection. Unlike the AFT path this is deliberately NOT gated on
+// distance to the tip: a palm rests far outside m_stylusAftRadius, and during the linger
+// tail there is no tip position at all.
+//
+// The age test is what keeps this from hijacking normal input. A track older than the
+// current pen-mode episode was already being followed when the pen showed up, so it is an
+// in-progress gesture (a scroll, a drag) and is left alone; only contacts born while the
+// pen is active are candidates.
+inline bool TouchTracker::ShouldPenModeSuppress(const TouchContact& touch, int touchAge) const {
+    if (!m_penModeActive) return false;
+    if (touchAge > m_penModeFramesElapsed) return false;
+
+    // Area only, deliberately excluding the sizeMm branch the local AFT path uses.
+    // sizeMm is not measured, it is fitted from signalSum as cbrt(signalSum) * 0.35, so
+    // the 2.5 mm palm threshold is reached at signalSum >= 364 — a level essentially
+    // every real contact clears, fingertips included. Screen-wide rejection keyed on
+    // that would suppress all touch input whenever a pen is in range. Connected-pixel
+    // areaCells is an actual measurement and separates a palm from a fingertip properly.
+    return touch.areaCells >= m_stylusAftPalmAreaThreshold;
+}
+
 inline bool TouchTracker::ShouldStylusAftSuppress(const TouchContact& touch,
                                                   int touchAge,
                                                   float stylusX,
@@ -623,17 +723,43 @@ inline bool TouchTracker::ShouldStylusAftSuppress(const TouchContact& touch,
     if (!globalEnabled || !aftEnabled) return false;
     const float aftRadius = m_stylusAftRadius;
     if (DistanceSq(touch.x, touch.y, stylusX, stylusY) > aftRadius * aftRadius) return false;
+
+    // The palm verdict is reached BEFORE the strong-touch exemption.
+    //
+    // Both branches were introduced together in 390d48d with the exemption first, so this
+    // is not a regression — but on this panel that ordering makes the palm branch
+    // unreachable for any contact it was written for. Reaching it requires areaCells >= 20 with
+    // signalSum < 6000, i.e. a signal density below 300/unit. Replaying the recorded
+    // fixture (Common/DVRCore/tests/fixtures/dvrbin/dataset.dvrbin) every contact measures
+    // areaCells 31 / signalSum 18671 — density ~602, twice the ceiling. Only a hovering palm
+    // shadow or a water film is that faint; a real resting palm always clears the
+    // exemption and is waved through.
+    //
+    // Ordering palm first is what makes m_stylusAftPalm* mean anything. It only applies
+    // within m_stylusAftRadius (~11 mm) of the pen tip, where a large contact is the
+    // writing hand rather than deliberate input.
+    //
+    // Area only. sizeMm is not measured, it is fitted from signalSum as
+    // cbrt(signalSum) * 0.35, so the 2.5 mm threshold is met at signalSum >= 364 — a
+    // level any real contact clears, fingertips included. Keeping the sizeMm branch here
+    // while palm is evaluated first would hold every contact near the tip for
+    // m_stylusAftPalmSuppressFrames (~830 ms), which reads as touch latency and as
+    // gestures refusing to start.
+    const bool palm = touch.areaCells >= m_stylusAftPalmAreaThreshold;
+    if (palm) {
+        outHoldFrames = m_stylusAftPalmSuppressFrames;
+        return true;
+    }
+
+    // Below the palm threshold the exemption does its intended job: protect a genuine
+    // finger that happens to land near the pen tip.
     if (IsStrongTouchCandidate(touch, ss)) return false;
-    const bool palm = (touch.area >= m_stylusAftPalmAreaThreshold) || (touch.sizeMm >= m_stylusAftPalmSizeThresholdMm);
+
     const int weakSignalThold = ss ? ss->m_stylusAftWeakSignalThreshold : m_stylusAftWeakSignalThreshold;
     const float weakSizeThold = ss ? ss->m_stylusAftWeakSizeThresholdMm : m_stylusAftWeakSizeThresholdMm;
     const bool weak = (touch.signalSum < weakSignalThold) && (touch.sizeMm < weakSizeThold);
     const int debounceFrames = ss ? ss->m_stylusAftDebounceFrames : m_stylusAftDebounceFrames;
     const bool young = (touchAge <= debounceFrames);
-    if (palm) {
-        outHoldFrames = m_stylusAftPalmSuppressFrames;
-        return true;
-    }
     const int suppressFrames = ss ? ss->m_stylusAftSuppressFrames : m_stylusAftSuppressFrames;
     if (weak || young) {
         outHoldFrames = suppressFrames;
@@ -726,6 +852,20 @@ inline void TouchTracker::SolveAssignment(const float* cost, int n, int m, int* 
 }
 
 inline bool TouchTracker::Process(HeatmapFrame& frame) {
+    // 匹配坐标由 ZoneExpander 在接触点生成时填好，本级只读不写。上游没填过的一律
+    // 退回 x/y——判据是两个分量同时恰为 0，而真实质心到不了这个值：它是至少一个格
+    // 的加权平均，定点换算里还带 +0x80 的舍入项，补偿前的下限在 0.4 格上下。
+    //
+    // 这道兜底不是防御性编程的顺手一笔。改成按匹配坐标配对之后，只填 x/y 的调用方
+    // 会拿到「所有接触点都在原点」的匹配结果，而且不报错、不崩溃，只是行为变了——
+    // 这个错误已经发生过一次，被一个双指测试逮到，而在此之前它还蒙混过一轮全绿。
+    for (auto& c : frame.touch.output.contacts) {
+        if (c.matchXCells == 0.0f && c.matchYCells == 0.0f) {
+            c.matchXCells = c.x;
+            c.matchYCells = c.y;
+        }
+    }
+
     const auto* ss = frame.touch.runtime.stylusSuppress;
     const bool globalEnabled = ss ? ss->m_stylusSuppressGlobalEnabled : m_stylusSuppressGlobalEnabled;
     if (!globalEnabled) {
@@ -738,12 +878,19 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
     }
 
     if (!m_enabled) {
+        // Pass-through mode skips ResolveStylusAftContext, so pen-mode state would freeze
+        // at whatever the last tracked frame left behind and re-enter the age test as a
+        // stale episode length once tracking is switched back on.
+        m_penModeActive = false;
+        m_penModeFramesElapsed = 0;
+        m_penModeGapFrames = 0;
         int nextId = 1;
         for (auto& c : frame.touch.output.contacts) {
             c.id = nextId++;
             c.state = TouchStateDown;
             c.isEdge = IsEdgeContact(c, 60, 40, 2.0f);
-            c.isReported = true;
+            // 直通模式没有轨迹，「只在落下时拒绝」无从表达，退化为逐帧压制。
+            c.isReported = !c.edgeRejected;
             c.reportEvent = TouchReportIdle;
         }
         return true;
@@ -785,7 +932,8 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
             float refX = 0.0f, refY = 0.0f;
             GetMatchReference(m_tracks[pre], refX, refY);
             const float gateSq = ComputeTrackGateSq(m_tracks[pre], frame.touch.output.contacts[c], kCols, kRows, kEdgeMargin);
-            if (DistanceSq(frame.touch.output.contacts[c].x, frame.touch.output.contacts[c].y, refX, refY) > gateSq)
+            if (DistanceSq(frame.touch.output.contacts[c].matchXCells,
+                               frame.touch.output.contacts[c].matchYCells, refX, refY) > gateSq)
                 curToPre[c] = -1;
         }
 
@@ -813,7 +961,8 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
                 if (pUsed[pre]) continue;
                 float refX = 0.0f, refY = 0.0f;
                 GetMatchReference(m_tracks[pre], refX, refY);
-                const float d = DistanceSq(frame.touch.output.contacts[c].x, frame.touch.output.contacts[c].y, refX, refY);
+                const float d = DistanceSq(frame.touch.output.contacts[c].matchXCells,
+                               frame.touch.output.contacts[c].matchYCells, refX, refY);
                 if (d < best) { best = d; bestPre = pre; }
             }
             if (bestPre >= 0 && best <= alwaysMatchSq &&
@@ -843,7 +992,8 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
                 const int pre = silentPrev[i];
                 float refX = 0.0f, refY = 0.0f;
                 GetMatchReference(m_tracks[pre], refX, refY);
-                const float d = DistanceSq(frame.touch.output.contacts[c].x, frame.touch.output.contacts[c].y, refX, refY);
+                const float d = DistanceSq(frame.touch.output.contacts[c].matchXCells,
+                               frame.touch.output.contacts[c].matchYCells, refX, refY);
                 const float gateSq = ComputeTrackGateSq(m_tracks[pre], frame.touch.output.contacts[c], kCols, kRows, kEdgeMargin);
                 if (d > gateSq) continue;
                 UpdateBestCandidate(d, pre, bestForCur[c], secondForCur[c], bestTrackForCur[c]);
@@ -883,7 +1033,7 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
         o.lifeFlags = TouchLifeMapped;
         if (o.isEdge) o.lifeFlags |= TouchLifeEdge;
         if (alwaysMatched[c]) o.lifeFlags |= TouchLifeAlwaysMatch;
-        const float curSize = EstimateSizeMm(o.area, o.signalSum);
+        const float curSize = EstimateSizeMm(o.areaCells, o.signalSum);
         t.sizeMm = std::max({curSize, t.sizeMm, m_fallbackSizeMm});
         o.sizeMm = t.sizeMm;
         const bool emitDown = !wasSilentGap && (t.age <= 1 || t.downDebounceFrames > 0);
@@ -894,9 +1044,13 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
         }
         t.vx = (o.x - t.x) / static_cast<float>(frameSpan);
         t.vy = (o.y - t.y) / static_cast<float>(frameSpan);
+        // 匹配速度走另一条坐标，StoreEdgeMetadata 随后才把新的匹配坐标搬进轨迹，
+        // 所以这两行必须在它之前。
+        t.matchVxCellsPerFrame = (o.matchXCells - t.matchXCells) / static_cast<float>(frameSpan);
+        t.matchVyCellsPerFrame = (o.matchYCells - t.matchYCells) / static_cast<float>(frameSpan);
         t.x = o.x;
         t.y = o.y;
-        t.area = o.area;
+        t.areaCells = o.areaCells;
         t.signalSum = o.signalSum;
         if (o.sourcePeakId != 0) {
             t.sourcePeakId = o.sourcePeakId;
@@ -905,18 +1059,25 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
         StoreEdgeMetadata(t, o);
         t.missed = 0;
         t.age += 1;
-        t.upEventEmitted = false;
-        if (!stylusAftActive && t.stylusSuppressFrames > 0) t.stylusSuppressFrames -= 1;
+        // Either path can hold a track down: the local tip-radius AFT, or screen-wide pen
+        // mode. Pen mode has to participate in the gate, otherwise the countdown would
+        // drain during the linger tail, exactly when the tip signal is already gone.
+        const bool penGate = stylusAftActive || m_penModeActive;
+        if (!penGate && t.stylusSuppressFrames > 0) t.stylusSuppressFrames -= 1;
         bool aftSuppressed = false;
-        if (stylusAftActive) {
+        if (penGate) {
             if (t.stylusSuppressFrames > 0) {
                 aftSuppressed = true;
                 t.stylusSuppressFrames -= 1;
             } else {
                 int hold = 0;
-                if (ShouldStylusAftSuppress(o, t.age, stylusAftX, stylusAftY, hold, ss)) {
+                if (stylusAftActive &&
+                    ShouldStylusAftSuppress(o, t.age, stylusAftX, stylusAftY, hold, ss)) {
                     aftSuppressed = true;
                     t.stylusSuppressFrames = std::max(0, hold - 1);
+                } else if (ShouldPenModeSuppress(o, t.age)) {
+                    aftSuppressed = true;
+                    t.stylusSuppressFrames = std::max(0, m_stylusAftPalmSuppressFrames - 1);
                 }
             }
         }
@@ -936,12 +1097,16 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
         TrackState t;
         t.id = AllocateId(nextTracks, nextTrackCount);
         if (t.id == 0) continue;
-        t.x = o.x; t.y = o.y; t.area = o.area; t.signalSum = o.signalSum;
+        t.x = o.x; t.y = o.y; t.areaCells = o.areaCells; t.signalSum = o.signalSum;
         t.sourcePeakId = o.sourcePeakId;
         t.sourcePeakAge = o.sourcePeakAge;
-        t.sizeMm = EstimateSizeMm(o.area, o.signalSum);
+        t.sizeMm = EstimateSizeMm(o.areaCells, o.signalSum);
         t.age = 1; t.missed = 0; t.phase = TrackPhase::Active; t.gapFrames = 0;
         o.isEdge = IsEdgeContact(o, kCols, kRows, kEdgeMargin);
+        // EdgeRejector 的结论只在这里生效——建轨迹之前丢弃，而不是建好再置 isReported = false。
+        // 后者只能压住第一帧：下一帧这个点就走已跟踪分支，isReported 被重新算出来，等于没拒。
+        // 已跟踪分支不看这个标记，贴边滑动途中不会被中途掐断成一串 up/down。
+        if (o.edgeRejected) continue;
         if (m_touchDownRejectEnabled) {
             const bool weak = (t.signalSum < m_touchDownRejectMinSignal);
             const bool tiny = (t.sizeMm < m_touchDownRejectMinSizeMm);
@@ -953,6 +1118,11 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
             int hold = 0;
             if (ShouldStylusAftSuppress(o, t.age, stylusAftX, stylusAftY, hold, ss))
                 t.stylusSuppressFrames = std::max(0, hold - 1);
+        }
+        // A track created while pen mode is asserted is by definition born during the
+        // episode, so it never qualifies for the established-gesture exemption.
+        if (t.stylusSuppressFrames <= 0 && ShouldPenModeSuppress(o, t.age)) {
+            t.stylusSuppressFrames = std::max(0, m_stylusAftPalmSuppressFrames - 1);
         }
         m_nextIdSeed = (t.id % effectiveMaxTouches) + 1;
         o.id = t.id;
@@ -1014,6 +1184,11 @@ inline bool TouchTracker::Process(HeatmapFrame& frame) {
     frame.touch.output.contacts.assign(out, out + outCount);
     std::memcpy(m_tracks, nextTracks, sizeof(TrackState) * nextTrackCount);
     m_trackCount = nextTrackCount;
+
+    m_trackAnchorCount = 0;
+    for (int i = 0; i < m_trackCount; ++i) {
+        m_trackAnchors[m_trackAnchorCount++] = {m_tracks[i].x, m_tracks[i].y};
+    }
 
     int activeSuppressFrames = 0;
     for (int i = 0; i < m_trackCount; ++i) {
