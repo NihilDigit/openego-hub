@@ -38,7 +38,13 @@ The touch stack originates there and has been modified since.
 </p>
 
 The tray sits in the notification area with accessory status and raises a prompt when
-the pen or keyboard connects. The settings window holds every switch.
+the pen or keyboard connects.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup.png" alt="Connection prompt" width="480">
+</p>
+
+The settings window holds every switch.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/settings.png" alt="Settings window" width="720">

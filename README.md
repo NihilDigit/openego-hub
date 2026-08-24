@@ -30,7 +30,13 @@ HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为�
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/devices.png" alt="设备页" width="720">
 </p>
 
-托盘常驻显示配件状态，笔或键盘接入时弹出提示。设置窗口集中全部开关。
+托盘常驻显示配件状态，笔或键盘接入时弹出提示。
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup.png" alt="接入提示" width="480">
+</p>
+
+设置窗口集中全部开关。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/settings.png" alt="设置窗口" width="720">
