@@ -23,7 +23,7 @@ DVR（Digital Video Recorder）系统是 EGoTouch 触控诊断平台的核心调
 graph TB
     subgraph Service["EGoTouchService (驱动侧)"]
         SPI["SPI 传感器驱动"]
-        SharedMem["Shared Memory<br/>Global\\EGoTouchSharedFrame"]
+        SharedMem["Shared Memory<br/>Global\\OpenEGoHubSharedFrame"]
     end
 
     subgraph App["EGoTouchApp (诊断工具)"]

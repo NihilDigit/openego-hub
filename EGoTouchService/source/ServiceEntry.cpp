@@ -12,8 +12,8 @@
 // ── 服务自注册 / 自卸载 ──────────────────────────────────
 
 static bool EnsureDataDirectory() {
-    CreateDirectoryW(L"C:\\ProgramData\\EGoTouchRev", nullptr);
-    CreateDirectoryW(L"C:\\ProgramData\\EGoTouchRev\\logs", nullptr);
+    CreateDirectoryW(L"C:\\ProgramData\\OpenEGoHub", nullptr);
+    CreateDirectoryW(L"C:\\ProgramData\\OpenEGoHub\\logs", nullptr);
     return true;
 }
 
@@ -139,11 +139,20 @@ public:
             SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
         }
 
+        // Debug builds register as a separate service (OpenEGoHubServiceDebug, see
+        // scripts/install_debug_service.bat) and can run alongside an installed Release
+        // service. They must not share a log file: the writer holds it with _SH_DENYWR,
+        // so whichever process starts second would silently lose all logging.
+#if defined(_DEBUG)
+        constexpr const char* kLoggerName = "OpenEGoHubServiceDebug";
+#else
+        constexpr const char* kLoggerName = "EGoTouchService";
+#endif
 #if EGOTOUCH_SERVICE_ENABLE_IPC
-        Common::Logger::Init("EGoTouchService", "C:/ProgramData/EGoTouchRev/logs/",
+        Common::Logger::Init(kLoggerName, "C:/ProgramData/OpenEGoHub/logs/",
                               Common::GuiLogSink::Instance());
 #else
-        Common::Logger::Init("EGoTouchService", "C:/ProgramData/EGoTouchRev/logs/", nullptr);
+        Common::Logger::Init(kLoggerName, "C:/ProgramData/OpenEGoHub/logs/", nullptr);
 #endif
 
         LOG_INFO("Service", __func__, "Boot", "Process priority set to REALTIME_PRIORITY_CLASS.");

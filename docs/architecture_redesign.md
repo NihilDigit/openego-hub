@@ -5,7 +5,7 @@
 ## 1. 当前架构总览
 
 ```text
-EGoTouchService.exe
+OpenEGoHubService.exe
   ServiceShell
     -> ServiceHost
        -> ConfigRuntime (code defaults + session patch)
@@ -13,7 +13,7 @@ EGoTouchService.exe
        -> IpcPipeServer
        -> SharedFrameWriter (_DEBUG)
 
-EGoTouchApp.exe
+OpenEGoHubApp.exe
   ServiceProxy
     -> Config v3 catalog/snapshot/patch
     -> Dynamic debug schema/snapshot

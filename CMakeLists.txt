@@ -5,6 +5,18 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# 版本号在两个构建系统里各存一份:CMake 这边给服务与托盘,Common/include/AppVersion.h
+# 给两个 .rc 的 VERSIONINFO(设置窗口由 MSBuild 单独编译,读不到 CMake 变量)。两份对不上
+# 时「关于」页会显示一个和安装包不一致的版本,而那正是它唯一的用处,所以在这里挡一道。
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Common/include/AppVersion.h" _app_version_header)
+string(REGEX MATCH "OPENEGO_VERSION_STRING[ \t]+\"([0-9.]+)\"" _ "${_app_version_header}")
+if(NOT CMAKE_MATCH_1 STREQUAL PROJECT_VERSION)
+    message(FATAL_ERROR
+        "版本号不一致: CMakeLists.txt 是 ${PROJECT_VERSION}, "
+        "Common/include/AppVersion.h 是 ${CMAKE_MATCH_1}。两处要一起改。")
+endif()
+unset(_app_version_header)
+
 # 自动生成 .clangd 配置文件以支持 clangd 自动识别系统头文件和 Windows Kits
 if (WIN32 AND CMAKE_EXPORT_COMPILE_COMMANDS)
     set(CLANGD_FILE "${CMAKE_CURRENT_SOURCE_DIR}/.clangd")
@@ -421,6 +433,13 @@ target_compile_definitions(EGoTouchService PRIVATE
 )
 
 ego_copy_config_to_output(EGoTouchService)
+
+# 面向用户的可执行文件名随产品走，CMake target 名保持不变：target 名只出现在构建脚本、
+# CI 与 add_dependencies 里，改它没有用户可见的收益，却会牵连每一处引用。
+set_target_properties(EGoTouchService PROPERTIES OUTPUT_NAME OpenEGoHubService)
+if(TARGET EGoTouchApp)
+    set_target_properties(EGoTouchApp PROPERTIES OUTPUT_NAME OpenEGoHubApp)
+endif()
 
 install(TARGETS EGoTouchService
     RUNTIME DESTINATION "."

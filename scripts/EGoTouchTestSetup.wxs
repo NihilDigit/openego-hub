@@ -4,57 +4,96 @@
     <?define BuildOutputDir = "build" ?>
   <?endif ?>
   <!--
-    EGoTouchRev 测试版安装包
+    OpenEGo Hub 测试版安装包
     包含核心服务 + 诊断上位机 + 测试工具。
   -->
   <Package Name="!(loc.ProductNameTest)" Manufacturer="!(loc.Manufacturer)" Version="$(var.BuildVersion)"
-           UpgradeCode="434AC770-0762-431A-9ABC-DB2F9DB289AD"
+           UpgradeCode="F7F7E243-B91A-4B0A-9B16-FF7DD30E62A0"
            Scope="perMachine"
            Language="!(loc.Language)">
 
-    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" AllowSameVersionUpgrades="yes" />
+    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" />
 
     <ui:WixUI Id="WixUI_InstallDir" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="!(loc.LicenseRtf)" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="EGoTouchRev">
+      <Directory Id="INSTALLFOLDER" Name="OpenEGoHub">
         <Directory Id="CONFIGFOLDER" Name="config" />
       </Directory>
     </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
 
     <MediaTemplate EmbedCab="yes" />
 
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
 
       <!-- 核心服务 -->
-      <Component Id="EGoTouchServiceComp" Guid="FCF77309-64AC-4F98-8424-B1D6144D9757">
-        <File Id="EGoTouchServiceEXE" Source="$(var.BuildOutputDir)\EGoTouchService.exe" KeyPath="yes" />
+      <Component Id="EGoTouchServiceComp" Guid="48A193AA-B631-4319-B518-772A37078EA3">
+        <File Id="EGoTouchServiceEXE" Source="$(var.BuildOutputDir)\OpenEGoHubService.exe" KeyPath="yes" />
 
         <ServiceInstall
             Id="EGoTouchServiceInstaller"
             Type="ownProcess"
-            Name="EGoTouchService"
+            Name="OpenEGoHubService"
             DisplayName="!(loc.ServiceDisplayNameTest)"
             Description="!(loc.ServiceDescriptionTest)"
             Start="auto"
             Account="LocalSystem"
             ErrorControl="normal" />
 
-        <ServiceControl Id="StartWixService" Name="EGoTouchService"
+        <ServiceControl Id="StartWixService" Name="OpenEGoHubService"
                         Start="install"
                         Stop="both"
                         Remove="uninstall" />
       </Component>
 
+      <Component Id="EGoTouchTrayComp" Guid="208A14A0-CA4D-46E6-9385-A42B9454DEAD">
+        <File Id="EGoTouchTrayEXE" Source="$(var.BuildOutputDir)\OpenEGoHubTray.exe" KeyPath="yes" />
+
+        <!-- 与正式包同理：装完之后需要一个可点的入口。名称带「测试版」以便与正式包共存时区分。 -->
+        <Shortcut Id="EGoTouchStartMenuShortcut"
+                  Directory="ProgramMenuFolder"
+                  Name="!(loc.ShortcutNameTest)"
+                  Description="!(loc.ShortcutDescription)"
+                  Target="[INSTALLFOLDER]OpenEGoHubTray.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+      </Component>
+
+      <Component Id="EGoTouchTrayAutoStartComp" Guid="88182FC4-3A97-4CFA-B0B4-8ABFF2608F85">
+        <RegistryValue Root="HKCU"
+                       Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="OpenEGoHubTray"
+                       Type="string"
+                       Value="&quot;[INSTALLFOLDER]OpenEGoHubTray.exe&quot;"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="EGoTouchSettingsComp" Guid="A96CCEBB-151C-4A85-BD86-81AEE4822B4B">
+        <File Id="EGoTouchSettingsEXE" Source="$(var.BuildOutputDir)\OpenEGoHubSettings.exe" KeyPath="yes" />
+        <File Id="EGoTouchSettingsPRI" Source="$(var.BuildOutputDir)\OpenEGoHubSettings.pri" />
+        <File Id="EGoTouchSettingsWinMD" Source="$(var.BuildOutputDir)\EGoTouchSettings.winmd" />
+        <File Id="EGoTouchSettingsAppXBF" Source="$(var.BuildOutputDir)\App.xbf" />
+        <File Id="EGoTouchSettingsBatteryIndicatorXBF" Source="$(var.BuildOutputDir)\BatteryIndicator.xbf" />
+        <File Id="EGoTouchSettingsMainWindowXBF" Source="$(var.BuildOutputDir)\MainWindow.xbf" />
+        <File Id="EGoTouchSettingsNotificationWindowXBF" Source="$(var.BuildOutputDir)\NotificationWindow.xbf" />
+        <File Id="WindowsAppRuntimeBootstrapDLL" Source="$(var.BuildOutputDir)\Microsoft.WindowsAppRuntime.Bootstrap.dll" />
+      </Component>
+
+      <Component Id="LegalNoticesComp" Guid="30E7BABA-7138-4A72-867D-2A573AF2E79E">
+        <File Id="ProjectLicense" Source="LICENSE" KeyPath="yes" />
+        <File Id="ThirdPartyNotices" Source="THIRD-PARTY-NOTICES.md" />
+      </Component>
+
       <!-- 诊断上位机 EGoTouchApp -->
-      <Component Id="EGoTouchAppComp" Guid="E198F02C-4BA7-4E90-B7FD-A99A0FA5EB21">
-        <File Id="EGoTouchAppEXE" Source="$(var.BuildOutputDir)\EGoTouchApp.exe" KeyPath="yes" />
+      <Component Id="EGoTouchAppComp" Guid="58CE4187-F2CB-41E8-AA61-FBC8E2FE3EC0">
+        <File Id="EGoTouchAppEXE" Source="$(var.BuildOutputDir)\OpenEGoHubApp.exe" KeyPath="yes" />
       </Component>
 
       <!-- BT MCU 测试工具 -->
-      <Component Id="BtMcuTestToolComp" Guid="5247FBFC-E500-47E4-BCE5-23FE9A0C3817">
+      <Component Id="BtMcuTestToolComp" Guid="9C24AC2E-A0A3-4F18-9C1A-B73FA04642E2">
         <File Id="BtMcuTestToolEXE" Source="$(var.BuildOutputDir)\BtMcuTestTool.exe" KeyPath="yes" />
       </Component>
 

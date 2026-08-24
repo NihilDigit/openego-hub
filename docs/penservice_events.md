@@ -19,7 +19,7 @@
 | `0x27` | 0x168 | FUN_18000aca0 | `TransferPenMode` (推测) | 笔模式切换相关 |
 | **`0x28`** | **0x170** | **FUN_18000ace0** | **`PenTopBatteryWindow`** | **呼出顶部电量悬浮窗 (纯通知)** |
 | **`0x29`** | **0x178** | **FUN_18000ad10** | **`PenCloseConnectWindow`** | **关闭配对/连接窗口提示 (纯通知)** |
-| `0x2A` | 0x180 | FUN_18000ad40 | `PenDeviationReminder` | 笔尖偏差校准提醒 |
+| `0x2A` | 0x180 | FUN_18000ad40 | `PenDeviationReminder` | 笔吸附偏移提醒（当前安装版回调未注册） |
 | `0x2C` | 0x188 | FUN_18000ad70 | `PenFirstBatAfterConn` | 连接后首次电量播报 |
 | `0x2D` | 0x190 | FUN_18000abe0 | `PenOskPrevensionMode` | 软键盘防误触模式开关通知 |
 | `0x2F` | 0x1B0 | FUN_18000ae20 | `PenCurrentFunc` | 笔当前激活功能反馈 |

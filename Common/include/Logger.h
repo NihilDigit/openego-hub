@@ -81,7 +81,7 @@ public:
      * @param logDir 日志存放目录
      */
     static void Init(const std::string& loggerName = "EGoTouch", 
-                     const std::filesystem::path& logDir = "C:/ProgramData/EGoTouchRev/logs/",
+                     const std::filesystem::path& logDir = "C:/ProgramData/OpenEGoHub/logs/",
                      std::shared_ptr<GuiLogSink> extraSink = nullptr);
 
     /**

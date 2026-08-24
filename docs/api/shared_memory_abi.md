@@ -12,11 +12,11 @@ EGoTouchService (Session 0) 通过 Windows Shared Memory 将实时帧数据推�
 
 | 对象 | 名称 | 类型 | 大小 | 创建者 |
 |------|------|------|------|--------|
-| 帧数据 | `Global\EGoTouchSharedFrame` | File Mapping | ~256 KB | Service |
+| 帧数据 | `Global\OpenEGoHubSharedFrame` | File Mapping | ~256 KB | Service |
 | Config 脏标记 | `Global\EGoTouchConfigDirty` | File Mapping | 4 bytes | Service/App |
 | 帧就绪事件 | `Global\EGoTouchFrameReady` | Event | — | Service |
 | 日志就绪事件 | `Global\EGoTouchLogReady` | Event | — | Service |
-| 笔状态就绪事件 | `Global\EGoTouchPenStatusReady` | Event | — | Service |
+| 笔状态就绪事件 | `Global\OpenEGoHubPenStatusReady` | Event | — | Service |
 
 ### 1.2 安全模型
 
@@ -424,13 +424,13 @@ if (abi->abiVersion != kSharedFrameAbiVersion) {
 
 ```
 Service 启动:
-  SharedFrameWriter::Create("Global\\EGoTouchSharedFrame")
+  SharedFrameWriter::Create("Global\\OpenEGoHubSharedFrame")
   CreateEvent(frameReadyEvent)
   CreateEvent(logReadyEvent)
   CreateEvent(penStatusReadyEvent)
 
 App 启动 → EnterDebugMode:
-  SharedFrameReader::Open("Global\\EGoTouchSharedFrame")
+  SharedFrameReader::Open("Global\\OpenEGoHubSharedFrame")
   开始 WaitForSingleObject(frameReadyEvent) → Read()
 
 App 退出:

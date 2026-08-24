@@ -35,7 +35,7 @@ int Invoke(FakeActions& actions, std::initializer_list<const wchar_t*> args) {
 
 bool InstallRouteDoesNotInitializeRuntime() {
     FakeActions actions;
-    REQUIRE_EQ(Invoke(actions, {L"EGoTouchService.exe", L"--install"}), 0);
+    REQUIRE_EQ(Invoke(actions, {L"OpenEGoHubService.exe", L"--install"}), 0);
     REQUIRE_EQ(actions.installCalls, 1);
     REQUIRE_EQ(actions.initializeCalls, 0);
     REQUIRE_EQ(actions.dispatcherCalls, 0);
@@ -46,7 +46,7 @@ bool InstallRouteDoesNotInitializeRuntime() {
 bool UninstallFailureReturnsFailure() {
     FakeActions actions;
     actions.uninstallResult = false;
-    REQUIRE_EQ(Invoke(actions, {L"EGoTouchService.exe", L"--uninstall"}), 1);
+    REQUIRE_EQ(Invoke(actions, {L"OpenEGoHubService.exe", L"--uninstall"}), 1);
     REQUIRE_EQ(actions.uninstallCalls, 1);
     REQUIRE_EQ(actions.initializeCalls, 0);
     REQUIRE_EQ(actions.dispatcherCalls, 0);
@@ -55,7 +55,7 @@ bool UninstallFailureReturnsFailure() {
 
 bool ConsoleRouteSkipsScmDispatcher() {
     FakeActions actions;
-    REQUIRE_EQ(Invoke(actions, {L"EGoTouchService.exe", L"--console"}), 0);
+    REQUIRE_EQ(Invoke(actions, {L"OpenEGoHubService.exe", L"--console"}), 0);
     REQUIRE_EQ(actions.initializeCalls, 1);
 #if EGOTOUCH_SERVICE_ENABLE_IPC
     REQUIRE_EQ(actions.consoleCalls, 1);
@@ -70,7 +70,7 @@ bool ConsoleRouteSkipsScmDispatcher() {
 bool ScmSuccessDoesNotFallbackToConsole() {
     FakeActions actions;
     actions.dispatcherResult = true;
-    REQUIRE_EQ(Invoke(actions, {L"EGoTouchService.exe"}), 0);
+    REQUIRE_EQ(Invoke(actions, {L"OpenEGoHubService.exe"}), 0);
     REQUIRE_EQ(actions.initializeCalls, 1);
     REQUIRE_EQ(actions.dispatcherCalls, 1);
     REQUIRE_EQ(actions.consoleCalls, 0);
@@ -81,7 +81,7 @@ bool ScmControllerConnectFailureFallsBackToConsole() {
     FakeActions actions;
     actions.dispatcherResult = false;
     actions.lastError = ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
-    REQUIRE_EQ(Invoke(actions, {L"EGoTouchService.exe"}), 0);
+    REQUIRE_EQ(Invoke(actions, {L"OpenEGoHubService.exe"}), 0);
     REQUIRE_EQ(actions.initializeCalls, 1);
     REQUIRE_EQ(actions.dispatcherCalls, 1);
 #if EGOTOUCH_SERVICE_ENABLE_IPC
@@ -96,7 +96,7 @@ bool OtherScmFailureDoesNotFallbackToConsole() {
     FakeActions actions;
     actions.dispatcherResult = false;
     actions.lastError = ERROR_ACCESS_DENIED;
-    REQUIRE_EQ(Invoke(actions, {L"EGoTouchService.exe"}), 0);
+    REQUIRE_EQ(Invoke(actions, {L"OpenEGoHubService.exe"}), 0);
     REQUIRE_EQ(actions.initializeCalls, 1);
     REQUIRE_EQ(actions.dispatcherCalls, 1);
     REQUIRE_EQ(actions.consoleCalls, 0);

@@ -19,7 +19,7 @@ EGoTouchService (Windows Service, Session 0) 与 EGoTouchApp (桌面应用, User
 │       ▼             │                    │       ▼             │
 │  SharedFrameReader  │◄── Shared Memory ──│  SharedFrameWriter  │
 │                     │  Global\            │                     │
-│                     │  EGoTouchSharedFrame│                     │
+│                     │  OpenEGoHubSharedFrame│                     │
 │  Config v3 IPC ─────┼──── Named Pipe ────┼── ConfigRuntime     │
 │                     │  commands 46-49     │  catalog/snapshot   │
 │                     │                     │  patch/persist      │
@@ -576,9 +576,9 @@ Offset  Size  Field                   Type       说明
 
 | 属性 | 值 |
 |------|-----|
-| 名称 | `Global\EGoTouchSharedFrame` |
+| 名称 | `Global\OpenEGoHubSharedFrame` |
 | 布局 | `SharedTripleBuffer` (三缓冲) |
-| ABI 版本 | 5 |
+| ABI 版本 | 9 |
 | 帧就绪事件 | `Global\EGoTouchFrameReady` (Windows Event) |
 | 热图尺寸 | 40×60 (rows × cols) |
 | 最大触控点数 | 10 |
@@ -631,7 +631,7 @@ Writer (Service):                    Reader (App):
 | 事件名 | 用途 |
 |--------|------|
 | `Global\EGoTouchLogReady` | Service 通知 App 有新日志 |
-| `Global\EGoTouchPenStatusReady` | Service 通知 App 笔状态更新 |
+| `Global\OpenEGoHubPenStatusReady` | Service 通知 App 笔状态更新 |
 
 ---
 

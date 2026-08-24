@@ -11,7 +11,7 @@ if %errorlevel% neq 0 (
 )
 
 :: Set binary path to build/arm64-Release
-for %%i in ("%~dp0..\build\arm64-Release\EGoTouchService.exe") do set "SERVICE_BIN=%%~fpi"
+for %%i in ("%~dp0..\build\arm64-Release\OpenEGoHubService.exe") do set "SERVICE_BIN=%%~fpi"
 
 if not exist "%SERVICE_BIN%" (
     echo [ERROR] Service binary not found at:
@@ -38,8 +38,8 @@ if %errorlevel% equ 0 (
 )
 
 :: Create data directory
-if not exist "C:\ProgramData\EGoTouchRev" mkdir "C:\ProgramData\EGoTouchRev"
-if not exist "C:\ProgramData\EGoTouchRev\logs" mkdir "C:\ProgramData\EGoTouchRev\logs"
+if not exist "C:\ProgramData\OpenEGoHub" mkdir "C:\ProgramData\OpenEGoHub"
+if not exist "C:\ProgramData\OpenEGoHub\logs" mkdir "C:\ProgramData\OpenEGoHub\logs"
 
 :: Install service pointing to build directory
 sc create EGoTouchService binPath= "%SERVICE_BIN%" start= auto

@@ -4,17 +4,17 @@
     <?define BuildOutputDir = "build" ?>
   <?endif ?>
   <!--
-    EGoTouchRev 核心服务安装包
+    OpenEGo Hub 核心服务安装包
     - UpgradeCode 全局唯一，永不修改，用于覆盖更新旧版本。
     - -arch arm64 由命令行参数设定原生架构。
   -->
   <Package Name="!(loc.ProductName)" Manufacturer="!(loc.Manufacturer)" Version="$(var.BuildVersion)"
-           UpgradeCode="434AC770-0762-431A-9ABC-DB2F9DB289AC"
+           UpgradeCode="67A4C6B5-BFFB-4058-9600-1109A3B59A03"
            Scope="perMachine"
            Language="!(loc.Language)">
 
     <!-- 支持自动覆盖升级：UpgradeCode 不变 + Version 提升 → 自动卸载旧版覆盖安装 -->
-    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" AllowSameVersionUpgrades="yes" />
+    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" />
 
     <!-- 安装向导界面：WixUI_InstallDir 提供欢迎页 + 许可协议 + 安装目录 + 进度 + 完成 -->
     <ui:WixUI Id="WixUI_InstallDir" />
@@ -25,12 +25,16 @@
     <!-- 许可协议 RTF -->
     <WixVariable Id="WixUILicenseRtf" Value="!(loc.LicenseRtf)" />
 
-    <!-- 安装目录页：用户可自定义安装路径，默认 C:\Program Files\EGoTouchRev -->
+    <!-- 安装目录页：用户可自定义安装路径，默认 C:\Program Files\OpenEGoHub -->
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="EGoTouchRev">
+      <Directory Id="INSTALLFOLDER" Name="OpenEGoHub">
         <Directory Id="CONFIGFOLDER" Name="config" />
       </Directory>
     </StandardDirectory>
+
+    <!-- 开始菜单入口。装完之后没有任何可点的地方，托盘只在登录后自动启动那一次出现；用户
+         手动退出过托盘，就再也没有办法把它请回来。 -->
+    <StandardDirectory Id="ProgramMenuFolder" />
 
     <!-- 通过 CAB 将所有文件打包进单个 MSI -->
     <MediaTemplate EmbedCab="yes" />
@@ -38,14 +42,14 @@
     <!-- 核心组件 -->
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
 
-      <Component Id="EGoTouchServiceComp" Guid="FCF77309-64AC-4F98-8424-B1D6144D9757">
-        <File Id="EGoTouchServiceEXE" Source="$(var.BuildOutputDir)\EGoTouchService.exe" KeyPath="yes" />
+      <Component Id="EGoTouchServiceComp" Guid="9C15D5C4-CB7F-45F3-ABE7-CF444306F637">
+        <File Id="EGoTouchServiceEXE" Source="$(var.BuildOutputDir)\OpenEGoHubService.exe" KeyPath="yes" />
 
         <!-- 由 Windows Installer 原生注册系统服务 -->
         <ServiceInstall
             Id="EGoTouchServiceInstaller"
             Type="ownProcess"
-            Name="EGoTouchService"
+            Name="OpenEGoHubService"
             DisplayName="!(loc.ServiceDisplayName)"
             Description="!(loc.ServiceDescription)"
             Start="auto"
@@ -53,10 +57,50 @@
             ErrorControl="normal" />
 
         <!-- 控制在安装/卸载时自动启停服务 -->
-        <ServiceControl Id="StartWixService" Name="EGoTouchService"
+        <ServiceControl Id="StartWixService" Name="OpenEGoHubService"
                         Start="install"
                         Stop="both"
                         Remove="uninstall" />
+      </Component>
+
+      <Component Id="EGoTouchTrayComp" Guid="40FAE0AA-41EB-432C-AF3C-FDD0266BD13F">
+        <File Id="EGoTouchTrayEXE" Source="$(var.BuildOutputDir)\OpenEGoHubTray.exe" KeyPath="yes" />
+
+        <!-- 指向托盘而不是设置窗：托盘是常驻进程，设置窗要靠它才能改配置。托盘没在跑时
+             这个入口把它拉起来，已经在跑时托盘的第二个实例会转交给在跑的那个去开设置窗。 -->
+        <Shortcut Id="EGoTouchStartMenuShortcut"
+                  Directory="ProgramMenuFolder"
+                  Name="!(loc.ShortcutName)"
+                  Description="!(loc.ShortcutDescription)"
+                  Target="[INSTALLFOLDER]OpenEGoHubTray.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+      </Component>
+
+      <!-- HKCU 数据必须使用独立的 per-user KeyPath，不能与 Program Files 文件混在同一组件。 -->
+      <Component Id="EGoTouchTrayAutoStartComp" Guid="677C60B5-ACFD-4D99-85A0-9FC8AC0C1339">
+        <!-- 初次安装默认登录后启动；面板随后按当前用户的选择维护同一个 HKCU Run 值。 -->
+        <RegistryValue Root="HKCU"
+                       Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="OpenEGoHubTray"
+                       Type="string"
+                       Value="&quot;[INSTALLFOLDER]OpenEGoHubTray.exe&quot;"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="EGoTouchSettingsComp" Guid="08EB6064-0A8B-4A66-A888-5586CD3460B0">
+        <File Id="EGoTouchSettingsEXE" Source="$(var.BuildOutputDir)\OpenEGoHubSettings.exe" KeyPath="yes" />
+        <File Id="EGoTouchSettingsPRI" Source="$(var.BuildOutputDir)\OpenEGoHubSettings.pri" />
+        <File Id="EGoTouchSettingsWinMD" Source="$(var.BuildOutputDir)\EGoTouchSettings.winmd" />
+        <File Id="EGoTouchSettingsAppXBF" Source="$(var.BuildOutputDir)\App.xbf" />
+        <File Id="EGoTouchSettingsBatteryIndicatorXBF" Source="$(var.BuildOutputDir)\BatteryIndicator.xbf" />
+        <File Id="EGoTouchSettingsMainWindowXBF" Source="$(var.BuildOutputDir)\MainWindow.xbf" />
+        <File Id="EGoTouchSettingsNotificationWindowXBF" Source="$(var.BuildOutputDir)\NotificationWindow.xbf" />
+        <File Id="WindowsAppRuntimeBootstrapDLL" Source="$(var.BuildOutputDir)\Microsoft.WindowsAppRuntime.Bootstrap.dll" />
+      </Component>
+
+      <Component Id="LegalNoticesComp" Guid="FC7B587E-4F03-4730-AFC3-1DE7309F44C8">
+        <File Id="ProjectLicense" Source="LICENSE" KeyPath="yes" />
+        <File Id="ThirdPartyNotices" Source="THIRD-PARTY-NOTICES.md" />
       </Component>
 
     </ComponentGroup>

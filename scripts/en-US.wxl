@@ -5,25 +5,31 @@
        Language & Package Info
        ═══════════════════════════════════════════════════════════ -->
   <String Id="Language" Value="1033" />
-  <String Id="ProductName" Value="EGoTouch Controller Software" />
-  <String Id="ProductNameTest" Value="EGoTouch Controller Software (Test Version)" />
-  <String Id="Manufacturer" Value="EGoTouch Team" />
+  <String Id="ProductName" Value="OpenEGo Hub" />
+  <String Id="ProductNameTest" Value="OpenEGo Hub (Test Version)" />
+  <String Id="Manufacturer" Value="OpenEGo Hub" />
   <String Id="DowngradeError" Value="A newer version of [ProductName] is already installed. Please uninstall the newer version before proceeding." />
   <String Id="LicenseRtf" Value="scripts\EULA_en-US.rtf" />
+
+  <!-- Start menu entry. The name deliberately omits "Settings": the shortcut points at the
+       resident tray, and opening settings is only what it does once the tray is running. -->
+  <String Id="ShortcutName" Value="OpenEGo Hub" />
+  <String Id="ShortcutNameTest" Value="OpenEGo Hub (Test Version)" />
+  <String Id="ShortcutDescription" Value="Start the OpenEGo Hub tray to view accessory status and adjust touch and pen settings." />
 
   <!-- ═══════════════════════════════════════════════════════════
        System Service Info
        ═══════════════════════════════════════════════════════════ -->
-  <String Id="ServiceDisplayName" Value="EGoTouch Capacitive Touch Driver" />
-  <String Id="ServiceDescription" Value="EGoTouch Capacitive Touch Controller Driver Service — manages touch frame acquisition, algorithmic processing, and HID report injection. This service starts automatically with Windows and runs under the SYSTEM account." />
-  <String Id="ServiceDisplayNameTest" Value="EGoTouch Capacitive Touch Driver (Test)" />
-  <String Id="ServiceDescriptionTest" Value="EGoTouch Capacitive Touch Controller Driver Service (Test Version) — includes the EGoTouchApp diagnostic workbench and BtMcuTestTool protocol validator for development and debugging." />
+  <String Id="ServiceDisplayName" Value="OpenEGo Hub Touch Service" />
+  <String Id="ServiceDescription" Value="OpenEGo Hub Touch Service — manages touch frame acquisition, algorithmic processing, and HID report injection. This service starts automatically with Windows and runs under the SYSTEM account." />
+  <String Id="ServiceDisplayNameTest" Value="OpenEGo Hub Touch Service (Test)" />
+  <String Id="ServiceDescriptionTest" Value="OpenEGo Hub Touch Service (Test Version) — includes the diagnostic workbench and BtMcuTestTool protocol validator for development and debugging." />
 
   <!-- ═══════════════════════════════════════════════════════════
        WixUI_InstallDir — Welcome
        ═══════════════════════════════════════════════════════════ -->
   <String Id="WelcomeDlgTitle" Value="{\WixUI_Font_Title}Welcome to [ProductName] Setup" />
-  <String Id="WelcomeDlgDescription" Value="{\WixUI_Font_Normal}This wizard will guide you through the installation of [ProductName].&#xA;&#xA;The installer will deploy the EGoTouch touch controller driver service to your device and register it as a system service that starts automatically with Windows.&#xA;&#xA;Click Next to continue, or Cancel to exit Setup." />
+  <String Id="WelcomeDlgDescription" Value="{\WixUI_Font_Normal}This wizard will guide you through the installation of [ProductName].&#xA;&#xA;The installer will deploy the OpenEGo Hub touch service to your device and register it as a system service that starts automatically with Windows.&#xA;&#xA;Click Next to continue, or Cancel to exit Setup." />
 
   <!-- ═══════════════════════════════════════════════════════════
        WixUI_InstallDir — License Agreement
@@ -53,7 +59,7 @@
        WixUI_InstallDir — Exit
        ═══════════════════════════════════════════════════════════ -->
   <String Id="ExitDlgTitle" Value="{\WixUI_Font_Title}[ProductName] Setup Completed" />
-  <String Id="ExitDlgDescription" Value="{\WixUI_Font_Normal}[ProductName] has been successfully installed on your device.&#xA;&#xA;The EGoTouchService system service has been started and is running in the background. You can check its status at any time via the Windows Services Manager.&#xA;&#xA;Click Finish to exit Setup." />
+  <String Id="ExitDlgDescription" Value="{\WixUI_Font_Normal}[ProductName] has been successfully installed on your device.&#xA;&#xA;The touch service has been started and is running in the background. You can check its status at any time via the Windows Services Manager.&#xA;&#xA;Click Finish to exit Setup." />
 
   <String Id="UserExitTitle" Value="{\WixUI_Font_Title}[ProductName] Setup Cancelled" />
   <String Id="UserExitDescription1" Value="{\WixUI_Font_Normal}Setup was interrupted before [ProductName] could be fully installed.&#xA;&#xA;You may run this installer again at any time to complete the installation." />

@@ -1,78 +1,183 @@
-# EGoTouchRev (Rebuild) 🚀
+<img src="Assets/brand/openego-hub-256.png" alt="" width="72" align="left" hspace="4" vspace="6">
+
+# OpenEGo Hub
+
+<br clear="left">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows_11_ARM64-lightgrey.svg)]()
-[![Build](https://img.shields.io/badge/Build-CMake_|_WiX_v4-orange.svg)]()
+[![Build](https://github.com/NihilDigit/openego-hub/actions/workflows/build.yml/badge.svg)](https://github.com/NihilDigit/openego-hub/actions/workflows/build.yml)
 
-**EGoTouchRev** is a community-driven, open-source replacement driver and service suite for proprietary capacitive touch controllers (primarily targeting Himax IC and accompanying BT-MCU stylus input). 
+A native ARM64 control centre and driver stack for the HUAWEI MateBook E Go, covering
+touch, pen and the detachable keyboard. It replaces the vendor touch service, along with
+the accessory status and pen settings that PC Manager provides. Every component targets
+ARM64; nothing in the deployment runs under WOW64 emulation.
 
-Developed entirely through clean-room reverse engineering, this project aims to provide a reliable, modular, and natively built touch interaction layer with an advanced algorithmic pipeline for Windows on ARM64 (WoA) devices.
-
----
-
-## 🌟 Key Features
-
-* **Native System Service (`EGoTouchService`)**: A rock-solid, C++ driven Windows service (`LocalSystem`) handling continuous touch frame acquisition, lifecycle monitoring, and seamless HID report injection.
-* **Hardware Integration**: Deep protocol-level integration with **Himax capacitive chips** for ultra-responsive multi-touch handling. *(Note: Active Stylus / BT-MCU integration is temporarily disconnected in this branch to focus on core touch stability)*.
-* **Custom Processing Pipeline**: Overhauled from scratch with anti-jitter, anti-bounce, and 1 Euro filtering for unparalleled touch smoothing and coordinate accuracy.
-* **Advanced Diagnostics**: Ships with `EGoTouchApp`, a native diagnostic GUI application (Diagnostics Workbench) for real-time visualization, raw data monitoring, and event logging.
-* **100% ARM64 Native Deployment**: Fully customized WiX v4 build toolkit ensuring that no WOW64 emulation is required—deployment is completely native to modern ARM64 systems.
+This project is a fork of [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev),
+which contributed the touch stack it is built on. See [Credits](#credits).
 
 ---
 
-## 💻 Installation
+## What it does
 
-We provide **Pure ARM64 MSI Installers** packaged using WiX Toolset v4. Commit and PR builds only compile and run smoke tests; release installers are built from `vMAJOR.MINOR.PATCH` tags and attached directly to GitHub Releases.
+**Touch.** A `LocalSystem` service acquires capacitive heatmap frames from the Himax
+controller, runs them through a processing pipeline (anti-jitter, anti-bounce, 1 Euro
+filtering, palm and stylus arbitration) and injects HID reports through a virtual
+device.
 
-### Easy Install (End-Users)
-1. Download the latest `EGoTouchSetup_arm64_vX.Y.Z.msi` from the [Releases](#) page.
-   - `EGoTouchSetup_arm64_vX.Y.Z.msi`: core service installer.
-   - `EGoTouchTestSetup_arm64_vX.Y.Z.msi`: service plus diagnostic tools.
-2. Double click to run the setup wizard.
-3. The installer will automatically deploy the binaries and configure `EGoTouchService` to launch silently in the background.
+**Pen.** BT-MCU protocol integration for the M-Pencil: pressure, battery, attach and
+charge state, and a configurable side-button double-click that either follows the
+system pen setting or toggles between writing and erasing.
 
-*(**Note**: Elevated Administrator privileges are strictly required to configure the system service).*
+**Keyboard.** The detachable keyboard's wireless-on-detach setting, read from and
+written to the MCU rather than remembered locally, so the displayed state is the real
+one.
 
-### Build from Source (Developers)
+**Interface.** A tray panel showing accessory status, and a WinUI 3 settings window for
+everything configurable. Both run unelevated; the service exposes them a read-only
+status channel and a narrow command channel rather than an administrative pipe.
 
-This project relies on **CMake** for code compilation and **WiX v4** for MSI packaging. Release automation uses the Git tag as the public version, while WiX receives the numeric MSI version without the leading `v`.
+---
+
+## Compatibility
+
+Windows 11 on ARM64, on the HUAWEI MateBook E Go. Nothing here is portable to another
+device: the touch pipeline is written against this panel's Himax controller, and the pen
+and keyboard protocols against the MCU this tablet exposes.
+
+The pen module identifies itself over the MCU, and CD52, CD54, CD54R and CD54S are
+recognised — the M-Pencil first through third generations. Development and measurement
+were done on a CD54R, so the other modules are handled but untested.
+
+The detachable keyboard is identified by whether it answers on the MCU's keyboard
+subsystem at all, which third-party keyboards do not register for. An unrecognised
+keyboard is reported as unknown rather than guessed at.
+
+---
+
+## Non-goals
+
+Reverse engineering the vendor stack reveals more than is worth reimplementing. The
+following are deliberately out of scope:
+
+- **Firmware update.** Requires vendor-signed images, and a failure bricks hardware.
+- **Voice assistant integration.** Vendor-specific, tied to services this project does
+  not replace.
+- **Global annotation.** A vendor feature that was unreliable in its original form.
+
+The rule this project applies: implement the functions that are genuinely general and
+that the hardware supports directly. Reproducing a vendor gimmick that never worked
+well is not an improvement.
+
+---
+
+## Installation
+
+Pure ARM64 MSI installers, packaged with WiX Toolset v4. Commit and PR builds only
+compile and run smoke tests; release installers are built from `vMAJOR.MINOR.PATCH`
+tags and attached to GitHub Releases.
+
+1. Download the latest `OpenEGoHubSetup_arm64_vX.Y.Z.msi` from the Releases page.
+   - `OpenEGoHubSetup_arm64_vX.Y.Z.msi` — service, tray and settings.
+   - `OpenEGoHubTestSetup_arm64_vX.Y.Z.msi` — the above plus diagnostic tools.
+2. Run the setup wizard. Administrator rights are required to register the service.
+3. The installer registers `OpenEGoHubService` to start with Windows and adds a Start
+   menu entry.
+
+The vendor touch service and this one drive the same hardware and must not run at the
+same time. The installer handles the handover; the tray can give control back to
+HUAWEI's driver without uninstalling.
+
+### Build from source
+
+Requires **CMake**, **Ninja**, the ARM64 MSVC toolchain, and **WiX v4** for packaging.
+
+The `arm64-*` presets resolve `cl.exe` from `PATH`, so the ARM64 developer environment
+has to be in the shell first. `scripts\build.ps1` imports it and pins the repository
+root, which makes it the shorter path:
 
 ```powershell
-# 1. Compile the binaries
-cmake -G "Ninja" -S . -B build `
-      -DCMAKE_BUILD_TYPE=Release `
-      -DCMAKE_C_COMPILER=clang-cl `
-      -DCMAKE_CXX_COMPILER=clang-cl `
-      -DHIMAX_ENABLE_NEON=ON `
-      -DEGO_BUILD_TESTS=ON
-cmake --build build --config Release --parallel
-
-# 2. Package the MSI Installer (Requires .NET and WiX)
-dotnet tool install --global wix
-wix eula accept wix7
-wix extension add -g WixToolset.UI.wixext
-wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 scripts\EGoTouchSetup.wxs -loc scripts\zh-CN.wxl -out build\EGoTouchSetup_arm64_v1.2.3.msi
+.\scripts\build.ps1 -Config Release           # configure and build
+.\scripts\build.ps1 -Config Debug -Test       # build, then run ctest
 ```
 
+After `vcvarsarm64.bat`, the presets also work directly:
+
+```powershell
+cmake --preset arm64-Release
+cmake --build --preset arm64-Release
+```
+
+Packaging:
+
+```powershell
+dotnet tool install --global wix
+wix extension add -g WixToolset.UI.wixext
+wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
+    scripts\EGoTouchSetup.wxs -loc scripts\zh-CN.wxl `
+    -out build\OpenEGoHubSetup_arm64_v1.2.3.msi
+```
+
+Two scripts cover the development loop, both from an elevated shell.
+`scripts\dev-cycle.ps1` stops the debug service, rebuilds, restarts it, and relaunches
+the tray and settings window unelevated. `scripts\verify.ps1` builds, runs the tests,
+and replays the recorded corpora against the previous results.
+
 ---
 
-## 🏗️ Architecture Layout
+## Layout
 
-- `EGoTouchService/` - The core Windows Service engine fetching and computing hardware reports.
-  - `Device/` - Hardware abstraction layers (Himax, BT/MCU protocols).
-  - `Engine/` - The algorithmic heartbeat (Touch pipelines, 1 Euro Filters, pressure parsing).
-  - `Host/` - System and Windows OS interfaces (HID Injection, ACPI/Lid monitoring).
-- `Tools/EGoTouchApp/` - The visual diagnostic dashboard for monitoring sensor states.
-- `scripts/` - Inno Setup / WiX installation scripts and environment configuration tools.
+- `EGoTouchService/` — the service.
+  - `Device/` — hardware abstraction: Himax controller, BT-MCU pen and keyboard protocols.
+  - `Solvers/` — the touch and stylus pipelines.
+  - `Host/` — OS interfaces: HID injection, power and lid monitoring.
+- `Common/` — cross-process channels and shared configuration.
+- `Tools/EGoTouchTray/` — tray panel and accessory status.
+- `Tools/EGoTouchSettings/` — WinUI 3 settings window.
+- `Tools/EGoTouchApp/` — diagnostics workbench.
+- `docs/` — reverse-engineered protocol documentation.
+- `scripts/` — build, packaging and development scripts.
 
 ---
 
-## ⚖️ Legal Disclaimers
+## Credits
 
-**IMPORTANT**: This software is provided exclusively for **non-commercial, personal use** and **educational research (interoperability)**.
+This project is a fork of
+**[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)** (MIT, © Detach2233), whose
+touch stack it is built on. That notice is preserved in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-This project is **NOT affiliated** with Himax, the original device manufacturer(s), or any associated trademark holder. It utilizes original community code synthesized via reverse-engineering to ensure hardware interoperability on alternative operating environments. 
+It was also influenced by, and developed with reference to, three projects that worked
+on this device before it:
 
-**Use at Your Own Risk:** Modifying low-level hardware drivers carries inherent risks. The authors and contributors shall not be held liable for any hardware bricking, system corruption, or potential third-party TOS violations resulting from the use of this software. 
+- **[MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)** by eiyooooo
+- **[goodies](https://github.com/matebook-e-go/goodies)** by dantmnf
+- **[EgoTools](https://github.com/SaKongA/EgoTools)** by SaKongA
 
-For the complete text, please refer to the [LICENSE](LICENSE) file. 
+---
+
+## Licence
+
+MIT, the same terms as the project this one is forked from, so that improvements to the
+touch stack can go back upstream as easily as they came down. See [LICENSE](LICENSE).
+
+The upstream copyright notice and the vendored Dear ImGui notice are preserved in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and must accompany any redistribution,
+source or binary.
+
+---
+
+## Disclaimers
+
+This project is not affiliated with, authorised by, or connected to HUAWEI, Himax, or
+any other trademark holder. All product and company names belong to their owners. It
+was developed through reverse engineering for interoperability, research and
+educational purposes.
+
+The tray reads pen artwork and battery icons from an existing PC Manager installation
+at runtime and falls back to drawing its own when PC Manager is absent. Those images
+are HUAWEI's and are never redistributed with this project.
+
+**Use at your own risk.** This replaces a low-level hardware driver. The authors and
+contributors accept no liability for hardware damage, data loss, system instability, or
+any violation of third-party terms of service arising from its use.

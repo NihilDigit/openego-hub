@@ -77,8 +77,8 @@ Service 安装目录不再包含配置文件目录：
 
 ```text
 EGoTouchRev/
-├── EGoTouchService.exe
-└── EGoTouchApp.exe
+├── OpenEGoHubService.exe
+└── OpenEGoHubApp.exe
 ```
 
 WiX 不再声明配置文件 component；CMake install 只安装可执行目标，见 [CMakeLists.txt:312-339](../CMakeLists.txt#L312-L339)。
@@ -91,6 +91,7 @@ WiX 不再声明配置文件 component；CMake install 只安装可执行目标�
 | [api/ipc_protocol.md](api/ipc_protocol.md) | IPC wire 协议 |
 | [ipc_interface_protocol.md](ipc_interface_protocol.md) | IPC 命令索引 |
 | [touch_pipeline_architecture.md](touch_pipeline_architecture.md) | TouchPipeline 处理链 |
+| [stylus_touch_arbitration_design.md](stylus_touch_arbitration_design.md) | 笔/触摸仲裁层设计与实现 |
 
 ## 小结
 

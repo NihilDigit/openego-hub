@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OpenEGo Hub 品牌标记 —— 一个接触点在电容图上的等高线。
+
+  这是全部图标资源的唯一真值。.ico 与托盘自绘用的几何常量都由
+  scripts/make_brand_assets.py 从本文件生成,不要另画一份。
+
+  几何:三层同族椭圆,统一倾斜 -22 度,层层向左上偏移。偏移不是装饰——真实的
+  接触斑本来就是椭圆的、不居中的,峰值偏向手指压得更实的那一侧。
+
+  外轮廓的墨迹范围是 21.5 x 18.9(含描边),占 24 格的 90% x 79%。托盘图标要
+  跟相邻的系统图标一样满,所以这个数不能再小。
+
+  小尺寸规则:16 px 上三层套在一起会糊(层间净空只剩约 1.4 px),
+  尺寸不超过 24 px 时只画外轮廓与内核,且外轮廓用全不透明。规则实现在生成脚本与
+  EGoTouchTray 两处,判据都是 kMarkSmallSizePx。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none">
+  <title>OpenEGo Hub</title>
+
+  <!-- id 是生成脚本的取用契约,不要改名 -->
+  <ellipse id="contour-outer" cx="12.0"  cy="12.0"  rx="10.2" ry="8.4"
+           transform="rotate(-22 12.0 12.0)"
+           stroke="currentColor" stroke-width="1.6" opacity="0.50"/>
+  <ellipse id="contour-mid"   cx="11.5"  cy="11.45" rx="6.5"  ry="5.0"
+           transform="rotate(-22 11.5 11.45)"
+           stroke="currentColor" stroke-width="1.6" opacity="0.78"/>
+  <ellipse id="contour-core"  cx="11.0"  cy="10.9"  rx="3.0"  ry="2.3"
+           transform="rotate(-22 11.0 10.9)"
+           fill="currentColor"/>
+</svg>

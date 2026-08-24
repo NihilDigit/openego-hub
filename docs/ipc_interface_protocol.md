@@ -32,7 +32,7 @@
 
 ### 2.2 Shared Memory 帧通道
 
-- 映射名：`Global\EGoTouchSharedFrame`
+- 映射名：`Global\OpenEGoHubSharedFrame`
 - 事件名：`Global\EGoTouchFrameReady`
 - 方向：Service → App
 - 用途：调试帧实时推送（低延迟）
@@ -40,7 +40,7 @@
 ### 2.3 其他 IPC 相关全局事件
 
 - `Global\EGoTouchLogReady`
-- `Global\EGoTouchPenStatusReady`
+- `Global\OpenEGoHubPenStatusReady`
 
 ---
 

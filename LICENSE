@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2025 Detach2233
+Copyright (c) 2026 NihilDigit
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,31 +20,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-========================================================================
-LEGAL DISCLAIMERS REGARDING REVERSE ENGINEERING AND USAGE
-========================================================================
-
-1. NATURE OF THE PROJECT
-This software ("EGoTouchRev") is an independent, community-driven, open-source 
-project. It has been developed through clean-room reverse engineering for 
-educational, interoperability, and research purposes only. 
-
-2. NO AFFILIATION
-The developers and contributors of this project are NOT affiliated, associated, 
-authorized, endorsed by, or in any way officially connected with the original 
-hardware manufacturers (such as Himax) or any trademark holders associated with 
-the original touch hardware. All product and company names are the registered 
-trademarks of their original owners.
-
-3. DISCLAIMER OF LIABILITY (USE AT YOUR OWN RISK)
-IN NO EVENT SHALL THE AUTHORS, CONTRIBUTORS, OR COPYRIGHT HOLDERS BE LIABLE 
-FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM:
-- HARDWARE BRICKING OR PHYSICAL DAMAGE
-- DATA CORRUPTION
-- SYSTEM INSTABILITY OR CRASHES
-- POTENTIAL VIOLATIONS OF THIRD-PARTY TERMS OF SERVICE
-
-You are installing a proprietary hardware driver alternative. BY USING THIS 
-SOFTWARE, YOU ACKNOWLEDGE THE RISKS INVOLVED AND AGREE THAT YOU ARE USING IT 
-ENTIRELY AT YOUR OWN RISK.

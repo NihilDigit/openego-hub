@@ -18,7 +18,7 @@ sc stop EGoTouchService >nul 2>&1
 timeout /t 3 /nobreak >nul
 
 :: Kill any lingering process
-taskkill /F /IM EGoTouchService.exe >nul 2>&1
+taskkill /F /IM OpenEGoHubService.exe >nul 2>&1
 
 :: Delete service
 sc delete EGoTouchService
@@ -29,6 +29,6 @@ if %errorlevel% equ 0 (
 )
 
 echo.
-echo Note: C:\ProgramData\EGoTouchRev\ directory and contents were NOT removed.
+echo Note: C:\ProgramData\OpenEGoHub\ directory and contents were NOT removed.
 echo.
 pause
