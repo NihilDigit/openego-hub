@@ -11,6 +11,7 @@
 #include "TouchSolver/TouchPipeline.h"
 #include "StylusPipeline.h"
 #include "ConcurrentRingBuffer.h"
+#include "DvrBinaryIO.h"
 #include "DvrFrameSlot.h"
 #include "config/ConfigSchemaSnapshot.h"
 #include "config/ConfigStore.h"
@@ -213,6 +214,14 @@ public:
     void TriggerDvrBinaryExport();
     bool IsDvrExporting() const { return m_dvrExporting.load(); }
 
+    // Continuous session recording (streams every received frame to disk;
+    // complements the pre-trigger ring export for minute-scale corpora)
+    bool StartDvrSessionRecording();
+    void StopDvrSessionRecording();
+    bool IsDvrSessionRecording() const { return m_dvrSessionActive.load(std::memory_order_relaxed); }
+    size_t GetDvrSessionFrameCount() const { return m_dvrSessionFrames.load(std::memory_order_relaxed); }
+    std::string GetDvrSessionStatusMessage() const;
+
     // Global Service config (UI mirrors)
     // NOTE: IsSrvModeFull() returns desired mode (config target), not runtime active mode.
     bool IsSrvModeFull() const { return m_srvDesiredModeFull.load(std::memory_order_relaxed); }
@@ -284,7 +293,7 @@ private:
     Ipc::IpcResponse SendPersistConfigV3Request();
 
     static constexpr const wchar_t* kSharedMemName =
-        L"Global\\EGoTouchSharedFrame";
+        L"Global\\OpenEGoHubSharedFrame";
     static constexpr int kDvrCapacity = 960;
     static constexpr size_t kDvrPreTriggerFrames = 480;
     static constexpr size_t kServiceRuntimeTransitionCapacity = 64;
@@ -352,6 +361,14 @@ private:
     std::atomic<bool> m_dvrExporting{false};
     std::thread m_dvrThread;
 
+    // Session recording (writer guarded by m_dvrSessionMu; the atomic lets the
+    // polling thread skip the lock entirely while recording is off)
+    mutable std::mutex m_dvrSessionMu;
+    std::unique_ptr<Dvr::SessionWriter> m_dvrSessionWriter;
+    std::atomic<bool> m_dvrSessionActive{false};
+    std::atomic<size_t> m_dvrSessionFrames{0};
+    std::string m_dvrSessionStatus;
+
     // Playback state
     DvrPlaybackDataset m_playbackDataset;
     mutable std::mutex m_playbackMutex;
@@ -402,7 +419,7 @@ private:
     std::atomic<bool> m_srvActiveModeFull{true};
     std::atomic<bool> m_srvAutoMode{true};
     std::atomic<bool> m_srvStylusVhfEnabled{true};
-    std::atomic<PenButtonMode> m_srvPenButtonMode{PenButtonMode::OemCustom};
+    std::atomic<PenButtonMode> m_srvPenButtonMode{PenButtonMode::WindowsInk};
     std::atomic<PenButtonRoute> m_srvPenButtonRoute{PenButtonRoute::VhfOnly};
 };
 

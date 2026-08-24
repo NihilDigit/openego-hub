@@ -15,7 +15,7 @@ struct ServiceRuntimeConfigState {
     bool activeModeFull = true;
     bool autoMode = true;
     bool stylusVhfEnabled = true;
-    PenButtonMode penButtonMode = PenButtonMode::OemCustom;
+    PenButtonMode penButtonMode = PenButtonMode::WindowsInk;
     PenButtonRoute penButtonRoute = PenButtonRoute::VhfOnly;
 };
 

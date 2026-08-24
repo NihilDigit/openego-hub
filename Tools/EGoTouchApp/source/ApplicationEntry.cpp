@@ -31,7 +31,7 @@ constexpr int kHotkeyDvrExport = 0x4501;
 int main(int, char**)
 {
     // 启动日志框架 (所有日志通过 GuiLogSink 在 Log 面板显示)
-    Common::Logger::Init("EGoTouch", "C:/ProgramData/EGoTouchRev/logs/",
+    Common::Logger::Init("EGoTouch", "C:/ProgramData/OpenEGoHub/logs/",
                           Common::GuiLogSink::Instance());
     LOG_INFO("App", __func__, "System", "--- EGoTouchApp (DX11) Starts ---");
 

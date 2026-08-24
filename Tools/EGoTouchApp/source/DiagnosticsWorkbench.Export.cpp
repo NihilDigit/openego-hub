@@ -12,7 +12,7 @@
 namespace App {
 
 namespace {
-constexpr const char* kExportRootDir = "C:/ProgramData/EGoTouchRev/exports";
+constexpr const char* kExportRootDir = "C:/ProgramData/OpenEGoHub/exports";
 }
 
 void DiagnosticsWorkbench::ExportCurrentFrameCsv(bool isAutoCapture) {

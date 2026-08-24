@@ -465,6 +465,18 @@ elseif(WIN32)
     target_link_options(EGoTouchService PRIVATE -municode)
 endif()
 
+# --- DvrReplay (offline pipeline replay over recorded .dvrbin datasets) ---
+if (EGO_BUILD_TOOLS)
+    add_executable(DvrReplay Tools/DvrReplay/DvrReplay.cpp)
+    target_link_libraries(DvrReplay PRIVATE DVRCore Solvers Common)
+endif()
+
+# --- PointerCancelProbe (one-shot VHF confidence-bit experiment) ---
+if (EGO_BUILD_TOOLS)
+    add_executable(PointerCancelProbe Tools/PointerCancelProbe/PointerCancelProbe.cpp)
+    target_link_libraries(PointerCancelProbe PRIVATE setupapi user32 gdi32)
+endif()
+
 # --- BtMcuTestTool (ImGui BT Protocol Validator) ---
 if (EGO_BUILD_TOOLS)
     add_executable(BtMcuTestTool
@@ -584,6 +596,11 @@ if (EGO_BUILD_TESTS)
     )
     target_compile_definitions(DvrCoreFixtureCompatibilityTest PRIVATE
         EGO_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Common/DVRCore/tests/fixtures"
+    )
+    add_dvrcore_test(DvrCoreSessionWriterTest
+        Common/DVRCore/tests/DvrCoreSessionWriterTest.cpp
+        "dvrcore;session;roundtrip;device-free"
+        15
     )
     add_dvrcore_test(DvrCoreCorruptionNegativeTest
         Common/DVRCore/tests/DvrCoreCorruptionNegativeTest.cpp

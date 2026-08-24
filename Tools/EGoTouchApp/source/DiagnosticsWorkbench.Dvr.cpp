@@ -11,7 +11,7 @@
 namespace App {
 
 namespace {
-constexpr const char* kExportRootDir = "C:/ProgramData/EGoTouchRev/exports";
+constexpr const char* kExportRootDir = "C:/ProgramData/OpenEGoHub/exports";
 } // namespace
 
 void DiagnosticsWorkbench::ExitPlaybackToLivePreview() {
@@ -55,6 +55,25 @@ void DiagnosticsWorkbench::DrawDvrPanel() {
     if (m_proxy->IsDvrExporting()) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.f), "Exporting binary...");
+    }
+    const bool sessionRecording = m_proxy->IsDvrSessionRecording();
+    if (!sessionRecording) {
+        if (ImGui::Button("Start Session Recording")) {
+            m_proxy->StartDvrSessionRecording();
+        }
+    } else {
+        if (ImGui::Button("Stop Session Recording")) {
+            m_proxy->StopDvrSessionRecording();
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.f), "REC %zu frames",
+                           m_proxy->GetDvrSessionFrameCount());
+    }
+    {
+        const std::string sessionStatus = m_proxy->GetDvrSessionStatusMessage();
+        if (!sessionStatus.empty()) {
+            ImGui::TextWrapped("%s", sessionStatus.c_str());
+        }
     }
     if (!allowLiveControl) {
         ImGui::EndDisabled();

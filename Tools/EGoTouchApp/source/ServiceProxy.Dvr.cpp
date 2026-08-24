@@ -16,7 +16,7 @@ namespace App {
 
 namespace {
 
-constexpr const char* kExportRootDir = "C:/ProgramData/EGoTouchRev/exports";
+constexpr const char* kExportRootDir = "C:/ProgramData/OpenEGoHub/exports";
 
 std::string MakeDatasetTimestampString() {
     auto now = std::chrono::system_clock::now();
@@ -233,6 +233,61 @@ void ServiceProxy::TriggerDvrBinaryExport() {
                  preTriggerFrames.size(), replayBinPath.string(), triggerSeq);
         m_dvrExporting.store(false);
     });
+}
+
+bool ServiceProxy::StartDvrSessionRecording() {
+    std::lock_guard<std::mutex> lk(m_dvrSessionMu);
+    if (m_dvrSessionWriter && m_dvrSessionWriter->IsActive()) return false;
+
+    namespace fs = std::filesystem;
+    const fs::path dir = MakeDvrExportRoot();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) {
+        m_dvrSessionStatus = "Failed to create session recording directory: " + dir.string();
+        return false;
+    }
+
+    auto writer = std::make_unique<Dvr::SessionWriter>();
+    const fs::path target = dir / (MakeDvrDatasetName() + "-session.dvrbin");
+    if (!writer->Begin(target)) {
+        m_dvrSessionStatus = "Failed to open session recording file: " + target.string();
+        return false;
+    }
+
+    m_dvrSessionWriter = std::move(writer);
+    m_dvrSessionFrames.store(0, std::memory_order_relaxed);
+    m_dvrSessionStatus = "Recording session to " + target.string();
+    m_dvrSessionActive.store(true, std::memory_order_relaxed);
+    LOG_INFO("App", "StartDvrSessionRecording", "IPC", "Session recording started: {}", target.string());
+    return true;
+}
+
+void ServiceProxy::StopDvrSessionRecording() {
+    m_dvrSessionActive.store(false, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(m_dvrSessionMu);
+    if (!m_dvrSessionWriter) return;
+
+    const auto path = m_dvrSessionWriter->FinalPath();
+    const size_t frames = m_dvrSessionWriter->FrameCount();
+    const auto runtimeConfig = CaptureRuntimeConfigSnapshot();
+    const bool ok = m_dvrSessionWriter->Finalize(&runtimeConfig);
+    m_dvrSessionWriter.reset();
+
+    if (ok) {
+        m_dvrSessionStatus = "Session saved: " + path.string() + " (" + std::to_string(frames) + " frames)";
+        LOG_INFO("App", "StopDvrSessionRecording", "IPC", "Session recording saved: {} ({} frames)", path.string(), frames);
+    } else {
+        m_dvrSessionStatus = frames == 0
+            ? "Session discarded: no frames were received while recording."
+            : "Session recording failed to finalize: " + path.string();
+        LOG_WARN("App", "StopDvrSessionRecording", "IPC", "Session recording finalize failed: {} ({} frames)", path.string(), frames);
+    }
+}
+
+std::string ServiceProxy::GetDvrSessionStatusMessage() const {
+    std::lock_guard<std::mutex> lk(m_dvrSessionMu);
+    return m_dvrSessionStatus;
 }
 
 } // namespace App

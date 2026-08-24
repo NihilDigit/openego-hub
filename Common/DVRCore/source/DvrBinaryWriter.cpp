@@ -202,24 +202,15 @@ Dvr2FramePayload MakeFramePayload(const DvrFrameSlot& src) {
     frame.stylus.touchSuppressActive = src.stylus.touchSuppressActive ? 1 : 0;
     frame.stylus.touchSuppressFrames = src.stylus.touchSuppressFrames;
     frame.stylus.pressureIsReal = src.stylus.pressureIsReal ? 1 : 0;
-    frame.stylus.predictedAgeFrames = src.stylus.predictedAgeFrames;
     frame.stylus.outputConfidence = src.stylus.outputConfidence;
     CopyRawGridBlockToWire(src.stylus.rawGrid.tx1, frame.stylus.rawGrid.tx1);
     CopyRawGridBlockToWire(src.stylus.rawGrid.tx2, frame.stylus.rawGrid.tx2);
-    frame.stylus.packet.valid = src.stylus.packet.valid ? 1 : 0;
-    frame.stylus.packet.reportId = src.stylus.packet.reportId;
-    frame.stylus.packet.length = src.stylus.packet.length;
-    std::memcpy(frame.stylus.packet.bytes, src.stylus.packet.bytes, sizeof(frame.stylus.packet.bytes));
     frame.stylus.point.valid = src.stylus.point.valid ? 1 : 0;
     frame.stylus.point.x = src.stylus.point.x;
     frame.stylus.point.y = src.stylus.point.y;
-    frame.stylus.point.reportX = src.stylus.point.reportX;
-    frame.stylus.point.reportY = src.stylus.point.reportY;
     frame.stylus.point.pressure = src.stylus.point.pressure;
     frame.stylus.point.rawPressure = src.stylus.point.rawPressure;
     frame.stylus.point.mappedPressure = src.stylus.point.mappedPressure;
-    frame.stylus.point.peakTx1 = src.stylus.point.peakTx1;
-    frame.stylus.point.peakTx2 = src.stylus.point.peakTx2;
     frame.stylus.point.tiltValid = src.stylus.point.tiltValid ? 1 : 0;
     frame.stylus.point.preTiltX = src.stylus.point.preTiltX;
     frame.stylus.point.preTiltY = src.stylus.point.preTiltY;
@@ -227,10 +218,6 @@ Dvr2FramePayload MakeFramePayload(const DvrFrameSlot& src) {
     frame.stylus.point.tiltY = src.stylus.point.tiltY;
     frame.stylus.point.tiltMagnitude = src.stylus.point.tiltMagnitude;
     frame.stylus.point.tiltAzimuthDeg = src.stylus.point.tiltAzimuthDeg;
-    frame.stylus.point.tx1X = src.stylus.point.tx1X;
-    frame.stylus.point.tx1Y = src.stylus.point.tx1Y;
-    frame.stylus.point.tx2X = src.stylus.point.tx2X;
-    frame.stylus.point.tx2Y = src.stylus.point.tx2Y;
     frame.stylus.point.confidence = src.stylus.point.confidence;
 
     frame.contactCount = std::min<uint32_t>(src.contactCount, DvrFmt::kMaxContacts);
@@ -273,6 +260,58 @@ Dvr2FramePayload MakeFramePayload(const DvrFrameSlot& src) {
         std::memcpy(dst.rawData, src.rawData, dst.rawDataLength);
     }
     return dst;
+}
+
+struct RuntimeConfigSections {
+    bool present = false;
+    Dvr2RuntimeConfigSchemaHeader schemaHeader{};
+    Dvr2RuntimeConfigValuesHeader valuesHeader{};
+    std::vector<Dvr2RuntimeConfigFieldDef> fieldRecords;
+    std::vector<Dvr2RuntimeConfigValueRecord> valueRecords;
+
+    uint64_t SchemaSize() const {
+        return sizeof(schemaHeader) + fieldRecords.size() * sizeof(Dvr2RuntimeConfigFieldDef);
+    }
+    uint64_t ValuesSize() const {
+        return sizeof(valuesHeader) + valueRecords.size() * sizeof(Dvr2RuntimeConfigValueRecord);
+    }
+};
+
+RuntimeConfigSections MakeRuntimeConfigSections(const RuntimeConfigSnapshot* runtimeConfig) {
+    RuntimeConfigSections sections;
+    if (!CanPersistRuntimeConfig(runtimeConfig)) return sections;
+    sections.present = true;
+
+    sections.fieldRecords.reserve(runtimeConfig->fields.size());
+    for (const auto& field : runtimeConfig->fields) {
+        sections.fieldRecords.push_back(MakeRuntimeConfigFieldDef(field));
+    }
+    const uint32_t configSchemaHash = DvrFmt::ComputeRuntimeConfigSchemaHash(sections.fieldRecords);
+
+    sections.valueRecords.reserve(runtimeConfig->values.size());
+    for (const auto& value : runtimeConfig->values) {
+        sections.valueRecords.push_back(MakeRuntimeConfigValueRecord(value));
+    }
+
+    sections.schemaHeader.fieldCount = static_cast<uint16_t>(sections.fieldRecords.size());
+    sections.schemaHeader.schemaHash = configSchemaHash;
+    sections.schemaHeader.recordSize = sizeof(Dvr2RuntimeConfigFieldDef);
+    sections.valuesHeader.valueCount = static_cast<uint16_t>(sections.valueRecords.size());
+    sections.valuesHeader.recordSize = sizeof(Dvr2RuntimeConfigValueRecord);
+    sections.valuesHeader.schemaHash = configSchemaHash;
+    return sections;
+}
+
+bool WriteRuntimeConfigSections(std::ofstream& out, const RuntimeConfigSections& sections) {
+    if (!WriteAll(out, &sections.schemaHeader, sizeof(sections.schemaHeader))) return false;
+    if (!sections.fieldRecords.empty() &&
+        !WriteAll(out, sections.fieldRecords.data(),
+                  sections.fieldRecords.size() * sizeof(Dvr2RuntimeConfigFieldDef))) return false;
+    if (!WriteAll(out, &sections.valuesHeader, sizeof(sections.valuesHeader))) return false;
+    if (!sections.valueRecords.empty() &&
+        !WriteAll(out, sections.valueRecords.data(),
+                  sections.valueRecords.size() * sizeof(Dvr2RuntimeConfigValueRecord))) return false;
+    return true;
 }
 
 } // namespace
@@ -362,35 +401,12 @@ bool WriteBinaryFile(const std::filesystem::path& filePath,
         }
     }
 
-    const bool hasRuntimeConfig = CanPersistRuntimeConfig(runtimeConfig);
+    const RuntimeConfigSections runtimeConfigSections = MakeRuntimeConfigSections(runtimeConfig);
+    const bool hasRuntimeConfig = runtimeConfigSections.present;
     if (hasRuntimeConfig) {
         flags |= DvrFmt::kDvrFlagHasRuntimeConfig;
     }
     if (outFlags) *outFlags = flags;
-
-    Dvr2RuntimeConfigSchemaHeader runtimeConfigSchemaHeader{};
-    Dvr2RuntimeConfigValuesHeader runtimeConfigValuesHeader{};
-    std::vector<Dvr2RuntimeConfigFieldDef> runtimeConfigFieldRecords;
-    std::vector<Dvr2RuntimeConfigValueRecord> runtimeConfigValueRecords;
-    if (hasRuntimeConfig) {
-        runtimeConfigFieldRecords.reserve(runtimeConfig->fields.size());
-        for (const auto& field : runtimeConfig->fields) {
-            runtimeConfigFieldRecords.push_back(MakeRuntimeConfigFieldDef(field));
-        }
-        const uint32_t configSchemaHash = DvrFmt::ComputeRuntimeConfigSchemaHash(runtimeConfigFieldRecords);
-
-        runtimeConfigValueRecords.reserve(runtimeConfig->values.size());
-        for (const auto& value : runtimeConfig->values) {
-            runtimeConfigValueRecords.push_back(MakeRuntimeConfigValueRecord(value));
-        }
-
-        runtimeConfigSchemaHeader.fieldCount = static_cast<uint16_t>(runtimeConfigFieldRecords.size());
-        runtimeConfigSchemaHeader.schemaHash = configSchemaHash;
-        runtimeConfigSchemaHeader.recordSize = sizeof(Dvr2RuntimeConfigFieldDef);
-        runtimeConfigValuesHeader.valueCount = static_cast<uint16_t>(runtimeConfigValueRecords.size());
-        runtimeConfigValuesHeader.recordSize = sizeof(Dvr2RuntimeConfigValueRecord);
-        runtimeConfigValuesHeader.schemaHash = configSchemaHash;
-    }
 
     Dvr2FileHeader header{};
     const auto magic = MakeDvr2Magic();
@@ -436,15 +452,11 @@ bool WriteBinaryFile(const std::filesystem::path& filePath,
 
     if (hasRuntimeConfig) {
         const uint64_t runtimeConfigSchemaOffset = nextOffset;
-        const uint64_t runtimeConfigSchemaSize = sizeof(Dvr2RuntimeConfigSchemaHeader) +
-            static_cast<uint64_t>(runtimeConfigFieldRecords.size()) * sizeof(Dvr2RuntimeConfigFieldDef);
-        nextOffset += runtimeConfigSchemaSize;
+        nextOffset += runtimeConfigSections.SchemaSize();
         const uint64_t runtimeConfigValuesOffset = nextOffset;
-        const uint64_t runtimeConfigValuesSize = sizeof(Dvr2RuntimeConfigValuesHeader) +
-            static_cast<uint64_t>(runtimeConfigValueRecords.size()) * sizeof(Dvr2RuntimeConfigValueRecord);
-        nextOffset += runtimeConfigValuesSize;
-        sections.push_back({static_cast<uint32_t>(Dvr2SectionType::RuntimeConfigSchema), 1, runtimeConfigSchemaOffset, runtimeConfigSchemaSize});
-        sections.push_back({static_cast<uint32_t>(Dvr2SectionType::RuntimeConfigValues), 1, runtimeConfigValuesOffset, runtimeConfigValuesSize});
+        nextOffset += runtimeConfigSections.ValuesSize();
+        sections.push_back({static_cast<uint32_t>(Dvr2SectionType::RuntimeConfigSchema), 1, runtimeConfigSchemaOffset, runtimeConfigSections.SchemaSize()});
+        sections.push_back({static_cast<uint32_t>(Dvr2SectionType::RuntimeConfigValues), 1, runtimeConfigValuesOffset, runtimeConfigSections.ValuesSize()});
     }
 
     Dvr2MetaSection meta{};
@@ -475,13 +487,160 @@ bool WriteBinaryFile(const std::filesystem::path& filePath,
         if (!dynamicSchemaRecords.empty() && !WriteAll(out, dynamicSchemaRecords.data(), dynamicSchemaRecords.size() * sizeof(Ipc::DebugFieldSchemaWire))) return false;
         if (!dynamicValuesBlob.empty() && !WriteAll(out, dynamicValuesBlob.data(), dynamicValuesBlob.size())) return false;
     }
-    if (hasRuntimeConfig) {
-        if (!WriteAll(out, &runtimeConfigSchemaHeader, sizeof(runtimeConfigSchemaHeader))) return false;
-        if (!runtimeConfigFieldRecords.empty() && !WriteAll(out, runtimeConfigFieldRecords.data(), runtimeConfigFieldRecords.size() * sizeof(Dvr2RuntimeConfigFieldDef))) return false;
-        if (!WriteAll(out, &runtimeConfigValuesHeader, sizeof(runtimeConfigValuesHeader))) return false;
-        if (!runtimeConfigValueRecords.empty() && !WriteAll(out, runtimeConfigValueRecords.data(), runtimeConfigValueRecords.size() * sizeof(Dvr2RuntimeConfigValueRecord))) return false;
+    if (hasRuntimeConfig && !WriteRuntimeConfigSections(out, runtimeConfigSections)) return false;
+    return true;
+}
+
+SessionWriter::~SessionWriter() {
+    Abort();
+}
+
+bool SessionWriter::Begin(const std::filesystem::path& finalPath) {
+    if (m_active) return false;
+    m_finalPath = finalPath;
+    m_partialPath = finalPath;
+    m_partialPath += ".partial";
+    m_stream.open(m_partialPath, std::ios::binary | std::ios::trunc);
+    if (!m_stream.is_open()) return false;
+    m_index.clear();
+    m_flags = DvrFmt::kDvrFlagHasStylusDiagnostics | DvrFmt::kDvrFlagHasStructuredSuffix;
+    m_active = true;
+    return true;
+}
+
+bool SessionWriter::Append(const DvrFrameSlot& frame) {
+    if (!m_active) return false;
+    const Dvr2FramePayload payload = MakeFramePayload(frame);
+    if (!WriteAll(m_stream, &payload, sizeof(payload))) {
+        Abort();
+        return false;
+    }
+    Dvr2IndexEntry entry{};
+    entry.timestamp = payload.frame.timestamp;
+    entry.receiveSystemEpochUs = payload.frame.receiveSystemEpochUs;
+    entry.frameSize = static_cast<uint32_t>(sizeof(Dvr2FramePayload));
+    m_index.push_back(entry);
+    if (payload.frame.receiveSystemEpochUs != 0) {
+        m_flags |= DvrFmt::kDvrFlagHasReceiveSystemEpochUs;
     }
     return true;
+}
+
+bool SessionWriter::Finalize(const RuntimeConfigSnapshot* runtimeConfig) {
+    if (!m_active) return false;
+    m_stream.close();
+    m_active = false;
+    if (m_index.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(m_partialPath, ec);
+        return false;
+    }
+
+    const RuntimeConfigSections runtimeConfigSections = MakeRuntimeConfigSections(runtimeConfig);
+    uint32_t flags = m_flags;
+    if (runtimeConfigSections.present) {
+        flags |= DvrFmt::kDvrFlagHasRuntimeConfig;
+    }
+
+    const auto frameSchema = DvrFmt::BuildFrameSchema();
+    const uint32_t frameSchemaHash = DvrFmt::ComputeFieldSchemaHash(frameSchema);
+    Dvr2FrameSchemaHeader frameSchemaHeader{};
+    frameSchemaHeader.schemaHash = frameSchemaHash;
+    frameSchemaHeader.fieldCount = static_cast<uint32_t>(frameSchema.size());
+    frameSchemaHeader.fieldRecordSize = sizeof(Dvr2FieldDef);
+    frameSchemaHeader.frameRecordSize = sizeof(Dvr2FramePayload);
+
+    Dvr2FileHeader header{};
+    const auto magic = MakeDvr2Magic();
+    std::copy(magic.begin(), magic.end(), header.magic);
+    header.formatVersion = static_cast<uint16_t>(DvrFmt::kCurrentDvrFormatVersion);
+    header.sectionCount = 4u + (runtimeConfigSections.present ? 2u : 0u);
+    header.tocOffset = sizeof(Dvr2FileHeader);
+    header.flags = flags;
+
+    const uint64_t tocSize = static_cast<uint64_t>(header.sectionCount) * sizeof(Dvr2SectionEntry);
+    const uint64_t metaOffset = header.tocOffset + tocSize;
+    const uint64_t metaSize = sizeof(Dvr2MetaSection);
+    const uint64_t frameSchemaOffset = metaOffset + metaSize;
+    const uint64_t frameSchemaSize = sizeof(Dvr2FrameSchemaHeader) + static_cast<uint64_t>(frameSchema.size()) * sizeof(Dvr2FieldDef);
+    const uint64_t indexOffset = frameSchemaOffset + frameSchemaSize;
+    const uint64_t indexSize = static_cast<uint64_t>(m_index.size()) * sizeof(Dvr2IndexEntry);
+    const uint64_t framesOffset = indexOffset + indexSize;
+    const uint64_t framesSize = static_cast<uint64_t>(m_index.size()) * sizeof(Dvr2FramePayload);
+    uint64_t nextOffset = framesOffset + framesSize;
+
+    std::vector<Dvr2SectionEntry> sections;
+    sections.reserve(header.sectionCount);
+    sections.push_back({static_cast<uint32_t>(Dvr2SectionType::Meta), 1, metaOffset, metaSize});
+    sections.push_back({static_cast<uint32_t>(Dvr2SectionType::FrameSchema), 1, frameSchemaOffset, frameSchemaSize});
+    sections.push_back({static_cast<uint32_t>(Dvr2SectionType::Index), 1, indexOffset, indexSize});
+    sections.push_back({static_cast<uint32_t>(Dvr2SectionType::Frames), 1, framesOffset, framesSize});
+    if (runtimeConfigSections.present) {
+        const uint64_t schemaOffset = nextOffset;
+        nextOffset += runtimeConfigSections.SchemaSize();
+        const uint64_t valuesOffset = nextOffset;
+        nextOffset += runtimeConfigSections.ValuesSize();
+        sections.push_back({static_cast<uint32_t>(Dvr2SectionType::RuntimeConfigSchema), 1, schemaOffset, runtimeConfigSections.SchemaSize()});
+        sections.push_back({static_cast<uint32_t>(Dvr2SectionType::RuntimeConfigValues), 1, valuesOffset, runtimeConfigSections.ValuesSize()});
+    }
+
+    Dvr2MetaSection meta{};
+    meta.frameCount = static_cast<uint32_t>(m_index.size());
+    meta.flags = flags;
+    meta.frameRecordSize = sizeof(Dvr2FramePayload);
+    meta.frameSchemaHash = frameSchemaHash;
+
+    for (size_t i = 0; i < m_index.size(); ++i) {
+        m_index[i].frameOffset = framesOffset + static_cast<uint64_t>(i) * sizeof(Dvr2FramePayload);
+    }
+
+    bool ok = false;
+    {
+        std::ofstream out(m_finalPath, std::ios::binary | std::ios::trunc);
+        std::ifstream partial(m_partialPath, std::ios::binary);
+        ok = out.is_open() && partial.is_open() &&
+             WriteAll(out, &header, sizeof(header)) &&
+             WriteAll(out, sections.data(), sections.size() * sizeof(Dvr2SectionEntry)) &&
+             WriteAll(out, &meta, sizeof(meta)) &&
+             WriteAll(out, &frameSchemaHeader, sizeof(frameSchemaHeader)) &&
+             WriteAll(out, frameSchema.data(), frameSchema.size() * sizeof(Dvr2FieldDef)) &&
+             WriteAll(out, m_index.data(), m_index.size() * sizeof(Dvr2IndexEntry));
+        if (ok) {
+            std::vector<char> buffer(1 << 20);
+            uint64_t copied = 0;
+            while (ok && copied < framesSize) {
+                const auto chunk = static_cast<std::streamsize>(
+                    std::min<uint64_t>(buffer.size(), framesSize - copied));
+                partial.read(buffer.data(), chunk);
+                ok = partial.gcount() == chunk;
+                if (ok) {
+                    out.write(buffer.data(), chunk);
+                    ok = static_cast<bool>(out);
+                }
+                copied += static_cast<uint64_t>(chunk);
+            }
+        }
+        if (ok && runtimeConfigSections.present) {
+            ok = WriteRuntimeConfigSections(out, runtimeConfigSections);
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(m_partialPath, ec);
+    m_index.clear();
+    return ok;
+}
+
+void SessionWriter::Abort() {
+    if (m_stream.is_open()) {
+        m_stream.close();
+    }
+    if (m_active || !m_partialPath.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(m_partialPath, ec);
+    }
+    m_index.clear();
+    m_active = false;
 }
 
 } // namespace Dvr
