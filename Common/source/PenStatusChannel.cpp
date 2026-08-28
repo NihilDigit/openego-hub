@@ -162,6 +162,12 @@ uint32_t PackFlags(const State& s) {
     if (s.inputSuppressed)    f |= kFlagInputSuppressed;
     if (s.hasKbdDetachSupport) f |= kFlagHasKbdDetachSupport;
     if (s.kbdDetachSupport)    f |= kFlagKbdDetachSupport;
+    if (s.hasVendorServices)      f |= kFlagHasVendorServices;
+    if (s.vendorServicesDisabled) f |= kFlagVendorServicesDisabled;
+    if (s.hasChargeLimit)     f |= kFlagHasChargeLimit;
+    if (s.chargeLimitManual)  f |= kFlagChargeLimitManual;
+    if (s.vendorServicesRunning) f |= kFlagVendorServicesRunning;
+    if (s.vendorServicesAllRunning) f |= kFlagVendorServicesAllRunning;
     if (s.hasPenFirmware) f |= kFlagHasPenFirmware;
     if (s.hasPenHardware) f |= kFlagHasPenHardware;
     if (s.hasPenSerial)   f |= kFlagHasPenSerial;
@@ -192,6 +198,12 @@ void UnpackFlags(uint32_t f, State& s) {
     s.inputSuppressed    = (f & kFlagInputSuppressed) != 0;
     s.hasKbdDetachSupport = (f & kFlagHasKbdDetachSupport) != 0;
     s.kbdDetachSupport    = (f & kFlagKbdDetachSupport) != 0;
+    s.hasVendorServices      = (f & kFlagHasVendorServices) != 0;
+    s.vendorServicesDisabled = (f & kFlagVendorServicesDisabled) != 0;
+    s.hasChargeLimit    = (f & kFlagHasChargeLimit) != 0;
+    s.chargeLimitManual = (f & kFlagChargeLimitManual) != 0;
+    s.vendorServicesRunning = (f & kFlagVendorServicesRunning) != 0;
+    s.vendorServicesAllRunning = (f & kFlagVendorServicesAllRunning) != 0;
     s.hasPenFirmware = (f & kFlagHasPenFirmware) != 0;
     s.hasPenHardware = (f & kFlagHasPenHardware) != 0;
     s.hasPenSerial   = (f & kFlagHasPenSerial) != 0;
@@ -333,6 +345,7 @@ bool Writer::Publish(const State& state) {
     staged.touchProvider = static_cast<uint8_t>(state.touchProvider);
     staged.providerError = state.providerError;
     staged.kbdBatteryLevel = state.kbdBatteryLevel;
+    staged.chargeLimit = state.chargeLimit;
     staged.notificationKind = static_cast<uint8_t>(state.notificationKind);
     staged.updatedAtUnixMs = NowUnixMs();
     std::strncpy(staged.modelName, state.modelName, sizeof(staged.modelName) - 1);
@@ -450,6 +463,7 @@ bool Reader::Read(State& out) const {
             candidate.touchProvider = static_cast<TouchProviderState>(copy.touchProvider);
             candidate.providerError = copy.providerError;
             candidate.kbdBatteryLevel = copy.kbdBatteryLevel;
+            candidate.chargeLimit = copy.chargeLimit;
             candidate.modelId = copy.modelId;
             candidate.notificationSequence = copy.notificationSequence;
             candidate.notificationKind = static_cast<NotificationKind>(copy.notificationKind);

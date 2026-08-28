@@ -44,24 +44,10 @@ ego_add_device_test(DevicePenUsbTransportWin32LifecycleTest Device.PenUsb.Transp
     "${DEVICE_ROOT}/tests/btmcu/PenUsbTransportWin32LifecycleTest.cpp")
 target_link_libraries(DevicePenUsbTransportWin32LifecycleTest PRIVATE Device Common)
 
-ego_add_device_test(DeviceVhfReporterStylusPacketTest Device.Vhf.StylusPacket
-    "Device;Device.Unit;Device.Vhf;NoHardware" 10
-    "${DEVICE_ROOT}/tests/vhf/VhfReporterStylusPacketTest.cpp")
-target_link_libraries(DeviceVhfReporterStylusPacketTest PRIVATE Solvers Common)
-
-ego_add_device_test(DeviceVhfReporterTouchPacketTest Device.Vhf.TouchPacket
-    "Device;Device.Unit;Device.Vhf;NoHardware" 10
-    "${DEVICE_ROOT}/tests/vhf/VhfReporterTouchPacketTest.cpp")
-target_link_libraries(DeviceVhfReporterTouchPacketTest PRIVATE Solvers Common)
-
 ego_add_device_test(DeviceRuntimeSystemPowerPolicyTest Device.Runtime.SystemPowerPolicy
     "Device;Device.Runtime;Device.Win32;Timing;NoHardware" 20
     "${DEVICE_ROOT}/tests/runtime/DeviceRuntimeSystemPowerPolicyTest.cpp")
 target_link_libraries(DeviceRuntimeSystemPowerPolicyTest PRIVATE Device Common)
-# DeviceRuntime embeds the whole touch/stylus pipeline by value (heatmap matrices,
-# tracker state, zone buffers), which overflows MSVC's 1 MiB default stack when the
-# test constructs one as a local. lld-link defaults higher, so this only bites on cl.
-ego_device_test_big_stack(DeviceRuntimeSystemPowerPolicyTest)
 set_tests_properties(Device.Runtime.SystemPowerPolicy PROPERTIES
     RESOURCE_LOCK DeviceRuntimeTiming
 )

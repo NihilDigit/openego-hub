@@ -23,8 +23,36 @@
                 <Setter Property="BorderThickness" Value="1" />
             </Style>
 
+            <!-- 只有一两行文字、没有右侧控件的卡片。SettingsCardStyle 的 MinHeight 是给
+                 「图标 + 标题 + 描述 + 控件」那种行准备的，用在纯文本上会在下方空出半张
+                 卡片，字还小，看起来像没加载完。 -->
+            <Style x:Key="SettingsCardCompactStyle" TargetType="Border"
+                   BasedOn="{StaticResource SettingsCardStyle}">
+                <Setter Property="MinHeight" Value="0" />
+                <Setter Property="Padding" Value="16,12" />
+            </Style>
+
             <Style x:Key="SettingsGroupHeaderStyle" TargetType="TextBlock"
                    BasedOn="{StaticResource BodyStrongTextBlockStyle}">
+                <Setter Property="Margin" Value="4,0,0,4" />
+            </Style>
+
+            <!-- 带图标的分组标题，用在成段的规格列表上（设备页与电池页）。图标本身不表达
+                 新信息，作用是让几段并列的规格在扫读时有落点——纯文字标题连着几张卡片，
+                 视线找不到分界。
+                 这两个样式配合 GroupHeaderRowStyle 使用，三者要一起改。 -->
+            <Style x:Key="SpecGroupIconStyle" TargetType="FontIcon">
+                <Setter Property="FontSize" Value="15" />
+                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Setter Property="VerticalAlignment" Value="Center" />
+            </Style>
+            <Style x:Key="SpecGroupTitleStyle" TargetType="TextBlock"
+                   BasedOn="{StaticResource BodyStrongTextBlockStyle}">
+                <Setter Property="VerticalAlignment" Value="Center" />
+            </Style>
+            <Style x:Key="GroupHeaderRowStyle" TargetType="StackPanel">
+                <Setter Property="Orientation" Value="Horizontal" />
+                <Setter Property="Spacing" Value="8" />
                 <Setter Property="Margin" Value="4,0,0,4" />
             </Style>
 
@@ -65,15 +93,16 @@
             Grid.Row="0"
             Height="48"
             Title="OpenEGo Hub">
-            <!-- 标题栏不放图标。TitleBar.IconSource 只吃得下 FontIconSource：换成
-                 PathIconSource 之后窗口一显示就在 Microsoft.UI.Xaml 里抛 0xC000027B，
-                 内联几何、走资源查找都一样。品牌标记改在关于页露出，任务栏与 Alt+Tab
-                 的图标由 App.rc 里的 .ico 提供。 -->
+            <!-- 图标在代码里设，见 SetTitleBarIconAsync：图片嵌在 exe 的 RCDATA 里，
+                 XAML 这边没法直接引。
+                 不要改用 PathIconSource——那会让窗口一显示就抛 0xC000027B，是
+                 microsoft-ui-xaml#9784，内联几何和资源查找都一样。 -->
         </TitleBar>
 
-        <!-- 三页共用一个 NavigationView，内容用 Visibility 切换而不是 Frame 导航：
-             Frame 需要每页各自是一个 WinRT 类型，要为三个页面分别加 .idl 条目和生成代码。
-             这个程序总共就三页且都很小，多出来的那层类型没有换来任何东西。 -->
+        <!-- 六页共用一个 NavigationView，内容用 Visibility 切换而不是 Frame 导航：
+             Frame 要求每页各自是一个 WinRT 类型，得为每一页加 .idl 条目和生成代码，而页面之间
+             要共享的状态（托盘连接、服务是否就绪）又都挂在这个窗口上，拆成独立类型之后还得
+             再把它们传回去。页数变多也没有改变这笔账。 -->
         <NavigationView
             x:Name="Nav"
             Grid.Row="1"
@@ -83,14 +112,29 @@
             OpenPaneLength="180"
             SelectionChanged="NavSelectionChanged">
             <NavigationView.MenuItems>
-                <NavigationViewItem x:Name="NavDevices" Content="设备" Tag="devices" IsSelected="True">
+                <NavigationViewItem x:Name="NavDevices" Content="配件" Tag="devices" IsSelected="True">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE772;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="NavSettings" Content="设置" Tag="settings">
+                <NavigationViewItem x:Name="NavBattery" Content="电池" Tag="battery">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE713;" />
+                        <FontIcon Glyph="&#xE83E;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavScreen" Content="屏幕" Tag="screen">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE7F4;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavGeneral" Content="服务" Tag="general">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE9F5;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavDevice" Content="设备" Tag="device">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE977;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>
@@ -114,13 +158,30 @@
                 <!-- InfoBar 播报的是整个程序范围的状态（托盘未运行、切换失败、正在退出），
                      并且会决定设置页控件是否可用。放在滚动区之外、导航内容区之上，
                      换页和滚动都不会让它消失。 -->
-                <InfoBar
-                    x:Name="StatusInfoBar"
-                    Grid.Row="0"
-                    Margin="24,0,24,4"
-                    IsOpen="False"
-                    IsClosable="False"
-                    Severity="Informational" />
+                <StackPanel Grid.Row="0" Spacing="4">
+                    <InfoBar
+                        x:Name="StatusInfoBar"
+                        Margin="24,0,24,0"
+                        IsOpen="False"
+                        IsClosable="False"
+                        Severity="Informational" />
+                    <!-- 华为服务还开着时的提醒。跨页面常驻，因为这件事与用户当前在看哪一页
+                         无关；关掉一次就永久不再出现——他已经表达了「我不想禁用」，反复问
+                         是骚扰。 -->
+                    <InfoBar
+                        x:Name="VendorHintBar"
+                        Margin="24,0,24,4"
+                        IsOpen="False"
+                        IsClosable="True"
+                        Severity="Informational"
+                        Title="华为后台服务仍在运行"
+                        Message="触控、手写笔、键盘与充电控制已由本程序接管，这些服务可以停用。"
+                        CloseButtonClick="VendorHintDismissed">
+                        <InfoBar.ActionButton>
+                            <Button Content="去处理" Click="VendorHintActionClicked" />
+                        </InfoBar.ActionButton>
+                    </InfoBar>
+                </StackPanel>
 
                 <!-- ── 设备页 ── -->
                 <ScrollViewer
@@ -140,13 +201,16 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <!-- 设置项跨满两列，摆在两张卡片下面。窄窗口时第二列宽度为 0，
+                                 跨列不影响它，仍然是整宽一行。 -->
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
                         <!-- 笔 -->
                         <StackPanel x:Name="PenGroup" Grid.Row="0" Grid.Column="0" Spacing="4"
                                     VerticalAlignment="Top">
                             <TextBlock Text="笔" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardStyle}" Padding="16">
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
                                 <StackPanel Spacing="12">
                                     <Grid ColumnSpacing="16">
                                         <Grid.ColumnDefinitions>
@@ -213,7 +277,7 @@
                         <StackPanel x:Name="KeyboardGroup" Grid.Row="1" Grid.Column="0" Spacing="4"
                                     VerticalAlignment="Top">
                             <TextBlock Text="键盘" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardStyle}" Padding="16">
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
                                 <StackPanel Spacing="12">
                                     <Grid ColumnSpacing="16">
                                         <Grid.ColumnDefinitions>
@@ -254,12 +318,534 @@
                                 </StackPanel>
                             </Border>
                         </StackPanel>
+
+                        <!-- 笔与键盘的设置项。放在两张状态卡片下面而不是单独一页：它们要改的
+                             正是上面这两个设备，隔一页去调整会让人先怀疑自己找错了地方。 -->
+                        <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Spacing="24">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="笔" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="&#xE70F;" Style="{StaticResource SettingsRowIconStyle}" />
+                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                            <TextBlock Text="双击行为" TextWrapping="Wrap" />
+                                            <TextBlock
+                                                Text="选择连按两次笔侧键时执行的操作。"
+                                                Style="{StaticResource SettingsDescriptionStyle}" />
+                                        </StackPanel>
+                                        <ComboBox
+                                            x:Name="PenModeSelector"
+                                            Grid.Column="2"
+                                            MinWidth="180"
+                                            VerticalAlignment="Center"
+                                            SelectionChanged="PenModeSelectionChanged">
+                                            <ComboBoxItem Content="遵循系统笔设置" />
+                                            <ComboBoxItem Content="切换书写与橡皮擦" />
+                                        </ComboBox>
+                                    </Grid>
+                                </Border>
+                                <Border x:Name="OneNoteCompatibilityRow" Style="{StaticResource SettingsCardStyle}">
+                                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="&#xE70B;" Style="{StaticResource SettingsRowIconStyle}" />
+                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                            <TextBlock Text="OneNote 兼容" TextWrapping="Wrap" />
+                                            <TextBlock
+                                                x:Name="OneNoteCompatibilityStatusText"
+                                                Text="切换工具时同步 OneNote 的绘图选项。"
+                                                Style="{StaticResource SettingsDescriptionStyle}" />
+                                        </StackPanel>
+                                        <ToggleSwitch
+                                            x:Name="OneNoteCompatibilityToggle"
+                                            Grid.Column="2"
+                                            MinWidth="0"
+                                            OnContent=""
+                                            OffContent=""
+                                            Margin="0,0,-12,0"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            Toggled="OneNoteCompatibilityToggled" />
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="键盘" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="&#xE765;" Style="{StaticResource SettingsRowIconStyle}" />
+                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                            <TextBlock Text="分离后保持无线连接" TextWrapping="Wrap" />
+                                            <TextBlock
+                                                x:Name="KeyboardStatusText"
+                                                Text="键盘与主机分离后继续通过无线方式使用。"
+                                                Style="{StaticResource SettingsDescriptionStyle}" />
+                                        </StackPanel>
+                                        <ToggleSwitch
+                                            x:Name="KeyboardWirelessToggle"
+                                            Grid.Column="2"
+                                            MinWidth="0"
+                                            OnContent=""
+                                            OffContent=""
+                                            Margin="0,0,-12,0"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            Toggled="KeyboardWirelessToggled" />
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </StackPanel>
                     </Grid>
                 </ScrollViewer>
 
-                <!-- ── 设置页 ── -->
+                <!-- ── 电池页 ── -->
                 <ScrollViewer
-                    x:Name="SettingsPage"
+                    x:Name="BatteryPage"
+                    Grid.Row="1"
+                    Visibility="Collapsed"
+                    VerticalScrollBarVisibility="Auto"
+                    HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Padding="24,8,24,24" Spacing="24">
+
+                        <!-- 当前状态。电量与剩余时间同属高频项，一起刷新。
+                             充放电方向看功率的符号，不看「是否接着电源」：充电上限生效时机器
+                             正处在插着电却在放电的状态，用接电源反推会一直显示成充电中。 -->
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="8">
+                                    <StackPanel Orientation="Horizontal" Spacing="12"
+                                                VerticalAlignment="Center">
+                                        <TextBlock
+                                            x:Name="BatteryPercentText"
+                                            Text="—"
+                                            Style="{ThemeResource TitleLargeTextBlockStyle}" />
+                                        <TextBlock
+                                            x:Name="BatteryStateText"
+                                            Text="正在读取"
+                                            VerticalAlignment="Bottom"
+                                            Margin="0,0,0,6"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ProgressBar
+                                        x:Name="BatteryLevelBar"
+                                        Minimum="0"
+                                        Maximum="100"
+                                        Value="0" />
+                                    <TextBlock
+                                        x:Name="BatteryTimeText"
+                                        Style="{StaticResource SettingsDescriptionStyle}" />
+                                </StackPanel>
+                                <FontIcon
+                                    Grid.Column="1"
+                                    Glyph="&#xE83F;"
+                                    FontSize="32"
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                        </Border>
+
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="充电" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- EC48 是 LightningBolt，与下面那条固定上限区分开。 -->
+                                    <FontIcon Glyph="&#xEC48;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="智能充电" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            Text="由系统按使用习惯自动调整充电上限。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        x:Name="SmartChargeToggle"
+                                        Grid.Column="2"
+                                        MinWidth="0"
+                                        OnContent=""
+                                        OffContent=""
+                                        Margin="0,0,-12,0"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        Toggled="SmartChargeToggled" />
+                                </Grid>
+                            </Border>
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- E83E 是 BatteryCharging。 -->
+                                    <FontIcon Glyph="&#xE83E;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="充电上限" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="ChargeLimitStatusText"
+                                            Text="长期插电时限制充电上限可以减缓电池老化。电量低于上限 5 个百分点时恢复充电。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <StackPanel
+                                        Grid.Column="2"
+                                        Orientation="Horizontal"
+                                        Spacing="8"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center">
+                                        <Slider
+                                            x:Name="ChargeLimitSlider"
+                                            Width="160"
+                                            Minimum="50"
+                                            Maximum="100"
+                                            StepFrequency="5"
+                                            TickFrequency="10"
+                                            TickPlacement="Outside"
+                                            VerticalAlignment="Center"
+                                            ValueChanged="ChargeLimitChanged" />
+                                        <TextBlock
+                                            x:Name="ChargeLimitValueText"
+                                            Text="100%"
+                                            MinWidth="44"
+                                            VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- 健康与标识都是低频项，打开面板读一次即可，不随电量刷新。 -->
+                        <StackPanel Spacing="4">
+                            <StackPanel Style="{StaticResource GroupHeaderRowStyle}">
+                                <FontIcon Glyph="&#xE83E;" Style="{StaticResource SpecGroupIconStyle}" />
+                                <TextBlock Text="健康" Style="{StaticResource SpecGroupTitleStyle}" />
+                            </StackPanel>
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <!-- 四项排成两列。这几个值都很短（81.8%、233 次、36.9 Wh、
+                                     8.51 V），一项一行会让整页高出一屏、多出一段无谓的滚动，
+                                     而两列并排扫读反而更快。 -->
+                                <Grid ColumnSpacing="16" RowSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="健康度"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="BatteryHealthText"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Grid.Row="0" Grid.Column="2" Text="电压"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="0" Grid.Column="3" x:Name="BatteryVoltageText"
+                                               TextWrapping="Wrap" />
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="循环次数"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="BatteryCyclesText"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Grid.Row="1" Grid.Column="2" Text="容量"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="3" x:Name="BatteryCapacityText"
+                                               TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+
+                        <StackPanel Spacing="4">
+                            <StackPanel Style="{StaticResource GroupHeaderRowStyle}">
+                                <FontIcon Glyph="&#xE946;" Style="{StaticResource SpecGroupIconStyle}" />
+                                <TextBlock Text="标识" Style="{StaticResource SpecGroupTitleStyle}" />
+                            </StackPanel>
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <!-- 型号占整行，制造商与序列号并排：后两者都很短
+                                     （SUNWODA、28978），各占一行只是在拉高页面。 -->
+                                <Grid ColumnSpacing="16" RowSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="型号"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="3"
+                                               x:Name="BatteryModelText" TextWrapping="Wrap" />
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="制造商"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="BatteryVendorText"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Grid.Row="1" Grid.Column="2" Text="序列号"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="3" x:Name="BatterySerialText"
+                                               IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- ── 屏幕页 ── -->
+                <ScrollViewer
+                    x:Name="ScreenPage"
+                    Grid.Row="1"
+                    Visibility="Collapsed"
+                    VerticalScrollBarVisibility="Auto"
+                    HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Padding="24,8,24,24" Spacing="24">
+
+                        <!-- 色彩对照。照片看整体观感，灰阶看有没有偏色——中性色上最藏不住，
+                             一条灰阶比一堆彩色块更能说明问题。
+                             照片本身不是校色依据：它只能给出「切过去变了、往哪个方向变」，
+                             要判断哪一档更准得靠色度计。 -->
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="对照" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <StackPanel Spacing="8">
+                                    <Border CornerRadius="4">
+                                        <Border.Clip>
+                                            <!-- Image 自己不裁剪圆角，得靠外层的 Clip。矩形尺寸
+                                                 在 SizeChanged 里跟着实际宽度更新。 -->
+                                            <RectangleGeometry x:Name="ColorReferenceClip" />
+                                        </Border.Clip>
+                                        <Image
+                                            x:Name="ColorReferenceImage"
+                                            Height="180"
+                                            Stretch="UniformToFill"
+                                            SizeChanged="ColorReferenceSizeChanged" />
+                                    </Border>
+                                    <Grid Height="24" ColumnSpacing="4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <!-- 纯白与纯黑留在两端：色温和护眼在这两块上最容易辨认。 -->
+                                        <Border Grid.Column="0" CornerRadius="4" Background="#FFFFFF" />
+                                        <Border Grid.Column="1" CornerRadius="4" Background="#C8C8C8" />
+                                        <Border Grid.Column="2" CornerRadius="4" Background="#969696" />
+                                        <Border Grid.Column="3" CornerRadius="4" Background="#646464" />
+                                        <Border Grid.Column="4" CornerRadius="4" Background="#323232" />
+                                        <Border Grid.Column="5" CornerRadius="4" Background="#000000" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="色彩" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- E790 是 Color，描边调色盘，与本页其余图标同为描边字形。 -->
+                                    <FontIcon Glyph="&#xE790;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="色域" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="ColorModeStatusText"
+                                            Text="套用屏幕的出厂色彩校准，仅对内置屏幕生效。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ComboBox
+                                        x:Name="ColorModeCombo"
+                                        Grid.Column="2"
+                                        MinWidth="140"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        SelectionChanged="ColorModeChanged">
+                                        <!-- 三项与本机 config\icc\Gaokun3 下的三个 ICC 一一对应。
+                                             Native 不套任何 LUT，是面板的原生色域，不是「复位」。 -->
+                                        <ComboBoxItem Content="Native" />
+                                        <ComboBoxItem Content="sRGB" />
+                                        <ComboBoxItem Content="Display P3" />
+                                    </ComboBox>
+                                </Grid>
+                            </Border>
+
+                            <!-- 色温与下面两项走同一个硬件通道（PCC），三者的增益合成后一次
+                                 下发。色域走的是 3D LUT，与它们互不干扰。 -->
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <!-- 开关与滑条分成上下两行。滑条上没有「关闭」这个位置——最左端
+                                     是 2000K，是一个很暖的值而不是关掉，所以关闭得另给一个开关。 -->
+                                <StackPanel Spacing="12">
+                                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <!-- E793 是 Brightness，用来指代冷暖。 -->
+                                        <FontIcon Glyph="&#xE793;" Style="{StaticResource SettingsRowIconStyle}" />
+                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                            <TextBlock Text="色温" TextWrapping="Wrap" />
+                                            <TextBlock
+                                                x:Name="ColorTemperatureStatusText"
+                                                Text="调节屏幕的冷暖。数值越低画面越暖。"
+                                                Style="{StaticResource SettingsDescriptionStyle}" />
+                                        </StackPanel>
+                                        <ToggleSwitch
+                                            x:Name="ColorTemperatureToggle"
+                                            Grid.Column="2"
+                                            MinWidth="0"
+                                            OnContent=""
+                                            OffContent=""
+                                            Margin="0,0,-12,0"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            Toggled="ColorTemperatureToggled" />
+                                    </Grid>
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" MinWidth="28" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" MinWidth="56" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <!-- 两端标注冷暖而不是标数字：开尔文值与观感的对应关系
+                                             不是常识，数值本身已经在右侧显示了。 -->
+                                        <TextBlock Text="暖" VerticalAlignment="Center"
+                                                   Style="{StaticResource SettingsDescriptionStyle}" />
+                                        <!-- 步长 500K：厂商用的是一张九点标定表，点与点之间本来
+                                             就是插值，再细的刻度并不对应更多真实数据。 -->
+                                        <Slider
+                                            x:Name="ColorTemperatureSlider"
+                                            Grid.Column="1"
+                                            Minimum="2000"
+                                            Maximum="10000"
+                                            StepFrequency="500"
+                                            TickFrequency="2000"
+                                            TickPlacement="Outside"
+                                            VerticalAlignment="Center"
+                                            ValueChanged="ColorTemperatureChanged" />
+                                        <TextBlock
+                                            x:Name="ColorTemperatureValueText"
+                                            Grid.Column="2"
+                                            Text="关闭"
+                                            VerticalAlignment="Center"
+                                            HorizontalAlignment="Right" />
+                                        <!-- 重置回中性点，不是关闭——关闭有上面那个开关。 -->
+                                        <Button
+                                            x:Name="ColorTemperatureResetButton"
+                                            Grid.Column="3"
+                                            Padding="6"
+                                            MinWidth="0"
+                                            Background="Transparent"
+                                            BorderThickness="0"
+                                            VerticalAlignment="Center"
+                                            ToolTipService.ToolTip="重置为 6500K"
+                                            Click="ColorTemperatureResetClicked">
+                                            <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                                        </Button>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- E7B3 是 RedEye。 -->
+                                    <FontIcon Glyph="&#xE7B3;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="护眼模式" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            Text="减弱蓝光。此模式下屏幕偏黄为正常现象。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        x:Name="EyeComfortToggle"
+                                        Grid.Column="2"
+                                        MinWidth="0"
+                                        OnContent=""
+                                        OffContent=""
+                                        Margin="0,0,-12,0"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        Toggled="EyeComfortToggled" />
+                                </Grid>
+                            </Border>
+
+                            <!--
+                                TODO 自然色彩暂时形同虚设，本机的环境光传感器读不出持续数据。
+                                tcs3701 在驱动初始化时上报一帧，之后不再采样：遮光无反应，冷启动
+                                无用，WinRT 与 COM 两条栈拿到的都是同一份陈旧缓存。已排除订阅方式、
+                                上报间隔、传感器选择、隐私权限、厂商服务与厂商用户态进程，问题在
+                                高通传感器驱动一侧，够不着。诊断入口是 GaokunDisplay 的 sensor-probe 命令。
+                                当初「实测 10143K」不足为凭——那个色温相当于晴天蓝天，不像室内读数，
+                                多半也是初始化的那一帧；当时看到的颜色变化只证明 PCC 下发通道是通的。
+                            -->
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- E706 是 Brightness 的实心变体，这里用 EC46（Sunny）表示环境光。 -->
+                                    <FontIcon Glyph="&#xE706;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="自然色彩显示" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="NaturalColorStatusText"
+                                            Text="根据环境光自动调整屏幕色调。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        x:Name="NaturalColorToggle"
+                                        Grid.Column="2"
+                                        MinWidth="0"
+                                        OnContent=""
+                                        OffContent=""
+                                        Margin="0,0,-12,0"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        Toggled="NaturalColorToggled" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- ── 通用页 ── -->
+                <ScrollViewer
+                    x:Name="GeneralPage"
                     Grid.Row="1"
                     Visibility="Collapsed"
                     VerticalScrollBarVisibility="Auto"
@@ -274,9 +860,11 @@
                              这几个值必须写在控件上。同样的设置放进 Style 的 Setter 里，MinWidth 不会生效，
                              实测开关仍按 154 排布。 -->
 
-                        <!-- 触控 -->
+                        <!-- 系统 -->
+                        <!-- 华为服务。放在最前：这一页的其余各项都是本程序自己的开关，只有
+                             这一条动的是系统上别人的东西，代价也最大。 -->
                         <StackPanel Spacing="4">
-                            <TextBlock Text="触控" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <TextBlock Text="华为服务" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardStyle}">
                                 <Grid ColumnSpacing="16" VerticalAlignment="Center">
                                     <Grid.ColumnDefinitions>
@@ -286,14 +874,14 @@
                                     </Grid.ColumnDefinitions>
                                     <FontIcon Glyph="&#xE7C9;" Style="{StaticResource SettingsRowIconStyle}" />
                                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                        <TextBlock Text="EGoTouchRev 触控" TextWrapping="Wrap" />
+                                        <TextBlock Text="禁用华为后台服务" TextWrapping="Wrap" />
                                         <TextBlock
-                                            x:Name="ProviderStatusText"
-                                            Text="正在确认触控提供方…"
+                                            x:Name="VendorServicesStatusText"
+                                            Text="正在检查…"
                                             Style="{StaticResource SettingsDescriptionStyle}" />
                                     </StackPanel>
                                     <ToggleSwitch
-                                        x:Name="ProviderToggle"
+                                        x:Name="VendorServicesToggle"
                                         Grid.Column="2"
                                         MinWidth="0"
                                         OnContent=""
@@ -301,103 +889,24 @@
                                         Margin="0,0,-12,0"
                                         HorizontalAlignment="Right"
                                         VerticalAlignment="Center"
-                                        Toggled="ProviderToggled" />
+                                        Toggled="VendorServicesToggled" />
                                 </Grid>
                             </Border>
+                            <!-- 只在启动类型已禁用、进程却还活着时出现。正常路径下停用会
+                                 连进程一起收掉，这一条不会显示——所以它不是「改完要重启」
+                                 那种常规提示，出现了就说明有东西没收干净。 -->
+                            <InfoBar
+                                x:Name="VendorServicesRestartBar"
+                                IsOpen="False"
+                                IsClosable="False"
+                                Severity="Warning"
+                                Title="有服务仍在运行"
+                                Message="已设为禁用，但有进程没有退出。重启后不会再启动。" />
                         </StackPanel>
 
-                        <!-- 笔 -->
+                        <!-- 本程序 -->
                         <StackPanel Spacing="4">
-                            <TextBlock Text="笔" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardStyle}">
-                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <FontIcon Glyph="&#xE70F;" Style="{StaticResource SettingsRowIconStyle}" />
-                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                        <TextBlock Text="双击行为" TextWrapping="Wrap" />
-                                        <TextBlock
-                                            Text="选择连按两次笔侧键时执行的操作。"
-                                            Style="{StaticResource SettingsDescriptionStyle}" />
-                                    </StackPanel>
-                                    <ComboBox
-                                        x:Name="PenModeSelector"
-                                        Grid.Column="2"
-                                        MinWidth="180"
-                                        VerticalAlignment="Center"
-                                        SelectionChanged="PenModeSelectionChanged">
-                                        <ComboBoxItem Content="遵循系统笔设置" />
-                                        <ComboBoxItem Content="切换书写与橡皮擦" />
-                                    </ComboBox>
-                                </Grid>
-                            </Border>
-                            <Border x:Name="OneNoteCompatibilityRow" Style="{StaticResource SettingsCardStyle}">
-                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <FontIcon Glyph="&#xE70B;" Style="{StaticResource SettingsRowIconStyle}" />
-                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                        <TextBlock Text="OneNote 兼容" TextWrapping="Wrap" />
-                                        <TextBlock
-                                            x:Name="OneNoteCompatibilityStatusText"
-                                            Text="切换工具时同步 OneNote 的绘图选项。"
-                                            Style="{StaticResource SettingsDescriptionStyle}" />
-                                    </StackPanel>
-                                    <ToggleSwitch
-                                        x:Name="OneNoteCompatibilityToggle"
-                                        Grid.Column="2"
-                                        MinWidth="0"
-                                        OnContent=""
-                                        OffContent=""
-                                        Margin="0,0,-12,0"
-                                        HorizontalAlignment="Right"
-                                        VerticalAlignment="Center"
-                                        Toggled="OneNoteCompatibilityToggled" />
-                                </Grid>
-                            </Border>
-                        </StackPanel>
-
-                        <!-- 键盘 -->
-                        <StackPanel Spacing="4">
-                            <TextBlock Text="键盘" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardStyle}">
-                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <FontIcon Glyph="&#xE765;" Style="{StaticResource SettingsRowIconStyle}" />
-                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                        <TextBlock Text="分离后保持无线连接" TextWrapping="Wrap" />
-                                        <TextBlock
-                                            x:Name="KeyboardStatusText"
-                                            Text="键盘与主机分离后继续通过无线方式使用。"
-                                            Style="{StaticResource SettingsDescriptionStyle}" />
-                                    </StackPanel>
-                                    <ToggleSwitch
-                                        x:Name="KeyboardWirelessToggle"
-                                        Grid.Column="2"
-                                        MinWidth="0"
-                                        OnContent=""
-                                        OffContent=""
-                                        Margin="0,0,-12,0"
-                                        HorizontalAlignment="Right"
-                                        VerticalAlignment="Center"
-                                        Toggled="KeyboardWirelessToggled" />
-                                </Grid>
-                            </Border>
-                        </StackPanel>
-
-                        <!-- 通用 -->
-                        <StackPanel Spacing="4">
-                            <TextBlock Text="通用" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <TextBlock Text="本程序" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardStyle}">
                                 <Grid ColumnSpacing="16" VerticalAlignment="Center">
                                     <Grid.ColumnDefinitions>
@@ -411,7 +920,7 @@
                                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                                         <TextBlock Text="设备提示弹窗" TextWrapping="Wrap" />
                                         <TextBlock
-                                            Text="手写笔或键盘接入、以及手写笔未正确吸附时，在屏幕上方显示提示。"
+                                            Text="手写笔或键盘接入时显示提示。"
                                             Style="{StaticResource SettingsDescriptionStyle}" />
                                     </StackPanel>
                                     <ToggleSwitch
@@ -437,7 +946,7 @@
                                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                                         <TextBlock Text="登录后自动启用" TextWrapping="Wrap" />
                                         <TextBlock
-                                            Text="登录 Windows 后启动托盘并让 EGoTouchRev 接管触控。"
+                                            Text="登录 Windows 后启动托盘并接管触控。"
                                             Style="{StaticResource SettingsDescriptionStyle}" />
                                     </StackPanel>
                                     <ToggleSwitch
@@ -463,9 +972,9 @@
                                          一个通知中心图标，与退出毫无关系。 -->
                                     <FontIcon Glyph="&#xE7E8;" Style="{StaticResource SettingsRowIconStyle}" />
                                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                        <TextBlock Text="退出并恢复华为触控" TextWrapping="Wrap" />
+                                        <TextBlock Text="退出并交还原厂" TextWrapping="Wrap" />
                                         <TextBlock
-                                            Text="停止 EGoTouchRev 触控，将设备交还 HuaweiTHP 驱动，并关闭托盘与本设置。"
+                                            Text="触控与手写笔交还华为驱动，并关闭托盘。"
                                             Style="{StaticResource SettingsDescriptionStyle}" />
                                     </StackPanel>
                                     <Button
@@ -474,6 +983,166 @@
                                         VerticalAlignment="Center"
                                         Content="退出"
                                         Click="ExitClicked" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- ── 设备页 ── -->
+                <ScrollViewer
+                    x:Name="DevicePage"
+                    Grid.Row="1"
+                    Visibility="Collapsed"
+                    VerticalScrollBarVisibility="Auto"
+                    HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Padding="24,8,24,24" Spacing="24">
+
+                        <!-- 整机图取自本机键盘插件里的 snapping.png，见 AccessoryImages::ResolveMachine。
+                             机型名用 SMBIOS 的 Family 字段，固件里写的就是「MateBook E」，
+                             不需要自己维护型号码到营销名的映射。 -->
+                        <Grid ColumnSpacing="20">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4" VerticalAlignment="Center">
+                                <TextBlock
+                                    x:Name="MachineNameText"
+                                    Text="本机"
+                                    Style="{ThemeResource TitleTextBlockStyle}" />
+                                <TextBlock
+                                    x:Name="MachineIdentityText"
+                                    Style="{StaticResource SettingsDescriptionStyle}" />
+                            </StackPanel>
+                            <Image
+                                x:Name="MachineImage"
+                                Grid.Column="1"
+                                Width="132"
+                                Height="132"
+                                Stretch="Uniform"
+                                VerticalAlignment="Center" />
+                        </Grid>
+
+                        <!-- 硬件 -->
+                        <StackPanel Spacing="4">
+                            <StackPanel Style="{StaticResource GroupHeaderRowStyle}">
+                                <FontIcon Glyph="&#xE977;" Style="{StaticResource SpecGroupIconStyle}" />
+                                <TextBlock Text="硬件" Style="{StaticResource SpecGroupTitleStyle}" />
+                            </StackPanel>
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <!-- 整卡一个网格，长值跨列。分成几个各自独立的 Grid 会让列宽
+                                     各算各的，值的起始位置对不齐——三行看起来像三段。 -->
+                                <Grid ColumnSpacing="16" RowSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="处理器"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="DeviceProcessorText"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Grid.Row="0" Grid.Column="2" Text="核心"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="0" Grid.Column="3" x:Name="DeviceCoresText"
+                                               TextWrapping="Wrap" />
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="内存"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="DeviceMemoryText"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Grid.Row="1" Grid.Column="2" Text="屏幕"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="3" x:Name="DeviceDisplayText"
+                                               TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- 系统 -->
+                        <StackPanel Spacing="4">
+                            <StackPanel Style="{StaticResource GroupHeaderRowStyle}">
+                                <!-- Windows 11 的标记：四个等大的圆角方块。自己画而不是找字形，
+                                     Segoe Fluent 里没有可靠的 Windows 标记，用别的图标顶替
+                                     反而看不出这一栏讲的是操作系统。
+                                     颜色跟着其余分组图标走次要色，不用品牌蓝——这里要的是
+                                     指代而不是强调。 -->
+                                <!-- 13 而不是跟 FontIcon 一样的 15：字形本身带留白，实心方块
+                                     占满整个尺寸，同样数值下看起来会大一圈。 -->
+                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
+                                    <Grid Width="16" Height="16" ColumnSpacing="1.8" RowSpacing="1.8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="*" />
+                                            <RowDefinition Height="*" />
+                                        </Grid.RowDefinitions>
+                                        <Rectangle Grid.Row="0" Grid.Column="0" RadiusX="0.8" RadiusY="0.8"
+                                                   Fill="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <Rectangle Grid.Row="0" Grid.Column="1" RadiusX="0.8" RadiusY="0.8"
+                                                   Fill="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <Rectangle Grid.Row="1" Grid.Column="0" RadiusX="0.8" RadiusY="0.8"
+                                                   Fill="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <Rectangle Grid.Row="1" Grid.Column="1" RadiusX="0.8" RadiusY="0.8"
+                                                   Fill="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Grid>
+                                </Viewbox>
+                                <TextBlock Text="系统" Style="{StaticResource SpecGroupTitleStyle}" />
+                            </StackPanel>
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <Grid ColumnSpacing="16" RowSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Windows"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="DeviceOsText"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="BIOS"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="DeviceBiosText"
+                                               TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- 标识 -->
+                        <StackPanel Spacing="4">
+                            <StackPanel Style="{StaticResource GroupHeaderRowStyle}">
+                                <FontIcon Glyph="&#xE946;" Style="{StaticResource SpecGroupIconStyle}" />
+                                <TextBlock Text="标识" Style="{StaticResource SpecGroupTitleStyle}" />
+                            </StackPanel>
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <Grid ColumnSpacing="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" MinWidth="72" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="序列号" Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock
+                                        x:Name="DeviceSerialText"
+                                        Grid.Column="1"
+                                        IsTextSelectionEnabled="True"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock Grid.Column="2" Text="配置"
+                                               Style="{StaticResource SettingsDescriptionStyle}" />
+                                    <TextBlock Grid.Column="3" x:Name="DeviceSkuText" TextWrapping="Wrap" />
                                 </Grid>
                             </Border>
                         </StackPanel>
@@ -590,8 +1259,10 @@
 
                         <StackPanel Spacing="4">
                             <TextBlock Text="许可" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardStyle}" Padding="16">
-                                <StackPanel Spacing="6">
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <!-- 两条横排。各占一行会在右边留下一大片空白，而它们本来就是
+                                     并列的两个链接，不存在先后。 -->
+                                <StackPanel Orientation="Horizontal" Spacing="20">
                                     <HyperlinkButton
                                         Content="MIT License"
                                         Padding="0"
@@ -606,25 +1277,28 @@
 
                         <StackPanel Spacing="4">
                             <TextBlock Text="致谢" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardStyle}" Padding="16">
-                                <StackPanel Spacing="8">
-                                    <HyperlinkButton Content="EGoTouchRev" Padding="0"
-                                        NavigateUri="https://github.com/awarson2233/EGoTouchRev" />
-                                    <HyperlinkButton Content="MateBook-E-Pen" Padding="0"
-                                        NavigateUri="https://github.com/eiyooooo/MateBook-E-Pen" />
-                                    <HyperlinkButton Content="goodies" Padding="0"
-                                        NavigateUri="https://github.com/matebook-e-go/goodies" />
-                                    <HyperlinkButton Content="EgoTools" Padding="0"
-                                        NavigateUri="https://github.com/SaKongA/EgoTools" />
-                                    <HyperlinkButton Content="Chromium" Padding="0"
-                                        NavigateUri="https://www.chromium.org/" />
-                                </StackPanel>
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <!-- 链接嵌在句子里而不是一行一个：一行一个会在右边留下大片
+                                     空白，而这些项目之间并无主次，本来就该并列成一句话。 -->
+                                <RichTextBlock
+                                    FontSize="14"
+                                    LineHeight="22"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                                    <Paragraph>
+                                        <Run Text="本项目的实现参考了这些优秀的开源项目：" />
+                                        <Hyperlink NavigateUri="https://github.com/matebook-e-go/goodies">goodies</Hyperlink><Run Text="、" /><Hyperlink
+                                            NavigateUri="https://github.com/LanZhan-Harmony/HuaweiThpService">HuaweiThpService</Hyperlink><Run Text="、" /><Hyperlink
+                                            NavigateUri="https://github.com/awarson2233/EGoTouchRev">EGoTouchRev</Hyperlink><Run Text="、" /><Hyperlink
+                                            NavigateUri="https://github.com/eiyooooo/MateBook-E-Pen">MateBook-E-Pen</Hyperlink><Run Text="、" /><Hyperlink
+                                            NavigateUri="https://github.com/SaKongA/EgoTools">EgoTools</Hyperlink><Run Text="。" />
+                                    </Paragraph>
+                                </RichTextBlock>
                             </Border>
                         </StackPanel>
 
                         <StackPanel Spacing="4">
                             <TextBlock Text="声明" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardStyle}" Padding="16">
+                            <Border Style="{StaticResource SettingsCardCompactStyle}">
                                 <StackPanel Spacing="2">
                                     <TextBlock
                                         Text="与 HUAWEI、Himax 及其商标持有者无关联。"

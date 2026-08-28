@@ -2,11 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-OpenEGo Hub replaces the HUAWEI MateBook E Go touch service and the accessory parts of
-PC Manager. ARM64-only, Windows 11. The product was renamed from EGoTouchRev; CMake
-target names, directory names and the "EGoTouchRev touch" label in the settings window
-are deliberately left alone, because there they name the upstream touch stack rather
-than this product.
+OpenEGo Hub replaces the HUAWEI MateBook E Go touch service and PC Manager. Windows 11
+on ARM64. Touch and stylus recognition is not implemented here and not called from here
+either: `hal/GaokunThpHost.exe` hosts the vendor's own `THP_Service.dll` and the whole chain
+behind it. Everything else that needs a Huawei x64 DLL is likewise its own ARM64EC
+process under `hal/`.
+
+The product was renamed from EGoTouchRev; CMake target names, directory names and the
+"EGoTouchRev touch" label in the settings window are deliberately left alone, because
+there they name the upstream project rather than this product.
 
 ## Build
 
@@ -16,9 +20,25 @@ to be in the shell first; `scripts\build.ps1` imports it and pins the repo root.
 ```powershell
 .\scripts\build.ps1 -Config Debug -Test              # build + ctest
 .\scripts\build.ps1 -Config Release                  # LTO, slow, -Jobs 2 by default
-.\scripts\build.ps1 -Config Debug -Target SolversUnit_TouchStrokeAggregator
-.\scripts\build.ps1 -Config Debug -Clean             # after any interrupted build
+.\scripts\build.ps1 -Config Debug -Target Device     # one target
 ```
+
+`build.ps1` takes `-Config`, `-Target`, `-Jobs` and `-Test`. It reconfigures only when
+`CMakeCache.txt` is absent, so a configure that failed halfway leaves a broken
+`build.ninja` behind and every later build dies on `loading 'CMakeFiles\rules.ninja'`.
+Delete the cache to force a reconfigure.
+
+**`hal/` builds separately and first.** CMake links `hal/build/<Config>/GaokunHal.lib`
+and fails configuration when it is missing. The HAL cannot join the main CMake build as
+it stands: its vendor-DLL hosts are ARM64EC and its controller library is native ARM64,
+which is two compiler invocations, not one.
+
+```powershell
+cd hal; .\scripts\build.ps1 -Config Debug            # then build the main tree
+```
+
+Debug and Release each need their own HAL build — the static library carries the CRT
+choice, and a mismatch surfaces as LNK4098 at the service link step.
 
 `cl.exe`, not clang. The settings window is built by MSBuild from a `.vcxproj` behind an
 `if(WIN32 AND MSVC)` gate, so a clang configuration silently produces no
@@ -32,7 +52,8 @@ Two traps that make a build look successful when it is not:
   straight after a failed build passes against stale binaries. `scripts\verify.ps1`
   greps for `ninja: build stopped` instead of trusting the exit code alone.
 - After an interrupted build ninja has been observed losing a header dependency and
-  relinking an object compiled before the edit. `-Clean` is the escape hatch.
+  relinking an object compiled before the edit. Deleting the build directory is the
+  escape hatch.
 
 The version number lives in `CMakeLists.txt` (`PROJECT_VERSION`) and
 `Common/include/AppVersion.h`, because the settings window is a separate MSBuild project
@@ -43,19 +64,17 @@ and cannot read CMake variables. Configuration fails when they disagree; change 
 ```powershell
 ctest --preset arm64-Debug                     # all
 ctest --preset arm64-Debug -L device-free      # no touch controller needed
-ctest --preset arm64-Debug -R TouchPeakHold    # one test
+ctest --preset arm64-Debug -R PenUsb            # one group
 ```
 
-CI runs `-L device-free -LE admin`; the `admin` exclusion exists because the IPC control
-pipe carries an administrator-only ACL and its loopback test cannot connect under the
-runner's token. Solver unit tests are registered as `SolversUnit_<Name>` with labels
-`solvers.touch`, `solvers.stylus`, `solvers.config`.
+Labels in use: `Common`, `service`, `host`, `config`, `unit`, `integration`,
+`device-free`, `windows`. CI runs `-L device-free`.
 
 ## Running on the device
 
 The Debug service runs straight out of the build tree, so it holds
 `build\arm64-Debug\OpenEGoHubService.exe` and a rebuild fails to link (LNK1168). The
-tray, the settings window and the workbench each lock their own exe as well.
+tray and the settings window each lock their own exe as well.
 
 Debug and Release services are **mutually exclusive**: both drive the same Himax device,
 create the same VHF virtual HID and read the same BT-MCU HID reports. Running both is
@@ -76,7 +95,7 @@ travels that way.
 
 ## Architecture
 
-Three processes:
+Three processes, plus the HAL hosts:
 
 - **Service** (`EGoTouchService`, LocalSystem, session 0) owns the hardware. It cannot
   draw anything, which is the reason the other two exist.
@@ -92,91 +111,118 @@ Three processes:
   is append-only — the two executables are built separately and an inserted value shifts
   every command for a mismatched pair.
 
-`Tools/EGoTouchApp` is the diagnostics workbench and connects over the IPCCore named
-pipe, which is administrator-only and linked into Debug builds only.
+The process boundary is also the architecture boundary. Huawei's DLLs are x64 and an
+ARM64 process cannot load them, so each capability that needs one is a separate ARM64EC
+executable under `hal/`, driven over a pipe or a shared mapping. Nothing above `hal/`
+is compiled as ARM64EC, and nothing under it includes anything from above.
 
-### Touch pipeline
+### Touch
 
-`EGoTouchService/Solvers/TouchSolver`, in order: conditioning (writes
-`frame.touch.conditioned`, never the raw map) → `MacroZoneDetector` → `PeakDetector` →
-`ZoneExpander` → `ContactExtractor` → `TouchTracker` → `StrokeAggregator` →
-`TouchGestureStateMachine`.
+The service does not compute touch and no longer has the machinery to. It supervises a
+vendor process and stays out of the data path:
 
-`StrokeAggregator` is a deliberate divergence from the vendor, which has no stroke-level
-stage at all. Stroke identity is decoupled from track id (tracks break, strokes should
-not); evidence is always the running maximum, because palm false positives are *smaller*
-than real contacts and arrive as fragments; the stage emits `Holding` / `Active` /
-`Cancelled` rather than a boolean, and the palm verdict can flip back once, in one
-direction only.
+```
+Himax SPI -> THP_Service.dll -> ApDaemon -> TSACore/TSAPrmt -> vendor VHF -> Windows HID
+             (all inside GaokunThpHost.exe, ARM64EC)
+```
 
-Frames carry `receiveSystemEpochUs`, stamped in `DeviceRuntime` against QPC. The solvers
-have no other clock, and idle frames never enter the pipeline, so anything that counts
-its own invocations measures nonsense.
+`StartEGoTouchProvider()` launches `hal/`'s `GaokunThpHost.exe`, which resolves the vendor
+install directory from the `HuaweiThpService` SCM `ImagePath`, loads `THP_Service.dll`,
+registers four callbacks and calls `ThpFuncStart()`. Palm rejection, pressure, tilt and
+pen/touch arbitration all come from that chain, and so does the HID injection.
 
-### Stylus
+Handover is lease-driven, not automatic. The service boots with `HuaweiThpService` still
+owning touch, so the login screen and a crashed tray both keep working. The tray requests
+the lease and renews it; the server times out at 5 seconds. Taking over stops the Huawei
+service, starts the host, re-confirms Huawei stayed stopped, then publishes `EGoTouch`.
+Dropping the lease reverses it, and `TouchProviderCoordinator` restarts the OpenEGo
+provider if restoring Huawei fails — never leave zero providers.
 
-HPP3 only — the HPP2 sub-pipeline was deleted after proving nothing ever wrote its input.
-`StylusProtocolHint::Hpp2` remains because it identifies the CD52 pen module over BT.
+Nothing else in this tree touches frames. There used to be a second path — the in-tree
+solvers, then `DeviceRuntime` reading Himax frames into `OemTsaBackend` and emitting our
+own HID reports through `VhfReporter` — and it is gone: the solvers, `Device/himax`,
+`Device/vhf` and `EGoTouchService/Tsa` were all removed once the vendor host became the
+only provider. Do not rebuild any of it without deciding first that the vendor chain is
+not good enough, which is the opposite of the decision already made.
 
-`StylusTouchArbiter` produces the full-frame verdict in `frame.stylus.interop`;
-`StylusTouchSuppressor` folds it in with `max()` on every exit path (it used to clear it
-unconditionally, which is why the verdict never reached the tracker) and `TouchTracker`
-gates on pen mode.
+`DeviceRuntime` kept its name but not its job. It has no worker thread, no chip and no
+HID output; what remains is the pen and keyboard MCU state machine — side-button
+dispatch, eraser state, bluetooth pressure, power events. Renaming it is a separate
+change. `Device::BtPenInputLatch` holds the bluetooth pen sample and its 24-byte layout
+is still an ABI contract, because the pen MCU protocol did not change.
+`StylusProtocolHint` survives for the same reason: it identifies the pen module over BT.
 
-### Wire formats
+### The other HAL hosts
 
-`Common/IPCCore/include/Ipc/SharedFrameBuffer.h` (shared frame ABI, currently 9) and
-`Common/DVRCore/include/Dvr{Format,FrameSlot}.h` are one change: the ABI guards, the
-`static_assert(offsetof(...))` block, `BuildFrameSchema()`, the reader, the CSV export
-and the workbench all have to move together or nothing compiles. Recordings made before
-a layout change cannot be read.
+`GaokunThpHost` carries writing data. Accessory state is a different chain entirely:
+`GaokunPenHost.exe` loads PC Manager's `PenService.dll` for battery, module id, firmware,
+serial and side-button events; `GaokunKeyboardHost.exe` loads `KeyboardService.dll` for
+keyboard state and wireless-on-detach. Both publish a snapshot through a shared-memory
+seqlock and send discrete events over a named pipe; the service polls them every 250 ms
+and folds everything into one `PenStatusChannel`.
+
+Side-button events must reach the tray because session 0 cannot `SendInput` to the user
+desktop. The tray injects the Windows Ink shortcut and, when OneNote is foreground,
+switches the drawing tool through UI Automation.
 
 ### Configuration
 
-Every tunable exists three times — member initialiser, `registerBindings` default,
-`applyConfig` fallback — and `SolversUnit_PipelineDefaultsConsistency` pins them against
-each other. A new knob must also be registered in `Common/include/config/ConfigKeyId.h`
-and `ConfigKeyMap.cpp`, or `ConfigCatalog` drops it: the workbench will not show it and
-IPC cannot deliver it, leaving `DvrReplay --set` as the only way to reach it. Key ids are
-append-only; deleted ones leave a hole rather than being renumbered.
+`RegisterServiceConfigBindings` is the only source of config keys now — five of them,
+all under `service.`. A new knob must also be registered in
+`Common/include/config/ConfigKeyId.h` and `ConfigKeyMap.cpp`, or `ConfigCatalog` drops
+it and IPC cannot deliver it. Key ids are append-only; deleted ones leave a hole rather
+than being renumbered.
+
+`ConfigScope::TouchPipeline` and `StylusPipeline` remain in the enum. They are part of
+the serialized config ABI; removing them renumbers the rest.
 
 ### Release differs from Debug
 
-Release compiles with `EGOTOUCH_SERVICE_ENABLE_IPC=0` and without `_DEBUG`. Members used
-at an unconditional call site must be **declared** unconditionally; this has broken the
-Release build twice while every local Debug build stayed green. Build Release before
-pushing anything that touches `DeviceRuntime` or `ServiceHost`.
+Release compiles without `_DEBUG`. Members used at an unconditional call site must be
+**declared** unconditionally; this has broken the Release build twice while every local
+Debug build stayed green. Build Release before pushing anything that touches
+`DeviceRuntime` or `ServiceHost`.
 
-## Evidence loop
+## Known gaps
 
-Claims about touch behaviour are argued from recorded frames, not from reading code.
-Record a session, replay it offline, compare against the vendor:
+These are real, verified against the code, and none of them are visible from a passing
+build. Fix the packaging one before shipping anything.
 
-```powershell
-.\build\arm64-Debug\DvrReplay.exe <recording>.dvrbin --set touch.stroke.hold_min_peak_signal=800
-.\build\arm64-Debug\DvrReplay.exe --diff before.csv after.csv
-uv run --with pandas scripts\oracle_compare.py ...
-```
-
-`DvrReplay` builds only under `EGOTOUCH_DIAG` (Debug): the `.dvrbin` reader only wires
-`rawData` into `HeatmapFrame` in diagnostic builds, and DIAG changes the `HeatmapFrame`
-layout, so the tool must be compiled in the same configuration as the solvers.
-
-In DVR analysis, "rawdata" means the heatmap matrix inside the frame, not the
-`rawDataLength` / `raw.hex` byte block — a recording can carry a heatmap with no solved
-contacts or peaks.
+- **The MSI does not contain the HAL.** `scripts\EGoTouchSetup.wxs` lists
+  `OpenEGoHubService.exe`, `OpenEGoHubSettings.exe` and `OpenEGoHubTray.exe` and nothing
+  else. No `GaokunThpHost.exe`, no `GaokunPenHost.exe`, no `GaokunKeyboardHost.exe`, no
+  `GaokunDisplay.exe`, no `qdcmlib`. `scripts\deploy.ps1` copies them, which is why
+  development machines work; an installed build has no touch provider to start.
+- **Host death is not noticed.** `HostController::Start` waits 1500 ms to catch a host
+  that exits immediately, and that is the only liveness check. `IsRunning()` exists but
+  nothing calls it on lease renewal, so a host that crashes later leaves touch dead with
+  no fallback to Huawei.
+- **OneNote input suppression does nothing.** `SetInputSuppressed` now only publishes a
+  state bit, which the tray blocks on; there is no gate behind it any more, and live pen
+  input comes out of the vendor VHF inside `GaokunThpHost`. Suppressing it means reaching
+  into the vendor chain, and there may be no clean way to do that.
+- **`ApplyServicePolicy` still takes `stylusVhfEnabled`** and has nowhere to apply it.
+  The log line says `(no effect)`. The setting is still in the config schema.
 
 ## Where the reasoning is written down
 
-- `docs/touch_stack.md` — the working record, including a section of things that were
-  tried, measured and rejected. Read it before re-proposing an idea.
 - `docs/tsacore_ground_truth.md` — vendor behaviour established by running TSACore as an
-  oracle, with the numbers.
-- `docs/touch_stack_refactor_reference.md` — Chromium ChromeOS comparison, line by line.
+  oracle, with the numbers. The measurements still hold; the loader they were taken
+  through is gone.
 - `docs/KBDMCU_PROTOCOL.md`, `docs/KEYBOARD_IDENTITY.md`, `docs/ACCESSORY_CENTER.md` —
   reverse-engineered MCU and PC Manager behaviour.
+- `hal/docs/` — the vendor DLL reverse engineering: display colour management, the OSD,
+  battery and the vendor services. `display-manage.md` also records two negative results
+  worth not repeating.
+
+A number of documents under `docs/` describe the removed solver stack, the DVR recorder
+and the IPC control channel. They are history, not current behaviour.
 
 ## Documentation
 
 `README.md` is Chinese and `README.en.md` English; keep both in sync. The README is for
 users — implementation detail belongs in `docs/`.
+
+Prose outside this repository's code follows the `writing-style` skill. Chinese
+technical writing in particular: Chinese sentence shape, accurate verbs, no
+English-shaped long pre-modifiers.

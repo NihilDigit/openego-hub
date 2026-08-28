@@ -1,8 +1,6 @@
 #include "ConfigRuntime.h"
 
 #include "Logger.h"
-#include "TouchPipeline.h"
-#include "StylusPipeline.h"
 #include "config/ConfigBinder.h"
 #include "config/ConfigCatalog.h"
 #include "config/ConfigKeyMap.h"
@@ -70,40 +68,11 @@ Config::ConfigValue ConfigValueFromTlvEntry(const Config::ConfigTlvEntry& entry,
     }
 }
 
-constexpr std::array<std::string_view, 4> kStylusIirCoefficientPaths{
-    "stylus.sp.iir_coef_low_hover",
-    "stylus.sp.iir_coef_high_hover",
-    "stylus.sp.iir_coef_low_writing",
-    "stylus.sp.iir_coef_high_writing",
-};
-
-bool StylusIirCoefficientsWithinMax(const Config::ConfigStore& store) {
-    const int32_t maxCoef = store.getOr<int32_t>("stylus.sp.iir_max_coef", 32);
-    if (maxCoef < 1) return false;
-    for (const auto path : kStylusIirCoefficientPaths) {
-        const int32_t coef = store.getOr<int32_t>(path, 0);
-        if (coef < 0 || coef > maxCoef) return false;
-    }
-    return true;
-}
-
-void ClampStylusIirCoefficients(Config::ConfigStore& store) {
-    const int32_t maxCoef = std::clamp(store.getOr<int32_t>("stylus.sp.iir_max_coef", 32), int32_t{1}, int32_t{255});
-    store.set<int32_t>("stylus.sp.iir_max_coef", maxCoef);
-    for (const auto path : kStylusIirCoefficientPaths) {
-        if (store.has(path)) store.set<int32_t>(path, std::clamp(store.get<int32_t>(path), int32_t{0}, maxCoef));
-    }
-}
-
 template<typename Callback>
 decltype(auto) WithRuntimeConfigDefaults(Callback&& callback) {
     Config::ConfigBinder binder;
     ServiceConfigState serviceDefaults;
-    Solvers::TouchPipeline touchDefaults;
-    Solvers::StylusPipeline stylusDefaults;
     RegisterServiceConfigBindings(binder, serviceDefaults);
-    touchDefaults.registerBindings(binder);
-    stylusDefaults.registerBindings(binder);
     Config::registerRuntimeKeyMappings(binder);
 
     // 默认值只由 binder 写。手动预置过的那几行写的是 pen_button_mode=oem_custom，与
@@ -283,36 +252,6 @@ public:
     }
 };
 
-class PipelineConfigTarget final : public IConfigTarget {
-public:
-    std::string_view name() const noexcept override { return "PipelineConfigTarget"; }
-
-    bool isInterested(const ConfigChangeSet& changeSet) const override {
-        return changeSet.containsPrefix("touch.") || changeSet.containsPrefix("stylus.");
-    }
-
-    ConfigTargetResult validateConfig(const Config::ConfigStore& candidate,
-                                      const ConfigChangeSet& changeSet) const override {
-        if (changeSet.containsPrefix("stylus.") && !StylusIirCoefficientsWithinMax(candidate)) {
-            return MakeTargetResult(name(), ConfigApplyPhase::Live, false, "invalid stylus IIR coefficient/max relationship");
-        }
-        return MakeTargetResult(name(), ConfigApplyPhase::Live, true);
-    }
-
-    ConfigTargetResult applyConfig(const Config::ConfigStore&,
-                                   const ConfigChangeSet& changeSet,
-                                   ConfigApplyPhase phase) const override {
-        auto result = MakeTargetResult(name(), phase, true);
-        if (!changeSet.empty()) {
-            ConfigApplyAction action{};
-            action.kind = ConfigApplyActionKind::PipelineRuntime;
-            action.targetName = std::string(name());
-            result.actions.push_back(std::move(action));
-        }
-        return result;
-    }
-};
-
 } // namespace
 
 ConfigRuntime::ConfigRuntime() {
@@ -327,7 +266,6 @@ void ConfigRuntime::RegisterConfigTarget(std::unique_ptr<IConfigTarget> target) 
 
 void ConfigRuntime::RegisterDefaultConfigTargets() {
     m_targets.push_back(std::make_unique<ServicePolicyTarget>());
-    m_targets.push_back(std::make_unique<PipelineConfigTarget>());
 }
 
 Config::ConfigStore ConfigRuntime::BuildFactoryDefaultStore() {
@@ -370,11 +308,6 @@ bool ConfigRuntime::Initialize(const StartupValidator& validateStartupConfig) {
             LOG_WARN("Service", __func__, "Config", "Invalid config value at '{}'; restored default.", path);
         }
     }
-    if (!StylusIirCoefficientsWithinMax(current)) {
-        ClampStylusIirCoefficients(current);
-        LOG_WARN("Service", __func__, "Config", "Invalid stylus IIR coefficient/max relationship; clamped coefficients to max.");
-    }
-
     std::lock_guard<std::mutex> lk(m_mutex);
     m_defaults = std::move(defaults);
     m_store = std::move(current);
@@ -619,8 +552,6 @@ bool ConfigRuntime::ApplyPatchPayloadLocked(const uint8_t* data,
         for (auto& action : applyResult.actions) {
             if (action.kind == ConfigApplyActionKind::ServicePolicy) {
                 action.serviceConfig = result.desiredServiceConfig;
-            } else if (action.kind == ConfigApplyActionKind::PipelineRuntime) {
-                action.configStore = m_activeStore;
             }
             result.applyActions.push_back(action);
         }

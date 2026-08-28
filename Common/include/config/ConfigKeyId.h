@@ -136,6 +136,9 @@ enum class ConfigKeyId : uint16_t {
     TouchSignalCondBaselineNoFingerMaxSignal   = 0x016E,
     TouchPeakDetectionClosePeakMinSaddleDrop   = 0x016F,
     TouchPeakDetectionClosePeakMinSaddleRatio  = 0x0170,
+    // 号段只追加,所以这两个挂在末尾而不是各自的名字段里。
+    TouchStrokeDragGateSizePerPeak      = 0x0171,
+    TouchGestureDragThresholdSuspect    = 0x0172,
 
     // ── Stylus: reserved legacy HPP2 config key range (0x0200-0x022F) ──
 

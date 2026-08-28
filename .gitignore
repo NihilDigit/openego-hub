@@ -31,3 +31,13 @@ imgui.ini
 # TSALib.log is dropped in the working directory by the vendor oracle when it is
 # run for a comparison, not by anything we build.
 TSALib.log
+
+# 抓帧留下的原始数据，不属于仓库内容。
+out.bin
+# 手工改名的备份变体，*.bak 匹配不到。
+*.bak-*
+# MSVC 的编译产物。hal 用 build.ps1 直接调 cl.exe，中间文件落在源树里而不是 build/。
+*.pdb
+*.obj
+*.ilk
+*.exe

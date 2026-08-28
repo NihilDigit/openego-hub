@@ -94,6 +94,25 @@ inline constexpr uint32_t kFlagKbdDetached    = 1u << 22;
 inline constexpr uint32_t kFlagHasKbdBattery  = 1u << 23;
 inline constexpr uint32_t kFlagHasKbdCharging = 1u << 24;
 inline constexpr uint32_t kFlagKbdCharging    = 1u << 25;
+// 华为后台服务是否已被本程序禁用。沿用 flags 的空闲位，共享内存布局因此不变，旧读者会
+// 忽略它而不是错读。判据由服务给出：只有它有权查 SCM 的启动类型。
+inline constexpr uint32_t kFlagHasVendorServices      = 1u << 26;
+inline constexpr uint32_t kFlagVendorServicesDisabled = 1u << 27;
+// 电池充电阈值的回读。读它要管理员权限，设置窗是中完整性进程，只有服务读得到，所以必须经
+// 这条通道回传——在此之前设置窗没有任何真实值可用，滑块只能停在 Minimum，看起来像是用户
+// 自己设过 50%。
+//
+// kFlagChargeLimitManual 区分两种状态：置位是用户设定的阈值；未置位说明还在华为的智能充电
+// 模式下，此时阈值由系统动态调整、并不硬性生效（实测阈值写着 70 而电池充到了 100%），
+// 界面不该把它显示成一个确定的设定值。
+inline constexpr uint32_t kFlagHasChargeLimit    = 1u << 28;
+inline constexpr uint32_t kFlagChargeLimitManual = 1u << 29;
+// 名单里还有服务的进程在运行。启动类型与运行状态是两回事：都改成禁用了而进程还在，说明
+// 这次改动还没完全落地。界面据此提示，比笼统地说「需要重启」准确——多数情况下不需要。
+inline constexpr uint32_t kFlagVendorServicesRunning = 1u << 30;
+// 名单里的服务全部在运行。恢复方向要靠它判断「做完了」——启停都要时间，每个服务最多等
+// 十秒，界面得知道什么时候才算稳定下来。
+inline constexpr uint32_t kFlagVendorServicesAllRunning = 1u << 31;
 
 enum class TouchProviderState : uint8_t {
     Unknown = 0,
@@ -125,7 +144,8 @@ struct Payload {
     uint8_t  providerError = 0;     // Win32/内部错误摘要，valid with kFlagHasProviderError
     uint8_t  kbdBatteryLevel = 0;   // percent, valid with kFlagHasKbdBattery
     uint8_t  notificationKind = 0;  // NotificationKind
-    uint8_t  _pad[6]{};             // 显式补齐，避免下一个字段的偏移随编译器的填充规则漂移
+    uint8_t  chargeLimit = 0;       // 停充百分比，valid with kFlagHasChargeLimit
+    uint8_t  _pad[5]{};             // 显式补齐，避免下一个字段的偏移随编译器的填充规则漂移
     uint64_t updatedAtUnixMs = 0;
     char     modelName[kModelNameCapacity]{};   // UTF-8, NUL-terminated
     char     penFirmware[kVersionCapacity]{};   // valid with kFlagHasPenFirmware
@@ -191,6 +211,15 @@ struct State {
     bool inputSuppressed = false;
     bool hasKbdDetachSupport = false;
     bool kbdDetachSupport = false;
+    bool hasVendorServices = false;
+    bool vendorServicesDisabled = false;
+    bool vendorServicesRunning = false;
+    bool vendorServicesAllRunning = false;
+    // chargeLimitManual 为假时 chargeLimit 是华为智能充电模式的当前取值，不是用户的设定，
+    // 界面应当据此区分显示，见 kFlagChargeLimitManual。
+    bool hasChargeLimit = false;
+    bool chargeLimitManual = false;
+    uint8_t chargeLimit = 0;
     bool hasPenFirmware = false;
     bool hasPenHardware = false;
     bool hasPenSerial = false;

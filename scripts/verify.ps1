@@ -13,16 +13,14 @@
 .EXAMPLE
     pwsh -File scripts/verify.ps1
     pwsh -File scripts/verify.ps1 -Clean
-    pwsh -File scripts/verify.ps1 -Replay
 #>
 [CmdletBinding()]
 param(
     [string]$BuildDir = 'build\arm64-Debug',
     # 依赖信息可疑时用（构建被中断过、换过分支、改过布局常量）。
     [switch]$Clean,
-    # 额外跑一遍语料重放，把接触点统计打出来。
-    [switch]$Replay,
-    [int]$MinTests = 40
+    # 低于这个数就当作目标没建出来。当前是 22 个，留一点余量给新增测试。
+    [int]$MinTests = 20
 )
 
 $ErrorActionPreference = 'Stop'
@@ -189,29 +187,6 @@ if (-not $failed) {
         else {
             Complete-Step 'tests' $true "$totalCount passed"
         }
-    }
-}
-
-# ── 4. 重放（可选）──────────────────────────────────────────────────────
-if ($Replay -and -not $failed) {
-    $replayExe = Join-Path $BuildDir 'DvrReplay.exe'
-    $corpusDir = 'C:\ProgramData\OpenEGoHub\exports\dvr'
-    if (-not (Test-Path $replayExe)) {
-        Complete-Step 'replay' $false "$replayExe not built"
-    }
-    else {
-        $tmp = Join-Path ([IO.Path]::GetTempPath()) "replay_$([guid]::NewGuid().ToString('N')).csv"
-        $lines = @()
-        foreach ($name in @('dvr20260823_164645_282742', 'dvr20260823_230439_133806', 'dvr20260823_142120_033695')) {
-            $set = Join-Path $corpusDir "$name-session.dvrbin"
-            if (-not (Test-Path $set)) { $lines += "$name : MISSING"; continue }
-            $r = & $replayExe --dataset $set --out $tmp 2>&1 | Out-String
-            $m = [regex]::Match($r, 'contact appearances: .*')
-            $lines += "$($name.Substring(12)) : $(if ($m.Success) { $m.Value.Trim() } else { 'no summary' })"
-        }
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-        $lines | ForEach-Object { Write-Host "         $_" }
-        Complete-Step 'replay' $true
     }
 }
 

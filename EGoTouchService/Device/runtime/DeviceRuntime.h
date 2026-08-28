@@ -3,19 +3,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
-
-#include <deque>
-#include <expected>
-#include <mutex>
-#include <optional>
-
-#include <string>
-#include <thread>
-#include <unordered_map>
-#include <vector>
 #include <functional>
+#include <mutex>
+#include <string>
+
 #include "PenButtonConfig.h"
 #include "btmcu/PenUsbTypes.h"
 #include "win32/SyntheticPenButtonInjector.h"
@@ -25,45 +17,14 @@ class ConfigStore;
 struct ValidationResult;
 }
 
-#include "himax/HimaxChip.h"
-#include "TouchSolver/TouchPipeline.h"
-#include "vhf/VhfReporter.h"
-#include "StylusSolver/StylusPipeline.h"
+#include "BtPenInputLatch.h"
 
-// --------------- 静态队列（零内存分配） ---------------
-template <typename T, std::size_t N>
-class StaticQueue {
-public:
-    bool push(T&& item) noexcept {
-        if (m_count >= N) return false;
-        m_data[m_tail] = std::move(item);
-        m_tail = (m_tail + 1) % N;
-        ++m_count;
-        return true;
-    }
-
-    bool pop(T& outItem) noexcept {
-        if (m_count == 0) return false;
-        outItem = std::move(m_data[m_head]);
-        m_head = (m_head + 1) % N;
-        --m_count;
-        return true;
-    }
-
-    void clear() noexcept {
-        m_head = 0;
-        m_tail = 0;
-        m_count = 0;
-    }
-
-    std::size_t size() const noexcept { return m_count; }
-    bool empty() const noexcept { return m_count == 0; }
-
-private:
-    std::array<T, N> m_data{};
-    std::size_t m_head = 0;
-    std::size_t m_tail = 0;
-    std::size_t m_count = 0;
+// 笔的协议代次。由笔身份或 MCU 上报的模块号推断。采集与解帧都已经交给 GaokunThpHost 里的
+// 原厂算法链，这里只剩一个随笔身份一起发布的状态字段。
+enum class StylusProtocolHint : uint8_t {
+    Auto = 0,
+    Hpp2,
+    Hpp3,
 };
 
 // --------------- 按键与状态动作辅助类型 ---------------
@@ -88,33 +49,6 @@ struct PenButtonAction {
 };
 
 // --------------- 基础类型 ---------------
-
-enum class result { error, timeout };
-using ThreadResult = std::expected<void, result>;
-
-enum class workerState {
-    suspend  = -2,   // 屏幕关闭/合盖 → worker 暂停（线程保留，等待唤醒）
-    quit     = -1,   // 服务终止/系统关机 → worker 线程退出
-    ready    =  0,   // 初始就绪
-    streaming,       // 正在采帧
-    recover,         // 恢复中
-};
-
-/// 停止原因（替代原来的 m_stopReq + m_shutdownReq 双 flag）
-enum class StopReason : uint8_t {
-    None = 0,
-    ScreenOff,   // DisplayOff / LidOff → 进入 suspend
-    Shutdown,    // 系统关机 / Stop() → 进入 quit
-};
-
-const char* ToString(workerState s) noexcept;
-
-enum class CommandSource : uint8_t {
-    External = 0,
-    SystemPolicy,
-};
-
-const char* ToString(CommandSource s) noexcept;
 
 class RuntimePolicyEvent {
 public:
@@ -141,32 +75,6 @@ public:
 
 const char* ToString(RuntimePolicyEvent::Type type) noexcept;
 
-// --------------- 审计日志 ---------------
-
-#if defined(NDEBUG)
-inline constexpr std::size_t kMaxHistoryItems = 128;
-#else
-inline constexpr std::size_t kMaxHistoryItems = 512;
-#endif
-
-struct HistoryEntry {
-    std::chrono::system_clock::time_point timestamp{};
-    uint64_t command_id = 0;
-    std::array<char, 32> command_name{};
-    CommandSource source = CommandSource::External;
-    bool success = false;
-    std::array<char, 32> detail{};
-};
-
-struct RuntimeSnapshot {
-    workerState state = workerState::quit;
-    bool stylus_connected = false;
-    uint8_t recover_count = 0;
-    std::size_t queue_depth = 0;
-    uint64_t last_command_id = 0;
-    std::string last_note;
-};
-
 struct RuntimePenState {
     uint16_t factoryStatusFlags = 0;
 
@@ -179,7 +87,7 @@ struct RuntimePenState {
     bool hasStylusId = false;
     uint8_t stylusId = 0;
 
-    Solvers::StylusProtocolHint protocolHint = Solvers::StylusProtocolHint::Auto;
+    StylusProtocolHint protocolHint = StylusProtocolHint::Auto;
     bool protocolHintFromPenModule = false;
     // 任何一次提交的状态变化都让 penRevision 前进一格，电量、充电、笔身份不作区分。
     // 没有消费方需要区分：生产代码只读快照本身，只有单元测试断言这个计数。真正要分辨
@@ -221,17 +129,6 @@ struct RuntimePenState {
     bool deviceConnected = false;
 };
 
-struct PenAfeCommandPlan {
-    std::array<command, 2> commands{};
-    std::size_t count = 0;
-};
-
-/// Build the AFE state reconstruction required after a full runtime restart.
-/// Commands are ordered by hardware dependency: InitStylus before SetStylusId.
-PenAfeCommandPlan BuildPenAfeCommandPlan(const RuntimePenState& state) noexcept;
-std::optional<command> BuildPenConnectionAfeCommand(
-    bool connectionChanged, bool connected) noexcept;
-
 struct PenAfeReplayState {
     uint64_t generation = 0;
     bool pending = false;
@@ -257,19 +154,13 @@ struct PenAfeReplayState {
 
 struct DeviceRuntimePenStateTestAccess;
 
+/// 笔与键盘 MCU 事件的状态机。
+///
+/// 触控的采集、解算与注入都在 GaokunThpHost 里，由原厂 THP_Service.dll 完成，本类不再碰帧、
+/// 不再注入 HID、也不再驱动芯片。留下的是三件事：把 MCU 事件归并成一份可发布的笔状态、
+/// 按当前的侧键模式分派按键动作、以及缓存蓝牙笔的压力样本。
 class DeviceRuntime {
 public:
-    enum class StartRequestResult : uint8_t {
-        Started = 0,
-        AlreadyRunning,
-        Failed,
-    };
-
-    enum class StopRequestResult : uint8_t {
-        Stopped = 0,
-        AlreadyStopped,
-    };
-
     DeviceRuntime(const std::wstring& master,
                   const std::wstring& slave,
                   const std::wstring& interrupt);
@@ -277,22 +168,12 @@ public:
     DeviceRuntime(const DeviceRuntime&) = delete;
     DeviceRuntime& operator=(const DeviceRuntime&) = delete;
 
-    bool Start();
     void Stop();
-    StartRequestResult RequestStart();
-    StopRequestResult RequestStop();
-    bool IsShutdownRequested() const;
-    bool IsRunning() const { return m_running.load(); }
-    bool IsSuspended() const { return m_state.load() == workerState::suspend; }
 
     // Auto/Manual 模式
     void SetAutoMode(bool enabled) { m_autoMode.store(enabled); }
     bool IsAutoMode() const { return m_autoMode.load(); }
 
-
-    // 单独的 Stylus VHF 输出开关
-    void SetStylusVhfEnabled(bool v) { m_stylusVhfEnabled.store(v); }
-    bool IsStylusVhfEnabled() const { return m_stylusVhfEnabled.load(); }
     void ApplyServicePolicy(bool autoMode, bool stylusVhfEnabled,
                             PenButtonMode penButtonMode = PenButtonMode::WindowsInk,
                             PenButtonRoute penButtonRoute = PenButtonRoute::VhfOnly,
@@ -300,10 +181,6 @@ public:
     // Config-only, no IPC types involved. Available in every build so Release applies
     // the declared defaults instead of falling back to member initializers.
     Config::ValidationResult ValidateConfigStore(const Config::ConfigStore& store) const;
-    void ApplyConfigStore(const Config::ConfigStore& store);
-    void ApplyPipelineConfig(const Config::ConfigStore& store) {
-        ApplyConfigStore(store);
-    }
 
     void SetPenButtonMode(PenButtonMode m) { m_penButtonMode.store(m, std::memory_order_release); }
     PenButtonMode GetPenButtonMode() const { return m_penButtonMode.load(std::memory_order_acquire); }
@@ -313,45 +190,25 @@ public:
     }
     PenButtonRoute GetPenButtonRoute() const { return m_penButtonRoute.load(std::memory_order_acquire); }
 
-    // Pipeline/VHF façade methods for Phase 0 contract freeze.
-    void SetVhfEnabled(bool enabled);
-    bool IsVhfEnabled() const;
-    bool IsVhfDeviceOpen() const;
+    // 抑制状态仍然发布——托盘的 ScopedOneNoteInputSuppression 阻塞等待 PenStatusChannel
+    // 里的 hasInputSuppressed 变化，状态位没了它会一直等——但实际的输入闸门已经不在这一侧：
+    // 实时笔输入来自 GaokunThpHost 里的原厂 VHF，这个开关目前挡不住它。
     void SetInputSuppressed(bool suppressed);
     bool IsInputSuppressed() const;
-    void SetVhfTransposeEnabled(bool enabled);
-    bool IsVhfTransposeEnabled() const;
-    void SetMasterParserOnlyMode(bool enabled);
 
-    /// 注入 BT MCU 压感值（由 PenBridge 线程写入，StylusPipeline 帧内读取）
+    /// 注入 BT MCU 压感值（由 PenBridge 线程写入）
     void IngestBtMcuPressure(uint16_t p);
     void IngestBtMcuPressurePacket(const std::array<uint16_t, 4>& pressure,
                                    const std::array<uint16_t, 4>& rawPressure,
                                    uint8_t freq1,
                                    uint8_t freq2);
 
-    // Frame push callback for IPC (called after pipeline+VHF in worker loop)
-    using FramePushCallback = std::function<void(const Solvers::HeatmapFrame&)>;
-    // 不按 _DEBUG 编译掉：装没装回调本身就是开关,理由见 DeviceRuntime.cpp 的推送点。
-    // 声明与推送点必须同时无条件,否则 Release(_DEBUG 未定义)编译不过。
-    void SetFramePushCallback(FramePushCallback cb);
-
     void IngestPolicyEvent(const RuntimePolicyEvent& ev);
-    bool SubmitExternalAfeCommand(AFE_Command type, uint8_t param);
-    uint64_t SubmitCommand(command cmd, CommandSource src,
-                           const char* reason = "");
 
-    RuntimeSnapshot GetSnapshot() const;
     RuntimePenState GetPenStateSnapshot() const;
     PenAfeReplayState GetPenAfeReplayStateSnapshot() const;
-    std::vector<HistoryEntry> GetHistory(std::size_t n = 200) const;
-    void ClearHistory();
 
-    /// Deterministic one-shot hook invoked on the actual worker thread.
-    void SetWorkerHookForTesting(std::function<void()> hook);
-    bool IsAcceptingExternalAfeCommands() const;
-
-    /// MCU 事件 ingress（runtime 内部完成状态/AFE 命令分派）
+    /// MCU 事件 ingress（runtime 内部完成状态分派）
     void IngestPenEvent(const Himax::Pen::PenEvent& ev);
 
     /// Invoked after any pen-state change commits, with the lock released. Lets the host
@@ -369,120 +226,38 @@ public:
 
 private:
     friend struct DeviceRuntimePenStateTestAccess;
-    StartRequestResult StartStateMachine();
-    ThreadResult WorkerMain();
     void HandlePenButtonStatusCode(uint8_t statusCode,
                                    uint8_t rawEventPayload,
                                    const char* source);
-    void ApplyPenStateToStylusPipeline();
+    void ApplyPenSessionChange();
     void UpdatePenState(std::function<void(RuntimePenState&, PenStateUpdateResult&)> updateFn);
-    void SubmitPenAfeCommandLocked(command cmd, const char* reason);
-    void BeginPenReplayInitCycle();
-    void ReplayPenStateAfterChipInit();
-
-    // 硬件校准不在 Chip::Init 里发,理由见 MaybeCalibrateAfterInit 的注释。
-    void ArmPostInitCalibration();
-    void MaybeCalibrateAfterInit(const Solvers::HeatmapFrame& frame);
     void DispatchPenButtonAction(const PenButtonAction& action, const char* source);
     // 橡皮擦开关的唯一状态源，硬件事件与 ToggleEraser 双击共用。
     bool IsEraserActive() const;
     void UpdateEraserState(bool active);
 
-    // ── Worker 状态处理（每个状态一个入口，Worker 只做调度） ──
-    void OnReady();              // ready → 尝试 auto init
-    void OnStreaming();          // streaming → 采帧 + 处理
-    void OnRecover();            // recover → 重试恢复
-    void OnSuspend();            // suspend → 屏幕关闭，暂停等待唤醒
-    bool OnQuit();               // quit → 清理并退出
-
-    struct QueuedCommand {
-        uint64_t id = 0;
-        uint64_t penGeneration = 0;
-        command cmd{};
-        CommandSource source = CommandSource::External;
-        std::chrono::steady_clock::time_point enqueued_at{};
-        std::array<char, 32> reason{};
-    };
-
-    QueuedCommand MakeQueuedCommand(command cmd, CommandSource src,
-                                    const char* reason,
-                                    uint64_t penGeneration = 0);
-    uint64_t EnqueueCommand(command cmd, CommandSource src,
-                            const char* reason, uint64_t penGeneration = 0);
-    bool ShouldExecuteCommand(const QueuedCommand& qc);
-    bool ExecuteCommand(const QueuedCommand& qc);
-    bool DrainCommands();
-    void CancelQueuedCommandsLocked(const char* detail);
-    void RecordHistory(const QueuedCommand& qc,
-                       bool ok, const std::string& det);
-
-    void SetState(workerState newState);
-    std::atomic<workerState> m_state{workerState::quit};
-    std::atomic<StopReason> m_stopReason{StopReason::None};
-
     RuntimePenState m_penState{};
     mutable std::mutex m_penStateMu;
     mutable std::mutex m_penIngressMu;
-    bool m_acceptPenAfeCommands = false;
     PenAfeReplayState m_penReplay{};
     std::atomic<bool> m_autoMode{false};
-    std::atomic<bool> m_stylusVhfEnabled{true};
-    std::atomic<bool> m_masterParserOnly{false};
+    std::atomic<bool> m_inputSuppressed{false};
     std::atomic<PenButtonMode> m_penButtonMode{PenButtonMode::WindowsInk};
     std::atomic<PenButtonRoute> m_penButtonRoute{PenButtonRoute::VhfOnly};
     std::atomic<bool> m_penButtonRouteExplicit{false};
     SyntheticPenButtonInjector m_synthPenButton;
-    Himax::Chip m_chip;
-    Solvers::TouchPipeline m_touchPipeline;
-    Solvers::StylusPipeline m_stylusPipeline;
-    mutable std::mutex m_pipelineMu;
-    VhfReporter m_vhfReporter;
-    uint8_t m_recoverCount = 0;
-    std::atomic<bool> m_needSuspendDeinit{false};
+    Device::BtPenInputLatch m_btPenLatch;
 
-    // GetFrame 连续非Timeout失败计数（容忍 AFE 命令后的短暂 bus 异常）
-    static constexpr int kMaxConsecutiveFrameErrors = 3;
-    int m_consecutiveFrameErrors = 0;
+    // 配置校验与策略应用共用一把锁，二者都不在 MCU 事件路径上。
+    mutable std::mutex m_policyMu;
 
+    // 电源事件的去抖窗口。索引是 RuntimePolicyEvent::Type。
     mutable std::mutex m_mu;
-    StaticQueue<QueuedCommand, 16> m_cmdQueue{};
-    bool m_acceptExternalAfeCommands = false;
-    bool m_displayOffSuspendPending = false;
-    std::chrono::steady_clock::time_point m_displayOffSuspendDeadline{};
-    std::atomic<bool> m_systemSuspendObserved{false};
-
-    mutable std::mutex m_workerHookMu;
-    std::function<void()> m_workerHookForTesting;
+    std::array<std::chrono::steady_clock::time_point, 16> m_lastEventByType{};
+    std::atomic<bool> m_shutdownRequested{false};
 
     mutable std::mutex m_penStateChangedCbMu;
     PenStateChangedCallback m_penStateChangedCb;
     mutable std::mutex m_penDoubleClickCbMu;
     PenDoubleClickCallback m_penDoubleClickCb;
-
-    std::array<HistoryEntry, kMaxHistoryItems> m_history{};
-    size_t m_historyWriteIdx = 0;
-    size_t m_historyCount = 0;
-    std::array<std::chrono::steady_clock::time_point, 16> m_lastEventByType{};
-
-    uint64_t m_lastCmdId = 0;
-    std::string m_lastNote;
-    std::atomic<uint64_t> m_nextCmdId{1};
-
-    // Init 之后待发的那一次硬件校准。只在 worker 线程读写,不需要同步。
-    // 见 MaybeCalibrateAfterInit。
-    bool m_calibrationPending = false;
-    bool m_calibrationSawContact = false;
-    uint32_t m_calibrationIdleFrames = 0;
-
-    mutable std::mutex m_framePushCbMu;
-    FramePushCallback m_framePushCb;
-
-    std::atomic<bool> m_running{false};
-    std::atomic<bool> m_stopped{false};
-    mutable std::mutex m_lifecycleMu;
-    std::condition_variable m_lifecycleCv;
-    bool m_stopInProgress = false;
-    bool m_selfStopDetached = false;
-    std::thread::id m_workerThreadId{};
-    std::thread m_thread;
 };

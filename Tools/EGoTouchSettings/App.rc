@@ -12,6 +12,21 @@
 
 IDI_APP_ICON ICON "Assets\\OpenEGoHub.ico"
 
+// 屏幕页的色彩对照图。嵌进 exe 而不是随包放一个文件：设置窗是非打包应用，用不了
+// ms-appx:///，而多一个外部文件就多一处部署时会漏掉的东西。
+//
+// 图片取自 Wikimedia Commons，CC0 公有领域贡献，作者 www.Pixel.la Free Stock Photos。
+// CC0 不要求署名，出处记在 THIRD-PARTY-NOTICES.md 里是为了说明来路可查。
+IDR_COLOR_REFERENCE RCDATA "Assets\\ColorReference.jpg"
+
+// 标题栏的品牌标记。与 .ico 同源，由 scripts/make_brand_assets.py 从同一份 SVG 栅格化，
+// 所以两处不会漂。
+//
+// 用 PNG 而不是复用上面那个 .ico：TitleBar.IconSource 要的是 ImageIconSource，它只吃
+// bmp/gif/jpg/png/tiff。PathIconSource 不能用，会让窗口一显示就崩，见
+// microsoft-ui-xaml#9784。
+IDR_BRAND_MARK RCDATA "Assets\\BrandMark.png"
+
 // 版本资源。「关于」页读的就是这里的 FILEVERSION——没有这个资源时那一行是空的，
 // 而一个空 TextBlock 照样占一行高，会把标题顶离垂直中线。
 VS_VERSION_INFO VERSIONINFO

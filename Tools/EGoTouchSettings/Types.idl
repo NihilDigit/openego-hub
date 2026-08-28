@@ -18,7 +18,6 @@ namespace EGoTouchSettings
     {
         MainWindow();
 
-        void ProviderToggled(IInspectable sender, Microsoft.UI.Xaml.RoutedEventArgs args);
         void PenModeSelectionChanged(IInspectable sender, Microsoft.UI.Xaml.Controls.SelectionChangedEventArgs args);
         void OneNoteCompatibilityToggled(IInspectable sender, Microsoft.UI.Xaml.RoutedEventArgs args);
         void AutoStartToggled(IInspectable sender, Microsoft.UI.Xaml.RoutedEventArgs args);

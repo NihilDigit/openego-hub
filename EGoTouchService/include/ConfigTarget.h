@@ -39,7 +39,6 @@ enum class ConfigApplyPhase {
 
 enum class ConfigApplyActionKind {
     ServicePolicy,
-    PipelineRuntime,
 };
 
 struct ConfigChange {
@@ -76,7 +75,7 @@ struct ConfigChangeSet {
 };
 
 struct ConfigApplyAction {
-    ConfigApplyActionKind kind = ConfigApplyActionKind::PipelineRuntime;
+    ConfigApplyActionKind kind = ConfigApplyActionKind::ServicePolicy;
     std::string targetName;
     Config::ConfigStore configStore;
     ServiceConfigState serviceConfig{};

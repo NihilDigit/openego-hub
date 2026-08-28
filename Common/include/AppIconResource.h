@@ -8,3 +8,10 @@
 // .rc 与 .cpp 都能包含这个头：资源编译器只认预处理指令，所以这里除了 #define 什么都不能有。
 
 #define IDI_APP_ICON 101
+
+// 屏幕页的色彩对照图，只有设置窗用。放在这里而不是另开一个头文件，理由与上面相同：
+// .rc 与读取它的 .cpp 必须用同一个数。
+#define IDR_COLOR_REFERENCE 102
+
+// 标题栏的品牌标记，只有设置窗用。
+#define IDR_BRAND_MARK 103

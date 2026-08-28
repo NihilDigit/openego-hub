@@ -298,6 +298,12 @@ bool Host::PollCommand(Command& out) {
     command.hasKbdDetachSupport = (copy.flags & kFlagHasKbdDetachSupport) != 0;
     command.kbdDetachSupport =
         static_cast<KbdDetachSupportCommand>(copy.kbdDetachSupport);
+    command.hasChargeLimit = (copy.flags & kFlagHasChargeLimit) != 0;
+    command.chargeLimit = copy.chargeLimit;
+    command.hasColorMode = (copy.flags & kFlagHasColorMode) != 0;
+    command.colorMode = static_cast<ColorModeCommand>(copy.colorMode);
+    command.hasVendorServices = (copy.flags & kFlagHasVendorServices) != 0;
+    command.vendorServices = static_cast<VendorServicesCommand>(copy.vendorServices);
     command.revision = copy.revision;
     command.submittedAtUnixMs = copy.submittedAtUnixMs;
     out = command;
@@ -403,6 +409,36 @@ bool Client::SubmitKbdDetachSupport(KbdDetachSupportCommand command) {
     Payload staged{};
     staged.flags = kFlagHasKbdDetachSupport;
     staged.kbdDetachSupport = static_cast<uint8_t>(command);
+    return Submit(staged);
+}
+
+bool Client::SubmitChargeLimit(uint8_t percent) {
+    // 范围在这里就挡住，而不是留给 Host：越界值送过去只会变成一次无声失败的外部调用。
+    // 0 例外，它是「交还智能充电」的哨兵，见 PenControlChannel.h 里 chargeLimit 的说明。
+    if (!m_view) return false;
+    if (percent != 0 && (percent < 50 || percent > 100)) return false;
+
+    Payload staged{};
+    staged.flags = kFlagHasChargeLimit;
+    staged.chargeLimit = percent;
+    return Submit(staged);
+}
+
+bool Client::SubmitColorMode(ColorModeCommand command) {
+    if (!m_view || command == ColorModeCommand::None) return false;
+
+    Payload staged{};
+    staged.flags = kFlagHasColorMode;
+    staged.colorMode = static_cast<uint8_t>(command);
+    return Submit(staged);
+}
+
+bool Client::SubmitVendorServices(VendorServicesCommand command) {
+    if (!m_view || command == VendorServicesCommand::None) return false;
+
+    Payload staged{};
+    staged.flags = kFlagHasVendorServices;
+    staged.vendorServices = static_cast<uint8_t>(command);
     return Submit(staged);
 }
 

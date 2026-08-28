@@ -87,6 +87,8 @@ const std::pair<ConfigKeyId, std::string_view> kStaticKeyMap[] = {
     {ConfigKeyId::TouchStrokeDecideMaxSamples, "touch.stroke.decide_max_samples"},
     {ConfigKeyId::TouchStrokePalmMinConcurrentStrokes, "touch.stroke.palm_min_concurrent_strokes"},
     {ConfigKeyId::TouchStrokeNominalFrameIntervalUs, "touch.stroke.nominal_frame_interval_us"},
+    {ConfigKeyId::TouchStrokeDragGateSizePerPeak, "touch.stroke.drag_gate_size_per_peak"},
+    {ConfigKeyId::TouchGestureDragThresholdSuspect, "touch.gesture.drag_threshold_suspect"},
     {ConfigKeyId::TouchSignalCondBaselineTrustTracks, "touch.signal_cond.baseline_trust_tracks_over_firmware_flag"},
     {ConfigKeyId::TouchSignalCondBaselineNoFingerGraceFrames, "touch.signal_cond.baseline_no_finger_grace_frames"},
     {ConfigKeyId::TouchSignalCondBaselineNoFingerMaxSignal, "touch.signal_cond.baseline_no_finger_max_signal"},

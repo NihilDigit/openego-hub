@@ -141,6 +141,27 @@ Asset ResolveKeyboard() {
     return resolved;
 }
 
+Asset ResolveMachine() {
+    static std::mutex cacheMutex;
+    static std::optional<Asset> cache;
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    if (cache) return *cache;
+
+    const std::wstring root = PCManagerRoot();
+    if (root.empty()) return {};
+
+    const std::wstring plugin = root +
+        L"components\\accessories_center\\accessories_app\\AccessoryApp\\Lib\\Plugins\\"
+        L"GaokunKeyboardApp.dll";
+
+    // 分离态与吸附态各有一张 648x648，画的都是平板加键盘。取吸附态：那是这台机器平时的
+    // 样子，两个部件贴合成一体，也更接近产品照。
+    Asset resolved = EmbeddedAsset(plugin, L"resources/snapping.png");
+    if (!resolved) resolved = EmbeddedAsset(plugin, L"resources/detach.png");
+    if (resolved) cache = resolved;
+    return resolved;
+}
+
 IAsyncOperation<Windows::Foundation::Size> DecodeCroppedAsync(
         std::vector<uint8_t> encoded,
         SoftwareBitmapSource const& destination) {

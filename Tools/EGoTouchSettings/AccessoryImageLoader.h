@@ -21,6 +21,11 @@ struct Asset {
 Asset ResolvePen(uint32_t modelId);
 Asset ResolveKeyboard();
 
+// 本机整机图（平板与键盘）。厂商没有按机型或产品码命名的整机照，PC Manager 的资源目录里
+// 只有配件的产品图和设备类别的抽象图标；唯一一张画着这台机器的图嵌在本机键盘插件里，
+// 走的是与笔图相同的托管资源读取路径。
+Asset ResolveMachine();
+
 // 解码后按 alpha 非透明像素的外接矩形裁掉画布空白，并留出少量抗锯齿安全边距。
 // 这是 Windows Imaging + WinUI 的通用加载路径，不依赖 Direct2D，也不修改源文件。
 winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::Foundation::Size>

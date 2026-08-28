@@ -75,12 +75,15 @@
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
       <WarningLevel>Level4</WarningLevel>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\Common\include;$(MSBuildThisFileDirectory)..\..\hal\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 /bigobj /DMIDL_NS_PREFIX %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>advapi32.lib;dwmapi.lib;user32.lib;shell32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- GaokunHal.lib 用于直接读电池。电量、容量、健康度、循环次数都不需要提权，本进程
+           自己读比经服务转一道更简单；唯独充电阈值要管理员权限，那一项仍走状态通道。
+           hal 的构建目录按配置分开，两侧的 CRT 必须一致，否则 LNK2038。 -->
+      <AdditionalDependencies>advapi32.lib;dwmapi.lib;user32.lib;shell32.lib;version.lib;$(MSBuildThisFileDirectory)..\..\hal\build\$(Configuration)\GaokunHal.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <!-- 资源编译器不共用 ClCompile 的搜索路径，App.rc 要包含 Common\include 下的
          AppIconResource.h，这里得单独给一份。 -->
@@ -88,14 +91,19 @@
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
   </ItemDefinitionGroup>
+  <!-- CRT 要与 GaokunHal.lib 一致，否则链接器报 LNK4098（默认库冲突）。仓库其余部分由
+       CMake 的 CMAKE_MSVC_RUNTIME_LIBRARY 统一成静态 CRT，这个 vcxproj 不在 CMake 管辖内，
+       得自己写一遍。 -->
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
     <ClCompile>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -116,6 +124,7 @@
       <DependentUpon>BatteryIndicator.xaml</DependentUpon>
     </ClInclude>
     <ClInclude Include="AccessoryImageLoader.h" />
+    <ClInclude Include="DeviceInfo.h" />
     <ClInclude Include="MainWindow.xaml.h">
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </ClInclude>
@@ -150,6 +159,7 @@
       <DependentUpon>BatteryIndicator.xaml</DependentUpon>
     </ClCompile>
     <ClCompile Include="AccessoryImageLoader.cpp" />
+    <ClCompile Include="DeviceInfo.cpp" />
     <ClCompile Include="MainWindow.xaml.cpp">
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </ClCompile>

@@ -36,6 +36,12 @@ inline constexpr uint32_t kFlagHasPenButtonMode = 1u << 0;
 inline constexpr uint32_t kFlagHasProviderLease = 1u << 1;
 inline constexpr uint32_t kFlagHasInputSuppression = 1u << 2;
 inline constexpr uint32_t kFlagHasKbdDetachSupport = 1u << 3;
+// 电池充电阈值与色域模式。两者都由 gaokun-hal 的组件落地，服务只负责把提交转过去：
+// 充电阈值走 WMI 需要提权，托盘是中完整性进程，不能自己执行。
+inline constexpr uint32_t kFlagHasChargeLimit = 1u << 4;
+inline constexpr uint32_t kFlagHasColorMode = 1u << 5;
+// 华为后台服务的总开关。只有服务有权改 SCM 配置，托盘做不到。
+inline constexpr uint32_t kFlagHasVendorServices = 1u << 6;
 
 enum class ProviderLeaseCommand : uint8_t {
     None = 0,
@@ -57,6 +63,21 @@ enum class KbdDetachSupportCommand : uint8_t {
     Enable,
 };
 
+// 色域。同样用 None 表示「这条提交与色域无关」，与 flags 位构成双重判据。
+enum class ColorModeCommand : uint8_t {
+    None = 0,
+    Srgb,
+    DisplayP3,
+    Reset,
+};
+
+// 华为后台服务。名单与保留项见 EGoTouchService/include/VendorServices.h。
+enum class VendorServicesCommand : uint8_t {
+    None = 0,
+    Disable,
+    Restore,
+};
+
 struct Payload {
     uint32_t flags = 0;
     // 写者每次提交递增。Host 只在看到新值时应用一次，重启后的服务把当前值当作已消费,
@@ -68,6 +89,14 @@ struct Payload {
     // 占用原先的填充字节，Snapshot 布局因此不变，kAbiVersion 无需递增：旧 Host 看不懂新
     // 标志位，会把这条提交当作一条没有任何已知字段的空提交忽略掉，而不是错读。
     uint8_t  kbdDetachSupport = 0; // KbdDetachSupportCommand
+    // 同样落在原有的填充字节里（前四个 uint8 之后到 uint64 之间还有四字节对齐空隙），
+    // 所以 Snapshot 仍是 32 字节，kAbiVersion 不必递增。
+    // 50..100 的百分比，valid with kFlagHasChargeLimit。0 是一个哨兵值，表示把充电交还给
+    // 厂商的智能充电模式——有效上限不可能低于 50，所以不必为此再占一个字节。
+    uint8_t  chargeLimit = 0;
+    uint8_t  colorMode = 0;        // ColorModeCommand，valid with kFlagHasColorMode
+    uint8_t  vendorServices = 0;   // VendorServicesCommand，valid with kFlagHasVendorServices
+    uint8_t  _reserved = 0;        // 对齐空隙的最后一个字节，留给下一个开关
     uint64_t submittedAtUnixMs = 0;
 };
 static_assert(std::is_trivially_copyable_v<Payload>,
@@ -100,6 +129,12 @@ struct Command {
     InputSuppressionCommand inputSuppression = InputSuppressionCommand::None;
     bool     hasKbdDetachSupport = false;
     KbdDetachSupportCommand kbdDetachSupport = KbdDetachSupportCommand::None;
+    bool     hasChargeLimit = false;
+    uint8_t  chargeLimit = 0;
+    bool     hasColorMode = false;
+    ColorModeCommand colorMode = ColorModeCommand::None;
+    bool     hasVendorServices = false;
+    VendorServicesCommand vendorServices = VendorServicesCommand::None;
     uint32_t revision = 0;
     uint64_t submittedAtUnixMs = 0;
 };
@@ -160,6 +195,10 @@ public:
     bool SubmitProviderLease(ProviderLeaseCommand command);
     bool SubmitInputSuppression(InputSuppressionCommand command);
     bool SubmitKbdDetachSupport(KbdDetachSupportCommand command);
+    // percent 取 50..100，越界直接拒绝而不是交给 Host。
+    bool SubmitChargeLimit(uint8_t percent);
+    bool SubmitColorMode(ColorModeCommand command);
+    bool SubmitVendorServices(VendorServicesCommand command);
 
 private:
     HANDLE m_mapping = nullptr;

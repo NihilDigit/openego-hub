@@ -13,9 +13,9 @@
 
 <p align="center">中文 | <a href="README.en.md">English</a></p>
 
-HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为触控服务，以及 PC Manager 的配件状态与笔设置。全部为 ARM64 原生。
+HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为触控服务与 PC Manager。
 
-本项目 fork 自 [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)，触控栈源自该项目，此后经过修改。
+本项目 fork 自 [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)，采集与注入的骨架源自该项目，此后经过修改。
 
 ---
 
@@ -24,7 +24,10 @@ HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为�
 - **触控**：多指触控。写字时手掌压在屏幕上不会误触，用笔时忽略手指。
 - **手写笔**：M-Pencil 的压力与倾斜。侧键双击可设为遵循系统笔设置，或切换书写与橡皮擦（后者可启用 OneNote 兼容）。
 - **键盘**：可开关「分离后保持无线连接」。
-- **设备信息**：笔与键盘的电量、充电与吸附状态、固件版本、硬件版本、序列号。
+- **电池**：充电阈值，可用厂商的智能充电，也可手动设定区间。电池健康、循环次数、剩余时间。
+- **屏幕**：色域、色温、护眼模式。取值来自面板的出厂标定，由显示驱动下发，不经软件后处理。
+- **服务**：停用华为的后台服务，可随时恢复。
+- **设备信息**：笔与键盘的电量、充电与吸附状态、固件版本、序列号；主机型号、处理器、内存、系统版本。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/devices.png" alt="设备页" width="720">
@@ -41,6 +44,24 @@ HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为�
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/settings.png" alt="设置窗口" width="720">
 </p>
+
+---
+
+## 触控用的是原厂算法
+
+触控与手写笔没有重新实现。本项目启动一个自己的宿主进程，在其中加载华为原本的 `THP_Service.dll`，数据从 Himax 控制器经原厂算法链直达 Windows：
+
+```
+Himax → THP_Service → TSACore → 原厂 VHF → Windows HID
+```
+
+因此掌拒、压力、倾斜、笔与手指的仲裁都与原厂一致。替换掉的只是华为那个很薄的 .NET 服务外壳。代价是不能卸载华为驱动，否则触控失效。
+
+接管是租约式的，不是开机就抢。服务启动时触控仍归华为，登录界面和托盘未启动时照常可用；托盘取得租约后才切换，租约断开（托盘退出或崩溃）则自动交还。任一环节失败都不会让触控无人负责。
+
+屏幕色彩、电池阈值、键盘无线连接同样依赖华为的组件，而这些组件编译为 x64。ARM64 进程无法加载 x64 DLL，因此每项能力各自运行在独立进程中，统一放在 `hal/` 下。
+
+细节见 [`hal/README.md`](hal/README.md)。
 
 ---
 
@@ -62,7 +83,7 @@ HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为�
 
 ## 安装
 
-从 Releases 下载 `OpenEGoHubSetup_arm64_vX.Y.Z.msi` 并运行，注册服务需要管理员权限。安装后服务随 Windows 启动，开始菜单中有入口。`OpenEGoHubTestSetup_arm64_*.msi` 在此基础上附带诊断工具。
+从 Releases 下载 `OpenEGoHubSetup_arm64_vX.Y.Z.msi` 并运行，注册服务需要管理员权限。安装后服务随 Windows 启动，开始菜单中有入口。
 
 安装时华为触控服务会被停用，两者不能同时驱动同一块硬件。切换回华为驱动无需卸载，在设置窗口中退出即可。
 
@@ -86,6 +107,24 @@ cmake --preset arm64-Release
 cmake --build --preset arm64-Release
 ```
 
+`hal/` 单独构建，且要先于主项目——主项目链接它产出的 `GaokunHal.lib`，缺了会在配置阶段失败。Debug 与 Release 各需构建一次：
+
+```powershell
+cd hal; .\scripts\build.ps1 -Config Debug
+```
+
+服务本身是原生 ARM64。需要 ARM64EC 的只有 `hal/` 下那几个加载华为 x64 DLL 的宿主，它们由 hal 自己的构建脚本产出，不经过这里的 preset。
+
+开发机上以管理员身份安装 Debug 服务，随后用 DevCycle 循环：
+
+```powershell
+scripts\install_debug_service.bat
+pwsh -File scripts\dev-cycle.ps1
+```
+
+退出调试并恢复发行服务用 `pwsh -File scripts\dev-cycle.ps1 -RestoreRelease`。
+`-NoTray` 只启动服务而不取得租约，因此会按设计继续由华为提供触控。
+
 打包：
 
 ```powershell
@@ -102,9 +141,10 @@ wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
 
 ## 目录结构
 
-- `EGoTouchService/`：服务。`Device/` 硬件抽象，`Solvers/` 触控与手写笔管线，`Host/` 系统接口。
+- `EGoTouchService/`：服务。`Device/` 采集与注入，`Tsa/` 厂商后端适配，`Host/` 系统接口。
+- `hal/`：厂商硬件层。凡是需要加载华为 x64 DLL 的部分都在这里，各自独立进程、编译为 ARM64EC。
 - `Common/`：跨进程通道与共享配置。
-- `Tools/`：托盘、设置窗口、诊断工作台。
+- `Tools/`：托盘与设置窗口。
 - `docs/`：逆向所得的协议文档。
 - `scripts/`：构建、打包与开发脚本。
 
@@ -112,9 +152,7 @@ wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
 
 ## 致谢
 
-本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233），触控栈源自该项目，此后经过修改。其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
-
-触控管线以 Chromium 的 ChromeOS 触控栈为对照做过测量，掌抑制阈值即由此重新标定。
+本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233）。Himax 帧采集、笔的 MCU 传输、VHF 注入与服务骨架都源自该项目；触控算法原先也是，后来换成厂商后端并移除。其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 另有三个更早在这台设备上做过工作的项目，本项目参考过它们：
 
@@ -128,7 +166,7 @@ wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
 
 MIT。见 [LICENSE](LICENSE)。
 
-上游的版权声明与内置 Dear ImGui 的声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，任何形式的再分发（源码或二进制）都须随附该文件。
+上游的版权声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，任何形式的再分发（源码或二进制）都须随附该文件。
 
 ---
 

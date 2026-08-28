@@ -1,0 +1,189 @@
+// 笔的常驻宿主。加载 x64 的 PenService.dll，因此是 ARM64EC；把状态发布到共享内存、
+// 把离散事件送进命名管道，供原生 ARM64 的调用方消费。
+//
+// 与 GaokunThpHost 一样，它由上层拉起，同时等待停止事件与上层进程句柄：上层崩溃时宿主
+// 自行退出，不会留下一个占着 MCU 通道的孤儿。
+
+#include "PenChannelLayout.h"
+#include "PenService.h"
+
+#include <windows.h>
+
+#include <cstdio>
+#include <string>
+
+using namespace Gaokun::Pen;
+
+namespace {
+
+// PenService.dll 随 PC Manager 的配件中心安装。这个目录同时是 HuaweiPenEraserService
+// 建议删除的那个 Plugins 目录，被清理过就找不到，这时要说清楚原因而不是只报加载失败。
+constexpr const wchar_t *kDependSuffix =
+    L"\\components\\accessories_center\\accessories_app\\AccessoryApp\\Lib\\Plugins\\Depend";
+
+[[nodiscard]] bool DiscoverDependDirectory(std::wstring &out) noexcept {
+    const wchar_t *roots[] = {
+        L"C:\\Program Files\\Huawei\\PCManager",
+        L"C:\\Program Files (x86)\\Huawei\\PCManager",
+    };
+    for (const wchar_t *root : roots) {
+        std::wstring candidate = std::wstring(root) + kDependSuffix;
+        const std::wstring probe = candidate + L"\\PenService.dll";
+        if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            out = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds, bool verbose) {
+    HANDLE stopEvent = nullptr;
+    if (stopEventName && *stopEventName) {
+        stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
+        if (!stopEvent) {
+            wprintf(L"cannot open stop event %ls (err=%lu)\n", stopEventName, GetLastError());
+            return 2;
+        }
+    }
+
+    HANDLE parent = nullptr;
+    if (parentPid != 0) {
+        parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+        if (!parent) {
+            wprintf(L"cannot open parent process %lu (err=%lu)\n", parentPid, GetLastError());
+            return 2;
+        }
+    }
+
+    Service service;
+    if (!service.Start()) {
+        wprintf(L"failed to start PenService (err=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    Wire::SnapshotWriter snapshots;
+    Wire::EventWriter events;
+    if (!snapshots.Open(Wire::kSnapshotName)) {
+        wprintf(L"cannot create the snapshot mapping (err=%lu)\n", GetLastError());
+        return 1;
+    }
+    if (!events.Open(Wire::kEventPipeName)) {
+        wprintf(L"cannot create the event pipe (err=%lu)\n", GetLastError());
+        return 1;
+    }
+
+    service.RequestRefresh();
+
+    HANDLE waits[2];
+    DWORD waitCount = 0;
+    if (stopEvent) waits[waitCount++] = stopEvent;
+    if (parent) waits[waitCount++] = parent;
+
+    // 主循环节奏由事件流决定，不是由刷新周期决定：事件要尽快转出去，而整表刷新只是兜底,
+    // 因为多数字段本来就由 MCU 主动推送。
+    const DWORD tickMs = 200;
+    const int ticksPerRefresh = refreshSeconds * 1000 / static_cast<int>(tickMs);
+    int tick = 0;
+    Snapshot lastPublished{};
+    bool everPublished = false;
+
+    for (;;) {
+        if (waitCount > 0) {
+            const DWORD result = WaitForMultipleObjects(waitCount, waits, FALSE, tickMs);
+            if (result != WAIT_TIMEOUT) break;
+        } else {
+            Sleep(tickMs);
+        }
+
+        events.PollForReader();
+
+        Event event{};
+        while (service.PopEvent(event)) {
+            if (verbose) wprintf(L"event kind=%u value=%d\n", event.kind, event.value);
+            (void)events.Send(event);
+        }
+
+        const Snapshot current = service.GetSnapshot();
+        if (!everPublished || current.updatedAtUnixMs != lastPublished.updatedAtUnixMs) {
+            snapshots.Publish(current);
+            lastPublished = current;
+            everPublished = true;
+            if (verbose) {
+                wprintf(L"snapshot flags=0x%08x battery=%u module=%u\n", current.flags,
+                        current.battery, current.moduleId);
+            }
+        }
+
+        if (ticksPerRefresh > 0 && ++tick >= ticksPerRefresh) {
+            tick = 0;
+            service.RequestRefresh();
+        }
+    }
+
+    if (stopEvent) CloseHandle(stopEvent);
+    if (parent) CloseHandle(parent);
+    return 0;
+}
+
+void PrintUsage() {
+    wprintf(L"gaokun-penhost -- pen state and events from the vendor MCU channel\n\n"
+            L"  --hosted --parent <pid> --stop-event <name>   run under a supervisor\n"
+            L"  --console [seconds]                           run standalone and print updates\n");
+}
+
+} // namespace
+
+int wmain(int argc, wchar_t **argv) {
+    std::wstring depend;
+    if (!DiscoverDependDirectory(depend)) {
+        wprintf(L"PenService.dll not found under <PCManager>%ls\n"
+                L"If that directory was removed to disable the vendor pen handling, this\n"
+                L"feature is unavailable until it is restored.\n",
+                kDependSuffix);
+        return 2;
+    }
+    (void)SetDllDirectoryW(depend.c_str());
+
+    if (argc > 1 && _wcsicmp(argv[1], L"--console") == 0) {
+        const int seconds = argc >= 3 ? _wtoi(argv[2]) : 0;
+        wprintf(L"[gaokun-penhost] console mode; depend=%ls\n", depend.c_str());
+        if (seconds > 0) {
+            // 自带超时，便于无人值守地跑一次冒烟而不需要外部去杀进程。
+            HANDLE timer = CreateWaitableTimerW(nullptr, TRUE, nullptr);
+            LARGE_INTEGER due{};
+            due.QuadPart = -static_cast<LONGLONG>(seconds) * 10000000LL;
+            (void)SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+            const DWORD self = GetCurrentProcessId();
+            wchar_t name[64];
+            swprintf_s(name, L"GaokunPenHostConsoleStop.%lu", self);
+            HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, name);
+            // 计时到点后置位停止事件，复用与托管模式相同的退出路径。
+            struct Ctx { HANDLE timer; HANDLE stop; };
+            static Ctx ctx{timer, stop};
+            CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+                WaitForSingleObject(ctx.timer, INFINITE);
+                SetEvent(ctx.stop);
+                return 0;
+            }, nullptr, 0, nullptr);
+            return RunHosted(0, name, 5, true);
+        }
+        return RunHosted(0, nullptr, 5, true);
+    }
+
+    if (argc > 1 && _wcsicmp(argv[1], L"--hosted") == 0) {
+        DWORD parentPid = 0;
+        const wchar_t *stopEvent = nullptr;
+        for (int i = 2; i + 1 < argc; i += 2) {
+            if (_wcsicmp(argv[i], L"--parent") == 0) {
+                parentPid = static_cast<DWORD>(_wtoi(argv[i + 1]));
+            } else if (_wcsicmp(argv[i], L"--stop-event") == 0) {
+                stopEvent = argv[i + 1];
+            }
+        }
+        return RunHosted(parentPid, stopEvent, 5, false);
+    }
+
+    PrintUsage();
+    return 1;
+}

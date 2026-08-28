@@ -1,17 +1,11 @@
-#include "ConfigSync.h"
 #include "config/ConfigCatalog.h"
 #include "config/ConfigKeyId.h"
 #include "config/ConfigKeyMap.h"
 #include "config/ConfigSchemaSnapshot.h"
 #include "FrameLayout.h"
 #include "GuiLogSink.h"
-#include "IpcPipeClient.h"
-#include "IpcPipeServer.h"
-#include "IpcProtocol.h"
-#include "IpcSecurity.h"
 #include "Logger.h"
 #include "PenButtonConfig.h"
-#include "SharedFrameBuffer.h"
 
 #include <cstdint>
 #include <iostream>
@@ -40,24 +34,11 @@ void TestCommonHeadersExposeExpectedTypes() {
     Require(static_cast<uint16_t>(Config::ConfigKeyId::MaxKeyId) == 0x0300, "ConfigKeyId.h should expose MaxKeyId");
 }
 
-void TestIpcCompatibilityHeadersCompile() {
-    static_assert(std::is_class_v<Ipc::ConfigDirtyFlag>);
-    static_assert(std::is_class_v<Ipc::IpcPipeClient>);
-    static_assert(std::is_class_v<Ipc::IpcPipeServer>);
-    static_assert(std::is_class_v<Ipc::SharedFrameWriter>);
-    static_assert(std::is_class_v<Ipc::SharedFrameReader>);
-    static_assert(std::is_class_v<Ipc::ScopedSecurityDescriptor>);
-    Require(Ipc::kIpcProtocolVersion == 2, "IpcProtocol.h should expose protocol version");
-    Require(sizeof(Ipc::IpcRequest{}.param) == 256, "IpcProtocol.h should expose request parameter ABI");
-    Require(sizeof(Ipc::IpcResponse{}.data) == 4096, "IpcProtocol.h should expose response payload ABI");
-}
-
 } // namespace
 
 int main() {
     try {
         TestCommonHeadersExposeExpectedTypes();
-        TestIpcCompatibilityHeadersCompile();
         std::cout << "[TEST] CommonHeaderCompileTest passed.\n";
         return 0;
     } catch (const std::exception& ex) {

@@ -38,6 +38,22 @@ enum class Command : uint32_t {
     SetKeyboardWirelessOnDetach,
     // 设备接入时的弹窗开关。
     SetDeviceNotifications,
+    // 电池充电阈值，lParam 取 50..100 的百分比；0 表示交还厂商的智能充电模式。
+    SetChargeLimit,
+    // 色域，lParam 取 PenControl::ColorModeCommand 的数值。
+    SetColorMode,
+    // 华为后台服务的总开关，lParam 非零表示禁用。
+    SetVendorServicesDisabled,
+    // 以下三项由托盘直接执行，不经服务转发。它们要落的色彩状态存在 HKCU 下，而服务跑在
+    // LocalSystem，那是另一个 hive——写进去用户会话读不到，自然色彩的守护进程更是会在
+    // 第一帧读到「已关闭」然后立刻退出。色域不受此限，它只改 3D LUT 不碰这份状态。
+    //
+    // 色温，lParam 取开尔文值，0 表示关闭。
+    SetColorTemperature,
+    // 护眼模式，lParam 非零表示开启。
+    SetEyeComfort,
+    // 自然色彩显示，lParam 非零表示开启。
+    SetNaturalColor,
 };
 
 } // namespace EGoTouchTrayIpc

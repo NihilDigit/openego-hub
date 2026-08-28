@@ -7,25 +7,10 @@
 #include <iostream>
 
 struct DeviceRuntimePenStateTestAccess {
-    struct PipelineState {
-        Solvers::StylusPenSession session{};
-        Asa::BtInputSnapshot btSample{};
-        bool lastFrameWasTerminal = true;
-    };
-
-    static bool Process(DeviceRuntime& runtime, Solvers::HeatmapFrame& frame) {
-        std::lock_guard<std::mutex> lock(runtime.m_pipelineMu);
-        return runtime.m_stylusPipeline.Process(frame);
-    }
-
-    static PipelineState Snapshot(DeviceRuntime& runtime) {
-        std::lock_guard<std::mutex> pipelineLock(runtime.m_pipelineMu);
-        std::lock_guard<std::mutex> btLock(runtime.m_stylusPipeline.m_btMutex);
-        return {
-            runtime.m_stylusPipeline.m_penSession,
-            runtime.m_stylusPipeline.m_btSample,
-            runtime.m_stylusPipeline.m_lastFrameWasTerminal,
-        };
+    static Device::BtPenSample BtSample(DeviceRuntime& runtime) {
+        Device::BtPenSample sample{};
+        runtime.m_btPenLatch.Snapshot(sample);
+        return sample;
     }
 
     static void DispatchDoubleClick(DeviceRuntime& runtime) {
@@ -55,28 +40,6 @@ PenEvent MakePayloadEvent(PenUsbEventCode code, uint8_t payload) {
     return event;
 }
 
-// Feeds the parser through its slave-suffix path: one 9x9 block per TX with a
-// valid anchor and a single strong cell, which is the least the coordinate
-// solver needs to produce a peak on both axes.
-Solvers::HeatmapFrame MakeWritingFrame() {
-    Solvers::HeatmapFrame frame{};
-    frame.slaveSuffixValid = true;
-
-    const auto fillBlock = [&](int base, int peakRow, int peakCol) {
-        frame.slaveSuffix.words[base + 0] = 4;   // anchorRow
-        frame.slaveSuffix.words[base + 1] = 4;   // anchorCol
-        for (int r = 0; r < Frame::kGridDim; ++r) {
-            for (int c = 0; c < Frame::kGridDim; ++c) {
-                frame.slaveSuffix.words[base + 2 + r * Frame::kGridDim + c] = 200;
-            }
-        }
-        frame.slaveSuffix.words[base + 2 + peakRow * Frame::kGridDim + peakCol] = 3000;
-    };
-    fillBlock(0, 4, 4);
-    fillBlock(Frame::kBlockWords, 4, 4);
-    return frame;
-}
-
 void TestIdentityEventsDoNotInferConnection() {
     auto runtime = MakeRuntime();
 
@@ -97,10 +60,8 @@ void TestIdentityEventsDoNotInferConnection() {
     Require(state.hasStylusId && state.stylusId == 2,
             "PenModule should retain model-derived stylus ID behavior");
     Require(state.protocolHintFromPenModule &&
-                state.protocolHint == Solvers::StylusProtocolHint::Hpp3,
+                state.protocolHint == StylusProtocolHint::Hpp3,
             "PenModule should update the protocol hint");
-    Require(runtime.GetSnapshot().queue_depth == 0,
-            "PenModule must not submit AFE work before the runtime command gate opens");
 
     auto serial = MakePayloadEvent(PenUsbEventCode::PenSerialNumber, 0);
     serial.semantic.hasSerialNumber = true;
@@ -135,8 +96,6 @@ void TestIdentityEventsDoNotInferConnection() {
             "PenTypeInfo should update stylus ID");
     Require(state.penRevision == 5,
             "each distinct identity update should advance pen revision once");
-    Require(runtime.GetSnapshot().queue_depth == 0,
-            "identity updates must not bypass the closed runtime command gate");
 
     auto connected = MakePayloadEvent(PenUsbEventCode::PenConnStatus, 1);
     connected.semantic.hasConnection = true;
@@ -146,8 +105,6 @@ void TestIdentityEventsDoNotInferConnection() {
     state = runtime.GetPenStateSnapshot();
     Require(state.hasConnection && state.connected,
             "PenConnStatus should be the event that establishes connection");
-    Require(runtime.GetSnapshot().queue_depth == 0,
-            "connected PenConnStatus must not bypass the closed runtime command gate");
 }
 
 void TestDuplicateDisconnectClearsIdentityObservably() {
@@ -199,8 +156,6 @@ void TestPairStatusIsIndependentFromConnection() {
             "DevPairStatus must not fabricate connection");
     Require(state.penRevision == 1,
             "first pair status should advance pen revision");
-    Require(runtime.GetSnapshot().queue_depth == 0,
-            "DevPairStatus must not enqueue an AFE connection command");
 
     runtime.IngestPenEvent(pairStatus);
     Require(runtime.GetPenStateSnapshot().penRevision == 1,
@@ -216,7 +171,9 @@ void TestPairStatusIsIndependentFromConnection() {
             "pair-only updates should not advance stylus pipeline generation");
 }
 
-void TestPairStatusDuringWritingPreservesPipelineAndBtSample() {
+// 配对状态是诊断量，不是笔身份。它变化时不能连带清掉蓝牙压力锁存——上一帧的压力还要
+// 喂给这一帧的后端，清了就是一次落笔中途掉压。
+void TestPairStatusDoesNotClearBtSample() {
     auto runtime = MakeRuntime();
 
     auto connected = MakePayloadEvent(PenUsbEventCode::PenConnStatus, 1);
@@ -232,22 +189,15 @@ void TestPairStatusDuringWritingPreservesPipelineAndBtSample() {
     module.semantic.penModuleProtocolHint = Himax::Pen::PenModuleProtocolHint::Hpp3;
     runtime.IngestPenEvent(module);
 
-    // Tip pressure arrives over BT, so it has to be in place before the frame
-    // that is supposed to read as writing.
+    // 笔尖压力经蓝牙送达，锁存在这里；配对状态事件随后到达，不应该动它。
     const std::array<uint16_t, 4> pressure{100, 200, 300, 400};
     const std::array<uint16_t, 4> rawPressure{1000, 2000, 3000, 4000};
     runtime.IngestBtMcuPressurePacket(pressure, rawPressure, 0x12, 0x34);
 
-    auto writingFrame = MakeWritingFrame();
-    Require(DeviceRuntimePenStateTestAccess::Process(runtime, writingFrame),
-            "connected writing frame should process");
-    Require(writingFrame.stylus.output.valid && writingFrame.stylus.output.tipDown,
-            "test precondition should establish active writing state");
-
     const auto penBefore = runtime.GetPenStateSnapshot();
-    const auto pipelineBefore = DeviceRuntimePenStateTestAccess::Snapshot(runtime);
-    Require(!pipelineBefore.lastFrameWasTerminal && pipelineBefore.btSample.hasSample,
-            "test precondition should retain writing state and BT sample");
+    const auto btBefore = DeviceRuntimePenStateTestAccess::BtSample(runtime);
+    Require(btBefore.hasSample && btBefore.hasFreq,
+            "test precondition should latch the BT pressure packet");
 
     auto pairStatus = MakePayloadEvent(PenUsbEventCode::DevPairStatus, 9);
     pairStatus.semantic.hasPairStatus = true;
@@ -255,19 +205,18 @@ void TestPairStatusDuringWritingPreservesPipelineAndBtSample() {
     runtime.IngestPenEvent(pairStatus);
 
     const auto penAfter = runtime.GetPenStateSnapshot();
-    const auto pipelineAfter = DeviceRuntimePenStateTestAccess::Snapshot(runtime);
+    const auto btAfter = DeviceRuntimePenStateTestAccess::BtSample(runtime);
     Require(penAfter.penRevision == penBefore.penRevision + 1,
             "pair status should remain visible through diagnostic revision");
+    // pipelineRevision 仍是「笔身份变了」的判据：它前进才会让运行时清空蓝牙锁存。
     Require(penAfter.pipelineRevision == penBefore.pipelineRevision,
-            "pair status should not advance stylus pipeline generation");
-    Require(pipelineAfter.session.revision == pipelineBefore.session.revision,
-            "pair status should not publish a new stylus session");
-    Require(!pipelineAfter.lastFrameWasTerminal,
-            "pair status should not reset active writing stages");
-    Require(pipelineAfter.btSample.hasSample &&
-                pipelineAfter.btSample.seq == pipelineBefore.btSample.seq &&
-                pipelineAfter.btSample.pressure == pipelineBefore.btSample.pressure &&
-                pipelineAfter.btSample.rawPressure == pipelineBefore.btSample.rawPressure,
+            "pair status should not advance the pen session generation");
+    Require(btAfter.hasSample &&
+                btAfter.seq == btBefore.seq &&
+                btAfter.pressure == btBefore.pressure &&
+                btAfter.rawPressure == btBefore.rawPressure &&
+                btAfter.freq1 == btBefore.freq1 &&
+                btAfter.freq2 == btBefore.freq2,
             "pair status should not clear the current BT pressure sample");
 }
 
@@ -332,20 +281,18 @@ void TestToggleEraserPublishesStateBeforeNotifyingUserSession() {
             "the disable state must be published before the second notification");
 }
 
-void TestOneNoteInputSuppressionIsIndependentFromVhfEnabled() {
+// 抑制状态位仍然要能翻转并被读回：托盘的 ScopedOneNoteInputSuppression 阻塞等待它经
+// PenStatusChannel 变化。实际的输入闸门已经不在这一侧，这里只覆盖状态位本身。
+void TestOneNoteInputSuppressionStateIsObservable() {
     auto runtime = MakeRuntime();
-    Require(runtime.IsVhfEnabled(), "test precondition: VHF is enabled");
     Require(!runtime.IsInputSuppressed(),
             "input is not suppressed by default");
 
     runtime.SetInputSuppressed(true);
-    Require(runtime.IsInputSuppressed(), "suppression gate turns on");
-    Require(runtime.IsVhfEnabled(),
-            "short suppression must not rewrite the persistent VHF setting");
+    Require(runtime.IsInputSuppressed(), "suppression state turns on");
 
     runtime.SetInputSuppressed(false);
-    Require(!runtime.IsInputSuppressed(), "suppression gate turns off");
-    Require(runtime.IsVhfEnabled(), "VHF remains enabled after suppression");
+    Require(!runtime.IsInputSuppressed(), "suppression state turns off");
 }
 
 } // namespace
@@ -355,10 +302,10 @@ int main() {
         TestIdentityEventsDoNotInferConnection();
         TestDuplicateDisconnectClearsIdentityObservably();
         TestPairStatusIsIndependentFromConnection();
-        TestPairStatusDuringWritingPreservesPipelineAndBtSample();
+        TestPairStatusDoesNotClearBtSample();
         TestPairStatusFrameProducesSemanticState();
         TestToggleEraserPublishesStateBeforeNotifyingUserSession();
-        TestOneNoteInputSuppressionIsIndependentFromVhfEnabled();
+        TestOneNoteInputSuppressionStateIsObservable();
         std::cout << "[TEST] DeviceRuntime pen state tests passed.\n";
         return 0;
     } catch (const std::exception& ex) {

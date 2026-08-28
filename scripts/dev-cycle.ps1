@@ -31,7 +31,8 @@
         an interrupted build, then reporting "no work to do" while linking an object
         compiled before the change — the service kept running old code through several
         edit/rebuild rounds and only a scan of the binary's string literals exposed it.
-        -Clean is the escape hatch for that.
+        The script now compares service inputs with the output and automatically takes
+        the clean path when the output is older; -Clean remains the explicit escape hatch.
 
 .PARAMETER Clean
     Delete the build directory first, forcing a full reconfigure and rebuild. Reach for
@@ -44,12 +45,10 @@
 .PARAMETER NoStart
     Build and leave the service stopped (attach a debugger, then start it yourself).
 
-.PARAMETER App
-    Launch the EGoTouchApp diagnostics workbench after the service is up.
-
 .PARAMETER NoTray
     Skip relaunching EGoTouchTray. It normally comes back with the service, since it is
-    part of the running system rather than a diagnostic tool.
+    part of the running system rather than a diagnostic tool. Skipping it also leaves the
+    provider lease released, so Huawei remains the active touch provider.
 
 .PARAMETER Settings
     Launch the WinUI settings window after the service is up. It is not relaunched by
@@ -62,7 +61,6 @@
 
 .EXAMPLE
     .\dev-cycle.ps1
-    .\dev-cycle.ps1 -App
     .\dev-cycle.ps1 -Settings
     .\dev-cycle.ps1 -Clean
     .\dev-cycle.ps1 -RestoreRelease
@@ -72,7 +70,6 @@ param(
     [switch]$Clean,
     [switch]$SkipBuild,
     [switch]$NoStart,
-    [switch]$App,
     [switch]$NoTray,
     [switch]$Settings,
     [switch]$RestoreRelease
@@ -84,14 +81,15 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'vsenv.ps1')
 
 $RepoRoot   = Split-Path -Parent $PSScriptRoot
-$BuildDir   = Join-Path $RepoRoot 'build\arm64-Debug'
+$Preset     = 'arm64-Debug'
+$BuildDir   = Join-Path $RepoRoot "build\$Preset"
 $ServiceExe = Join-Path $BuildDir 'OpenEGoHubService.exe'
-$AppExe     = Join-Path $BuildDir 'OpenEGoHubApp.exe'
-$TrayExe    = Join-Path $BuildDir 'OpenEGoHubTray.exe'
+$UiBuildDir = $BuildDir
+$TrayExe    = Join-Path $UiBuildDir 'OpenEGoHubTray.exe'
 # WinUI 工程走 MSBuild，但 CMake 用 /p:OutDir 把它的产物也导向了这个构建目录。取这里而不是
 # vcxproj 自己的 ARM64\Debug\：那份只在单独用 msbuild 编译时才更新，从这个脚本启动会拉起一个
 # 比刚构建的版本更旧的 exe。
-$SettingsExe = Join-Path $BuildDir 'OpenEGoHubSettings.exe'
+$SettingsExe = Join-Path $UiBuildDir 'OpenEGoHubSettings.exe'
 $DebugSvc   = 'OpenEGoHubServiceDebug'
 $ReleaseSvc = 'OpenEGoHubService'
 
@@ -136,6 +134,66 @@ function Get-SvcState {
     return $svc.Status
 }
 
+function Get-SvcBinaryPath {
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$DebugSvc'" -ErrorAction SilentlyContinue
+    if ($null -eq $svc -or [string]::IsNullOrWhiteSpace($svc.PathName)) { return $null }
+    $raw = $svc.PathName.Trim()
+    if ($raw.StartsWith('"')) {
+        $closing = $raw.IndexOf('"', 1)
+        if ($closing -le 1) { return $null }
+        return $raw.Substring(1, $closing - 1)
+    }
+    return ($raw -split '[ \t]+', 2)[0]
+}
+
+function Assert-DebugServiceBinary {
+    $configured = Get-SvcBinaryPath
+    $installHint = 'scripts\install_debug_service.bat'
+    if ($null -eq $configured) {
+        throw "Unable to read $DebugSvc ImagePath. Reinstall it with $installHint."
+    }
+    $expected = [IO.Path]::GetFullPath($ServiceExe)
+    $actual = [IO.Path]::GetFullPath($configured)
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals($actual, $expected)) {
+        throw "$DebugSvc points to '$actual', but this mode requires '$expected'. Run $installHint as administrator."
+    }
+}
+
+function Test-ServiceBinaryStale {
+    # The current CMake/Ninja toolchain can record a mojibake /showIncludes prefix,
+    # leaving the dependency database empty.  A timestamp guard is deliberately
+    # conservative: if any service input is newer than the executable, rebuild the
+    # service from a fresh configure instead of trusting that database.
+    if (-not (Test-Path -LiteralPath $ServiceExe)) {
+        return $true
+    }
+
+    $binaryTime = (Get-Item -LiteralPath $ServiceExe).LastWriteTimeUtc
+    $inputs = @(
+        Get-Item -LiteralPath (Join-Path $RepoRoot 'CMakeLists.txt'),
+                     (Join-Path $RepoRoot 'CMakePresets.json') -ErrorAction SilentlyContinue
+    )
+    # EGoTouchService links the shared Common/IPCCore, Device, Solvers and Host
+    # targets as well.  Include those source roots, but not test fixtures or the
+    # private .bak snapshots kept beside the untracked TSA research files.
+    foreach ($root in @('EGoTouchService', 'Common')) {
+        $rootPath = Join-Path $RepoRoot $root
+        $inputs += @(Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Extension -ne '.bak' -and
+                $_.FullName -notmatch '[\\/]tests[\\/]'
+            })
+    }
+    $newest = $inputs |
+        Sort-Object -Property LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if ($null -ne $newest -and $newest.LastWriteTimeUtc -gt $binaryTime) {
+        Write-Warn "Service output is older than '$($newest.FullName)' ($($newest.LastWriteTime))."
+        return $true
+    }
+    return $false
+}
+
 function Stop-Svc {
     param($Name)
     $state = Get-SvcState $Name
@@ -157,7 +215,7 @@ function Stop-Svc {
 function Stop-Workbench {
     # These exes are build outputs, so a running instance blocks the link with LNK1168
     # exactly the way a running service does.
-    $procs = @(Get-Process -Name 'OpenEGoHubApp', 'OpenEGoHubTray', 'OpenEGoHubSettings' -ErrorAction SilentlyContinue)
+    $procs = @(Get-Process -Name 'OpenEGoHubTray', 'OpenEGoHubSettings' -ErrorAction SilentlyContinue)
     if ($procs.Count -eq 0) { return }
     $names = ($procs | ForEach-Object { $_.ProcessName } | Sort-Object -Unique) -join ', '
     Write-Step "Closing $names (they lock their own exe against the linker) ..."
@@ -165,11 +223,11 @@ function Stop-Workbench {
         try { $p.CloseMainWindow() | Out-Null } catch {}
     }
     $deadline = (Get-Date).AddSeconds(5)
-    while ((Get-Process -Name 'OpenEGoHubApp', 'OpenEGoHubTray', 'OpenEGoHubSettings' -ErrorAction SilentlyContinue) -and
+    while ((Get-Process -Name 'OpenEGoHubTray', 'OpenEGoHubSettings' -ErrorAction SilentlyContinue) -and
            (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 200
     }
-    $stubborn = @(Get-Process -Name 'OpenEGoHubApp', 'OpenEGoHubTray', 'OpenEGoHubSettings' -ErrorAction SilentlyContinue)
+    $stubborn = @(Get-Process -Name 'OpenEGoHubTray', 'OpenEGoHubSettings' -ErrorAction SilentlyContinue)
     if ($stubborn.Count -gt 0) { $stubborn | Stop-Process -Force }
     Start-Sleep -Milliseconds 300
     Write-Ok "$names closed."
@@ -206,13 +264,20 @@ if ($null -eq (Get-SvcState $DebugSvc)) {
     throw "$DebugSvc is not installed. Run scripts\install_debug_service.bat as administrator first."
 }
 
+Assert-DebugServiceBinary
+
 Suspend-ReleaseService
 Stop-Svc $DebugSvc | Out-Null
 
 if (-not $SkipBuild) {
     Stop-Workbench
     Import-VsDevEnv
-    if ($Clean -and (Test-Path $BuildDir)) {
+    $forceClean = $Clean
+    if (-not $forceClean -and (Test-ServiceBinaryStale)) {
+        Write-Warn "Incremental dependency state is not trusted; forcing a clean $Preset rebuild."
+        $forceClean = $true
+    }
+    if ($forceClean -and (Test-Path $BuildDir)) {
         # 直接删除而不是走回收站：构建目录按定义可再生，而且有几个 GB，塞进回收站只是把问题
         # 挪个地方。源码不在这里面。
         Write-Step "Removing $BuildDir for a clean rebuild ..."
@@ -222,12 +287,13 @@ if (-not $SkipBuild) {
     Push-Location $RepoRoot
     try {
         if (-not (Test-Path (Join-Path $BuildDir 'CMakeCache.txt'))) {
-            Write-Step "Configuring arm64-Debug ..."
-            cmake --preset arm64-Debug
+            Write-Step "Configuring $Preset ..."
+            cmake --preset $Preset
             if ($LASTEXITCODE -ne 0) { throw "CMake configure failed." }
         }
-        Write-Step "Building arm64-Debug ..."
-        cmake --build --preset arm64-Debug --target EGoTouchService EGoTouchApp EGoTouchTray
+
+        Write-Step "Building $Preset ..."
+        cmake --build --preset $Preset --target EGoTouchService EGoTouchTray
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "Build failed. Services left stopped; run -RestoreRelease to get touch back."
             throw "Build failed."
@@ -255,18 +321,13 @@ try {
 Write-Ok "$DebugSvc running from $ServiceExe"
 Write-Host "     log: C:\ProgramData\OpenEGoHub\logs\OpenEGoHubServiceDebug.txt"
 
-if ($App) {
-    if (-not (Test-Path $AppExe)) { throw "EGoTouchApp not found: $AppExe" }
-    # 工作台与托盘对权限的需求正好相反，所以这里保留继承来的提权：它走 IPCCore 控制管道，
-    # 那条管道刻意做成仅管理员可访问（能改配置、能停运行时），降权只会让它连不上。
-    Write-Step "Launching diagnostics workbench ..."
-    Start-Process -FilePath $AppExe
+if ($NoTray) {
+    Write-Warn "-NoTray leaves the provider lease released, so touch intentionally stays on Huawei; omit -NoTray to exercise the OpenEGo path."
 }
 
 if (-not $NoTray) {
-    # The tray companion is part of the running system, not a diagnostic tool, so it
-    # comes back with the service rather than only under -App. It was stopped above
-    # alongside the workbench because its exe is also a build output.
+    # 托盘属于运行中的系统而不是诊断工具，所以它随服务一起回来。上面停掉它是因为
+    # 它的 exe 也是构建产物，链接时会被占用。
     if (Test-Path $TrayExe) {
         Write-Step "Launching pen status tray ..."
         Start-DeElevated $TrayExe

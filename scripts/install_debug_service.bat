@@ -12,7 +12,22 @@ if %errorlevel% neq 0 (
 
 echo === EGoTouchService Debug Install ===
 echo.
-echo Binary: %~dp0..\build\arm64-Debug\OpenEGoHubService.exe
+set "BUILD_PRESET=arm64-Debug"
+if not "%~1"=="" (
+    echo [ERROR] Usage: install_debug_service.bat
+    pause
+    exit /b 2
+)
+set "SERVICE_BIN=%~dp0..\build\%BUILD_PRESET%\OpenEGoHubService.exe"
+if not exist "%SERVICE_BIN%" (
+    echo [ERROR] Service binary not found:
+    echo         %SERVICE_BIN%
+    echo         Build the matching preset before installing the debug service.
+    pause
+    exit /b 1
+)
+echo Preset: %BUILD_PRESET%
+echo Binary: %SERVICE_BIN%
 echo.
 
 :: Stop and remove old debug service if exists
@@ -31,7 +46,7 @@ if not exist "C:\ProgramData\OpenEGoHub" mkdir "C:\ProgramData\OpenEGoHub"
 if not exist "C:\ProgramData\OpenEGoHub\logs" mkdir "C:\ProgramData\OpenEGoHub\logs"
 
 :: Install service pointing to debug build directory (Manual start)
-sc create OpenEGoHubServiceDebug binPath= "%~dp0..\build\arm64-Debug\OpenEGoHubService.exe" start= demand
+sc create OpenEGoHubServiceDebug binPath= "%SERVICE_BIN%" start= demand
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to create service.
     pause
@@ -59,6 +74,6 @@ echo [INFO] Debug service installed. You can start it manually or attach a debug
 sc query OpenEGoHubServiceDebug | findstr STATE
 echo.
 echo [OK] Debug Install complete. Service registered as OpenEGoHubServiceDebug (Manual Start) from:
-echo     %~dp0..\build\arm64-Debug\OpenEGoHubService.exe
+echo     %SERVICE_BIN%
 echo.
 pause

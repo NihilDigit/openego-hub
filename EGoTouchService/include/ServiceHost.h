@@ -4,9 +4,17 @@
 #include "PenButtonConfig.h"
 #include "ServiceConfigCore.h"
 
+#include "GaokunKeyboard.h"
+#include "GaokunPen.h"
+#include "GaokunThp.h"
+
+#include <atomic>
+#include <thread>
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -15,20 +23,6 @@ struct RuntimePenState;
 
 namespace Config {
 class ConfigStore;
-}
-
-namespace Himax::Pen {
-struct PenPressureStats;
-}
-
-namespace Ipc {
-struct DebugFieldSchemaWire;
-struct IpcRequest;
-struct IpcResponse;
-}
-
-namespace Solvers {
-struct HeatmapFrame;
 }
 
 namespace PenControl {
@@ -76,22 +70,33 @@ private:
     std::unique_ptr<DeviceRuntime> m_deviceRuntime;
     std::unique_ptr<Impl> m_impl;
 
+    // 触控由 gaokun-hal 的 ARM64EC 宿主进程提供，这里只持有它的生命周期。声明放在 Impl
+    // 之外是因为 provider 的启停要直接用到它，而 Impl 是不完全类型。
+    Gaokun::Thp::HostController m_thpHost;
+
+    // 笔与键盘的 MCU 通道同样来自 gaokun-hal：那边直接驱动厂商的 PenService.dll 与
+    // KeyboardService.dll，型号识别与按键语义都留在厂商实现里，不必在本仓库重新推导一遍。
+    Gaokun::Pen::HostController m_penHost;
+    Gaokun::Pen::SnapshotReader m_penSnapshots;
+    Gaokun::Pen::EventReader m_penEvents;
+    Gaokun::Keyboard::HostController m_kbdHost;
+    Gaokun::Keyboard::SnapshotReader m_kbdSnapshots;
+    Gaokun::Keyboard::EventReader m_kbdEvents;
+
+    // 轮询两条通道并转发到 PenStatusChannel。共享内存快照本身就是可重复读的，所以这里
+    // 用轮询而不是等通知：错过一轮没有代价，而少一个跨进程的唤醒路径就少一处可能卡住的地方。
+    std::thread m_accessoryThread;
+    std::atomic<bool> m_accessoryStop{false};
+
+    // 宿主可执行文件的位置：优先本服务同目录（部署形态），其次 hal 的构建目录（开发形态）。
+    [[nodiscard]] static std::wstring ResolveHostPath(const wchar_t* exeName);
+    [[nodiscard]] static std::wstring ResolveThpHostPath();
+
+    void AccessoryLoop();
+    void PublishAccessoryStatus();
+
     // 与 IPC 无关，所以不在守卫里：PublishPenStatus 在所有配置里都要编。
     static void CopyCString(char* dst, size_t dstSize, std::string_view src);
-
-#if EGOTOUCH_SERVICE_ENABLE_IPC
-    static uint32_t HashDebugSchema(const std::vector<Ipc::DebugFieldSchemaWire>& defs);
-    static uint16_t DeriveDebugSchemaVersion(uint32_t schemaHash);
-    static uint64_t EncodeDebugValue(const Solvers::HeatmapFrame& frame,
-                                     const Ipc::DebugFieldSchemaWire& def,
-                                     bool& valid);
-    static uint64_t EncodePenValue(const Himax::Pen::PenPressureStats& s,
-                                   bool evtRunning,
-                                   bool pressRunning,
-                                   int16_t sourceIndex,
-                                   bool& valid);
-    void BuildDebugSchema();
-#endif
 
     bool InitializeConfigStores();
     void PublishPenStatus(const RuntimePenState& state);
@@ -111,9 +116,6 @@ private:
     void PublishTouchProviderState(PenStatus::TouchProviderState state,
                                    uint8_t error);
     void RepublishPenStatus();
-#if EGOTOUCH_SERVICE_ENABLE_IPC
-    ReloadServiceConfigResult HandleReloadServiceConfig(const ServiceConfigState& reloadedConfig);
-#endif
     bool ValidateStartupConfig(const Config::ConfigStore& store) const;
     bool StartRuntimeAndPipeline();
     bool StartSystemStateMonitor();
@@ -125,22 +127,6 @@ private:
     void StopPenSubsystem();
     void StopSystemStateMonitor();
     void StopRuntimeSubsystem();
-
-#if EGOTOUCH_SERVICE_ENABLE_IPC
-    void HandleIpcEnterDebugMode(Ipc::IpcResponse& resp);
-    void HandleIpcExitDebugMode(Ipc::IpcResponse& resp);
-    void HandleIpcGetConfigCatalogV3(const Ipc::IpcRequest& req, Ipc::IpcResponse& resp);
-    void HandleIpcGetConfigV3Snapshot(const Ipc::IpcRequest& req, Ipc::IpcResponse& resp);
-    void HandleIpcConfigV3ApplyPatch(const Ipc::IpcRequest& req, Ipc::IpcResponse& resp);
-    void HandleIpcConfigV3Persist(Ipc::IpcResponse& resp);
-    void HandleIpcGetLogs(Ipc::IpcResponse& resp);
-    void HandleIpcGetPenBridgeStatus(Ipc::IpcResponse& resp);
-    void HandleIpcGetPenIdentityStatus(Ipc::IpcResponse& resp);
-    void HandleIpcGetDebugSchema(const Ipc::IpcRequest& req, Ipc::IpcResponse& resp);
-    void HandleIpcGetDebugSnapshot(Ipc::IpcResponse& resp);
-
-    Ipc::IpcResponse HandleIpcCommand(const Ipc::IpcRequest& req);
-#endif
 };
 
 } // namespace Service

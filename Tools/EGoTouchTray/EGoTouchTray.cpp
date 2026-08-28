@@ -118,6 +118,7 @@ constexpr UINT kTrayMenuExit = 100;
 constexpr UINT kTrayMenuSettings = 102;
 constexpr UINT kTrayMenuProvider = 103;
 constexpr UINT kTrayMenuKbdDetach = 104;
+constexpr UINT kTrayMenuEyeComfort = 105;
 // 双击行为各项的命令 ID = 基址 + PenButtonMode 的数值。这样菜单项与枚举一一对应，
 // 加一个模式只要多一行 AppendMenu，WM_COMMAND 那边不用跟着改。
 constexpr UINT kTrayMenuPenButtonBase = 200;
@@ -1041,6 +1042,13 @@ bool SelectRibbonTab(IUIAutomationElement* tab) {
 // Office 桌面版 OneNote 不消费虚拟笔的 eraser flags，但它把绘图工具作为可调用的 Ribbon
 // 元素暴露出来。这里只在 OneNote 已经是前台时触碰它，不激活窗口、不改笔记，也不影响
 // Journal 等遵循 Windows Ink 状态机的应用。
+//
+// TODO 这是权宜之计，代价是绑死了 OneNote 的界面细节：靠 AutomationId "TabInk" 找页签，
+// 靠工具名匹配橡皮擦（见 IsEraserToolName 里那张硬编码的语言表），Office 改版或换一种
+// 界面语言就会失效，而失效是静默的——Invoke 不到就当作没同步。同步期间还得把笔输入闸掉，
+// 否则 UIA 的点击会和正在书写的笔互相干扰，这就是 ScopedOneNoteInputSuppression 的由来。
+// 值得研究的替代路径是 OneNote 自己的对象模型，不经界面直接切工具；没查过它是否暴露了
+// 绘图工具，也没查过桌面版与 UWP 版的差异。
 bool SyncForegroundOneNoteTool(
         IUIAutomation* automation,
         HWND oneNoteWindow,
@@ -1503,6 +1511,40 @@ bool SubmitKbdDetachSupportCommand(bool enabled) {
     return true;
 }
 
+// 充电阈值与色域只是转发给服务。托盘是中完整性进程：改充电阈值走 WMI 需要提权，而落地
+// 这两件事的是 gaokun-hal 的组件，服务才知道它们装在哪。
+bool SubmitChargeLimitCommand(uint8_t percent) {
+    std::lock_guard<std::mutex> submitLock(g_controlSubmitMutex);
+    g_app.control.Close();
+    if (!g_app.control.Open() || !g_app.control.SubmitChargeLimit(percent)) {
+        g_app.control.Close();
+        return false;
+    }
+    return true;
+}
+
+bool SubmitVendorServicesCommand(bool disable) {
+    std::lock_guard<std::mutex> submitLock(g_controlSubmitMutex);
+    g_app.control.Close();
+    const auto command = disable ? PenControl::VendorServicesCommand::Disable
+                                 : PenControl::VendorServicesCommand::Restore;
+    if (!g_app.control.Open() || !g_app.control.SubmitVendorServices(command)) {
+        g_app.control.Close();
+        return false;
+    }
+    return true;
+}
+
+bool SubmitColorModeCommand(PenControl::ColorModeCommand command) {
+    std::lock_guard<std::mutex> submitLock(g_controlSubmitMutex);
+    g_app.control.Close();
+    if (!g_app.control.Open() || !g_app.control.SubmitColorMode(command)) {
+        g_app.control.Close();
+        return false;
+    }
+    return true;
+}
+
 std::wstring SettingsExecutablePath() {
     wchar_t modulePath[32768]{};
     const DWORD length = GetModuleFileNameW(
@@ -1515,6 +1557,82 @@ std::wstring SettingsExecutablePath() {
     settingsPath.resize(separator + 1);
     settingsPath += L"OpenEGoHubSettings.exe";
     return settingsPath;
+}
+
+// 色温、护眼、自然色彩三项由托盘直接执行，不像色域那样经服务转发。理由是它们要落的
+// 色彩状态存在 HKCU 下：服务跑在 LocalSystem，那是另一个 hive，写进去用户会话读不到。
+//
+// 自然色彩的守护进程更是只能在这里跑——它每帧重读状态，在服务的 hive 里会读到「已关闭」
+// 然后第一帧就退出。
+std::wstring DisplayToolPath() {
+    wchar_t modulePath[32768]{};
+    const DWORD length = GetModuleFileNameW(
+        nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)));
+    if (length == 0 || length >= std::size(modulePath)) return {};
+
+    std::wstring path(modulePath, length);
+    const size_t separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) return {};
+    path.resize(separator + 1);
+    path += L"GaokunDisplay.exe";
+    return path;
+}
+
+// 同步跑一次显示工具。实测一条命令约 57 ms，含拉起进程、加载 qdcmlib、枚举显示器与写 PCC。
+bool RunDisplayTool(const std::wstring& arguments) {
+    const std::wstring exePath = DisplayToolPath();
+    if (exePath.empty()) return false;
+
+    std::wstring commandLine = L"\"" + exePath + L"\" " + arguments;
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(exePath.c_str(), commandLine.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
+                        &startup, &process)) {
+        return false;
+    }
+    CloseHandle(process.hThread);
+    // 等它做完再回，否则设置窗紧接着读状态会读到旧值。57 ms 在 IPC 处理里是可以接受的。
+    const DWORD waited = WaitForSingleObject(process.hProcess, 5000);
+    DWORD exitCode = 1;
+    if (waited == WAIT_OBJECT_0) (void)GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hProcess);
+    return waited == WAIT_OBJECT_0 && exitCode == 0;
+}
+
+// 自然色彩的守护进程。它要持续跟随环境光，是这批功能里唯一常驻的一个。
+std::mutex g_naturalColorMutex;
+HANDLE g_naturalColorDaemon = nullptr;
+
+void StopNaturalColorDaemon() {
+    std::lock_guard<std::mutex> lock(g_naturalColorMutex);
+    if (!g_naturalColorDaemon) return;
+    // 守护进程发现状态被改成 off 会自己退出，但那要等到下一帧；这里直接终止，免得关掉开关
+    // 之后它还在写 PCC。它只读状态与写 PCC，没有需要收尾的资源。
+    (void)TerminateProcess(g_naturalColorDaemon, 0);
+    CloseHandle(g_naturalColorDaemon);
+    g_naturalColorDaemon = nullptr;
+}
+
+bool StartNaturalColorDaemon() {
+    const std::wstring exePath = DisplayToolPath();
+    if (exePath.empty()) return false;
+
+    StopNaturalColorDaemon();
+
+    std::wstring commandLine = L"\"" + exePath + L"\" --natural-color-daemon";
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(exePath.c_str(), commandLine.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
+                        &startup, &process)) {
+        return false;
+    }
+    CloseHandle(process.hThread);
+
+    std::lock_guard<std::mutex> lock(g_naturalColorMutex);
+    g_naturalColorDaemon = process.hProcess;
+    return true;
 }
 
 HWND FindSettingsBridge() {
@@ -1638,14 +1756,21 @@ void ShowTrayMenu() {
     const bool connected = EnsureControlChannel();
 
     HMENU penMenu = CreatePopupMenu();
+    // 与控制面板上的下拉项逐字一致。同一个设置在两处叫不同的名字，用户会以为是两件事。
     AppendPenButtonItem(penMenu, PenButtonMode::WindowsInk, L"遵循系统笔设置", connected);
-    AppendPenButtonItem(penMenu, PenButtonMode::ToggleEraser, L"切换橡皮擦", connected);
+    AppendPenButtonItem(penMenu, PenButtonMode::ToggleEraser, L"切换书写与橡皮擦", connected);
 
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | MF_DEFAULT, kTrayMenuSettings, L"打开控制面板");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // 这一项控制的是托盘租约，也就是触控由本程序接管还是交还原厂。名字里原先带着
+    // EGoTouchRev，那是自研驱动时期的叫法，现在走的是原厂算法链的 ARM64EC 宿主。
     AppendMenuW(menu, MF_STRING | (g_app.providerDesired ? MF_CHECKED : 0),
-                kTrayMenuProvider, L"使用 EGoTouchRev 触控");
+                kTrayMenuProvider, L"接管触控与手写笔");
+    // 护眼是新做的几项里最常用的一个，值得一个不用开面板的入口。状态读注册表——那是托盘
+    // 自己每次改完写下的，与 GaokunDisplay 的持久化状态同源。
+    AppendMenuW(menu, MF_STRING | (ReadUserSetting(L"EyeComfort", 0) ? MF_CHECKED : 0),
+                kTrayMenuEyeComfort, L"护眼模式");
     // 顶层这一项不置灰：置灰的弹出项展不开，用户就看不到里面为什么不能选。
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(penMenu),
                 connected ? L"笔双击行为" : L"笔双击行为（服务未连接）");
@@ -1662,7 +1787,8 @@ void ShowTrayMenu() {
         AppendMenuW(menu, flags, kTrayMenuKbdDetach, L"键盘分离后保持无线连接");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"退出并恢复华为触控");
+    // 与控制面板上那一项同名。两处指向同一个动作，叫法不同会让人以为是两件事。
+    AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"退出并交还原厂");
 
     // Required so the menu dismisses when focus moves elsewhere.
     SetForegroundWindow(g_app.hwnd);
@@ -1786,6 +1912,69 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case EGoTouchTrayIpc::Command::SetKeyboardWirelessOnDetach:
             return SubmitKbdDetachSupportCommand(lParam != 0) ? 1 : 0;
 
+        case EGoTouchTrayIpc::Command::SetVendorServicesDisabled:
+            return SubmitVendorServicesCommand(lParam != 0) ? 1 : 0;
+
+        case EGoTouchTrayIpc::Command::SetChargeLimit: {
+            const auto percent = static_cast<uint8_t>(lParam);
+            if (!SubmitChargeLimitCommand(percent)) return 0;
+            // 0 是「交还智能充电」的哨兵而不是一个上限，记下去会让设置窗下次把滑块摆到 0。
+            // 阈值现在能从硬件读回来，这份记录只在服务还没连上时用作初值。
+            if (percent != 0) (void)WriteUserSetting(L"ChargeLimit", percent);
+            return 1;
+        }
+
+        case EGoTouchTrayIpc::Command::SetColorTemperature: {
+            const auto kelvin = static_cast<int>(lParam);
+            wchar_t args[64];
+            if (kelvin <= 0) {
+                swprintf_s(args, L"--temperature off");
+            } else {
+                swprintf_s(args, L"--temperature %d", kelvin);
+            }
+            if (!RunDisplayTool(args)) return 0;
+            (void)WriteUserSetting(L"ColorTemperature", static_cast<DWORD>(kelvin <= 0 ? 0 : kelvin));
+            return 1;
+        }
+
+        case EGoTouchTrayIpc::Command::SetEyeComfort: {
+            const bool enabled = lParam != 0;
+            if (!RunDisplayTool(enabled ? L"--eye-comfort on" : L"--eye-comfort off")) return 0;
+            (void)WriteUserSetting(L"EyeComfort", enabled ? 1u : 0u);
+            return 1;
+        }
+
+        case EGoTouchTrayIpc::Command::SetNaturalColor: {
+            const bool enabled = lParam != 0;
+            // 先落状态再管守护进程：守护进程启动后第一件事就是读状态，顺序反了它会读到
+            // 「已关闭」然后立刻退出。
+            if (!RunDisplayTool(enabled ? L"--natural-color on" : L"--natural-color off")) return 0;
+            if (enabled) {
+                if (!StartNaturalColorDaemon()) {
+                    // 一次性下发已经生效，只是不会再跟随环境光变化。不回滚状态：那会让
+                    // 用户看到开关自己弹回去，而画面其实已经变了。
+                    (void)WriteUserSetting(L"NaturalColor", 1u);
+                    return 1;
+                }
+            } else {
+                StopNaturalColorDaemon();
+            }
+            (void)WriteUserSetting(L"NaturalColor", enabled ? 1u : 0u);
+            return 1;
+        }
+
+        case EGoTouchTrayIpc::Command::SetColorMode: {
+            const auto command = static_cast<PenControl::ColorModeCommand>(lParam);
+            if (!SubmitColorModeCommand(command)) return 0;
+            // 存的是下拉的索引，与 XAML 里三项的顺序对应（Native / sRGB / Display P3），
+            // 而不是命令枚举的值。
+            const DWORD index = command == PenControl::ColorModeCommand::Srgb        ? 1u
+                                : command == PenControl::ColorModeCommand::DisplayP3 ? 2u
+                                                                                     : 0u;
+            (void)WriteUserSetting(L"ColorMode", index);
+            return 1;
+        }
+
         case EGoTouchTrayIpc::Command::SetDeviceNotifications: {
             const bool requested = lParam != 0;
             if (!WriteUserSetting(L"DeviceNotifications", requested ? 1u : 0u)) return 0;
@@ -1821,6 +2010,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (id == kTrayMenuKbdDetach) {
             // 提交完不动对勾，与双击行为同理：生效与否由服务和 MCU 决定，下一次轮询读回。
             (void)SubmitKbdDetachSupportCommand(!g_app.state.kbdDetachSupport);
+        } else if (id == kTrayMenuEyeComfort) {
+            // 与设置窗那条走同一个入口：色彩状态存在 HKCU，必须在用户会话里落地，服务的
+            // hive 不是这一份。菜单每次现建，对勾下次打开时自然就对了。
+            const bool enable = ReadUserSetting(L"EyeComfort", 0) == 0;
+            if (RunDisplayTool(enable ? L"--eye-comfort on" : L"--eye-comfort off")) {
+                (void)WriteUserSetting(L"EyeComfort", enable ? 1u : 0u);
+            }
         } else if (id >= kTrayMenuPenButtonBase &&
                    id < kTrayMenuPenButtonBase + kTrayMenuPenButtonSpan) {
             // 提交完不动对勾：能不能生效由服务说了算，下一次轮询读回新模式时菜单自然就对了。
@@ -1862,6 +2058,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         ReleaseTrayIcon();
+        // 自然色彩的守护进程是托盘拉起的，托盘走了它没人管——留着会继续按最后一次读到的
+        // 环境光写 PCC，而界面已经不在了，用户无从关掉它。
+        StopNaturalColorDaemon();
         // 退出路径统一收在 wWinMain 里，那里靠这个空句柄判断窗口还要不要销毁。
         g_app.hwnd = nullptr;
         PostQuitMessage(0);
