@@ -16,6 +16,11 @@
 A control centre for the HUAWEI MateBook E Go, in place of Huawei PC Manager: the pen,
 the detachable keyboard, battery, display and the touch service.
 
+Huawei delivers all of that through x64 user-mode software. This project does not run
+it. ARM64EC hosts load the components directly instead, so the touch algorithm, the
+panel's factory calibration and the charging policy are still the vendor's own, while PC
+Manager and its background services no longer have to be resident.
+
 ---
 
 ## What it does
@@ -90,35 +95,8 @@ stops working. Touch, display colour, the charge threshold and the keyboard's wi
 link all reuse components from there.
 
 Installing disables the vendor touch service — the two cannot drive the same hardware at
-once. Switching back does not need an uninstall: quit from the settings window.
-
----
-
-## Touch runs on the vendor's own algorithm
-
-Touch and pen recognition is not reimplemented. The project loads Huawei's
-`THP_Service.dll`, so frames travel from the Himax controller through the vendor chain
-straight to Windows:
-
-```
-Himax -> THP_Service -> TSACore -> vendor VHF -> Windows HID
-```
-
-Palm rejection, pressure, tilt and pen/finger arbitration are therefore identical to
-stock. What this project replaces is the thin .NET service shell Huawei ships around
-that chain.
-
-This program takes touch over while it runs and hands it back to Huawei on exit or on a
-crash. Before it starts, and on the login screen, touch is Huawei's and works as it
-always did.
-
----
-
-## Non-goals
-
-- **Firmware update.** Requires vendor-signed images, and a failure bricks hardware.
-- **Voice assistant integration.**
-- **Global annotation.**
+once. This program holds touch while it runs and hands it back on exit or on a crash;
+switching back does not need an uninstall, just quit from the settings window.
 
 ---
 
