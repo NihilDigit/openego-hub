@@ -204,16 +204,26 @@ build.
 - **OneNote input suppression does nothing.** `SetInputSuppressed` now only publishes a
   state bit, which the tray blocks on; there is no gate behind it any more, and live pen
   input comes out of the vendor VHF inside `GaokunThpHost`. Suppressing it means reaching
-  into the vendor chain, and there may be no clean way to do that.
+  into the vendor chain, and there may be no clean way to do that. `THP_Service` does have
+  a suppress flag of its own (`+0xC938C`, gates every VHF write) but it is driven by
+  `PEN_CONN_STATUS` and the `VHFFunction` config value, not by anything we can call.
 - **`ApplyServicePolicy` still takes `stylusVhfEnabled`** and has nowhere to apply it.
   The log line says `(no effect)`. The setting is still in the config schema.
-- **The eraser never reaches the HID report.** The vendor VHF's pen collection declares
-  `Invert(0x3C)` and `Eraser(0x45)` in its descriptor, but both bits are always 0 —
-  `penFlags` never leaves `NONE`, `PEN_FLAG_BARREL` included. `CommandSendPenCurrentFunc(1)`
-  does reach the pen (it stops reporting pressure) and `THP_Service` does log the resulting
-  `ERASER_TOGGLE`, but nothing turns that into a report bit. Desktop OneNote would consume
-  it — it reads `StylusInfo.bIsInvertedCursor`, which comes from the same `Invert` bit — so
-  the UIA workaround in the tray is not the only possible route. The reasoning is in
+- **The eraser never reaches the HID report, and the reason is not known.** Every link in
+  the chain has been verified individually and they still do not add up. `THP_Service`
+  stores the `ERASER_TOGGLE` payload in a global; the pen report writer reads that global
+  and, when it is 1, sets `Invert` and `Eraser` in the report — the code is correct, bit
+  for bit. The global really does hold 1 (read out of the live host with
+  `ReadProcessMemory`, and it flips back to 0 on `CommandSendPenCurrentFunc(0)`), the VHF
+  handle is valid, and the host had not restarted. Yet `penFlags` never leaves `NONE`, and
+  the tip switch stays set, which means the eraser branch never ran. Ruled out: log
+  credibility, a second write site, mismatched read/write addresses, a null buffer, host
+  restart, packet contention between the HAL hosts, and the out-of-range transition
+  Windows requires of button-based erasers. What is left needs a breakpoint in
+  `THP_Service.dll+0x14620` on a LocalSystem process that is driving touch. Desktop
+  OneNote would consume the bit if it appeared — it reads `StylusInfo.bIsInvertedCursor`,
+  which comes from the same `Invert` bit — so the tray's UIA workaround is not the only
+  possible route, just the only one that works today. See `hal/docs/thp-eraser.md`,
   `docs/onenote_ink_eraser.md`, `docs/pen_eraser_flow.md` and `docs/penservice_events.md`.
 - **Side-button events depend on a handshake nothing else performs.** `PenEventBridge` is
   what makes the MCU report at all (`0x7101` + two `0x7701` + `0x7B` InitParam, plus an ACK

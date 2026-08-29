@@ -1039,9 +1039,14 @@ bool SelectRibbonTab(IUIAutomationElement* tab) {
            SUCCEEDED(selection->Select());
 }
 
-// Office 桌面版 OneNote 不消费虚拟笔的 eraser flags，但它把绘图工具作为可调用的 Ribbon
-// 元素暴露出来。这里只在 OneNote 已经是前台时触碰它，不激活窗口、不改笔记，也不影响
-// Journal 等遵循 Windows Ink 状态机的应用。
+// Office 桌面版 OneNote 不读 penFlags——它连 GetPointerPenInfo 都不导入——但它把绘图工具
+// 作为可调用的 Ribbon 元素暴露出来。这里只在 OneNote 已经是前台时触碰它，不激活窗口、
+// 不改笔记，也不影响 Journal 等遵循 Windows Ink 状态机的应用。
+//
+// 「不读 penFlags」不等于「不认橡皮」：它经 RealTimeStylus 读 StylusInfo.bIsInvertedCursor,
+// 而那个值同样来自 HID 的 Invert(0x3C)。所以真让厂商 VHF 把那一位置起来，这整套 UIA 就
+// 可以删掉，连同 ScopedOneNoteInputSuppression 那套握手。做不到的原因不在 OneNote，
+// 见 hal/docs/thp-eraser.md 与 docs/onenote_ink_eraser.md。
 //
 // TODO 这是权宜之计，代价是绑死了 OneNote 的界面细节：靠 AutomationId "TabInk" 找页签，
 // 靠工具名匹配橡皮擦（见 IsEraserToolName 里那张硬编码的语言表），Office 改版或换一种
