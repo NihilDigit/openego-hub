@@ -91,11 +91,11 @@
                     <FontIcon x:Name="ToolPenIcon"
                               Glyph="&#xE70F;"
                               FontSize="20"
-                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                              Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
                     <FontIcon x:Name="ToolEraserIcon"
                               Glyph="&#xE75C;"
                               FontSize="20"
-                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                              Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                               Visibility="Collapsed" />
                 </Grid>
                 <TextBlock x:Name="ToolText"

@@ -379,7 +379,9 @@ void NotificationWindow::ShowToolChanged(bool eraser) {
         // 橡皮擦与笔尖各用一个字形，文本本身已经说清楚了是哪一支，图标只是让扫一眼就能分辨。
         ToolPenIcon().Visibility(eraser ? Visibility::Collapsed : Visibility::Visible);
         ToolEraserIcon().Visibility(eraser ? Visibility::Visible : Visibility::Collapsed);
-        ToolText().Text(eraser ? L"已切换到橡皮擦" : L"已切换到笔尖");
+        // 两句等长，切换时卡片的宽度和字的位置都不动；「书写／橡皮」也是设置里那一项
+        // 「切换书写与橡皮擦」用的词。
+        ToolText().Text(eraser ? L"已切换到橡皮" : L"已切换到书写");
     });
 }
 
