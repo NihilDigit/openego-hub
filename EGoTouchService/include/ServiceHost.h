@@ -93,13 +93,13 @@ private:
     [[nodiscard]] static std::wstring ResolveThpHostPath();
 
     void AccessoryLoop();
-    void PublishAccessoryStatus();
+    // 状态快照的唯一构造点，见实现处的说明。
+    void PublishStatusSnapshot();
 
-    // 与 IPC 无关，所以不在守卫里：PublishPenStatus 在所有配置里都要编。
+    // 与 IPC 无关，所以不在守卫里：状态发布在所有配置里都要编。
     static void CopyCString(char* dst, size_t dstSize, std::string_view src);
 
     bool InitializeConfigStores();
-    void PublishPenStatus(const RuntimePenState& state);
     void ReplayLastWakeEvent();
     void ApplyServiceConfigToRuntime(const ServiceConfigState& config);
 

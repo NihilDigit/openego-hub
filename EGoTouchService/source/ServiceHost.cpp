@@ -53,7 +53,7 @@ struct ServiceHost::Impl {
     PenControl::Host m_penControlHost;
     std::thread m_penControlThread;
     std::atomic<bool> m_penControlStop{false};
-    // 托盘要显示当前哪一项生效，而 PublishPenStatus 跑在 DeviceRuntime 的回调线程上，
+    // 托盘要显示当前哪一项生效，而状态发布跑在 DeviceRuntime 的回调线程上，
     // 不能去读会被配置路径改写的 m_configState。应用路径写这份原子镜像，发布路径只读它。
     std::atomic<PenButtonMode> m_effectivePenButtonMode{PenButtonMode::WindowsInk};
     std::atomic<PenStatus::TouchProviderState> m_touchProvider{
@@ -65,7 +65,7 @@ struct ServiceHost::Impl {
     std::atomic<PenStatus::NotificationKind> m_notificationKind{
         PenStatus::NotificationKind::None};
     // 键盘「分离后无线连接」的镜像。真值在 MCU 侧，服务只缓存最近一次应答：写入方是
-    // PenEventBridge 的读线程，读取方是 DeviceRuntime 回调线程上的 PublishPenStatus。
+    // PenEventBridge 的读线程，读取方是 DeviceRuntime 回调线程上的状态发布。
     // 未收到过应答时 known 为 false，此时状态通道不置 has 位，托盘据此把该项显示为不可用。
     std::atomic<bool> m_kbdDetachSupportKnown{false};
     std::atomic<bool> m_kbdDetachSupport{false};
@@ -95,7 +95,7 @@ struct ServiceHost::Impl {
         m_chargeLimitCache.store(packed, std::memory_order_relaxed);
     }
     // 键盘状态镜像。含字符串，用不了原子，改由互斥保护：写入方是 MCU 读线程，
-    // 读取方是 DeviceRuntime 回调线程上的 PublishPenStatus。
+    // 读取方是 DeviceRuntime 回调线程上的状态发布。
     std::mutex m_kbdStateMutex;
     Himax::Pen::PenEventBridge::KbdState m_kbdState;
     std::chrono::steady_clock::time_point m_lastKbdConnectionNotification{};
@@ -486,7 +486,7 @@ bool ServiceHost::StartRuntimeAndPipeline() {
 
     if (m_impl->m_penStatusWriter.Open()) {
         m_deviceRuntime->SetPenStateChangedCallback(
-            [this](const RuntimePenState& state) { PublishPenStatus(state); });
+            [this](const RuntimePenState&) { PublishStatusSnapshot(); });
         m_deviceRuntime->SetPenDoubleClickCallback([this] {
             return m_impl->m_penStatusWriter.SignalDoubleClick();
         });
@@ -755,7 +755,7 @@ void ServiceHost::AccessoryLoop() {
             }
         }
 
-        PublishAccessoryStatus();
+        PublishStatusSnapshot();
         Sleep(250);
     }
 }
@@ -814,74 +814,13 @@ void ServiceHost::StopSystemStateMonitor() {
     LOG_INFO("Service", __func__, "Monitor", "SystemStateMonitor stopped.");
 }
 
-void ServiceHost::PublishPenStatus(const RuntimePenState& state) {
-    PenStatus::State out{};
-    out.hasBatteryLevel = state.hasBatteryLevel;
-    out.batteryLevel = state.batteryLevel;
-    out.hasChargingState = state.hasChargingState;
-    out.charging = state.charging;
-    out.hasDeviceAttached = state.hasDeviceConnected;
-    out.deviceAttached = state.deviceConnected;
-    out.hasStylusLink = state.hasConnection;
-    out.stylusLinked = state.connected;
-    out.notificationSequence =
-        m_impl->m_notificationSequence.load(std::memory_order_acquire);
-    out.notificationKind = m_impl->m_notificationKind.load(std::memory_order_acquire);
-
-    // 通道里放产品名而不是内部代号：读它的是面板。CopyCString 会截断，而截断一个 UTF-8
-    // 多字节序列会得到无效字节、在渲染侧解码失败，所以最长的名字必须编译期就装得下。
-    static_assert(sizeof("HUAWEI M-Pencil（第一代）") <= PenStatus::kModelNameCapacity,
-                  "product display name must fit the channel's modelName field");
-    out.modelId = state.penModuleModelId;
-    const char* name = Himax::Pen::ToDisplayName(state.penModuleModel);
-    CopyCString(out.modelName, sizeof(out.modelName), name ? name : "");
-
-    // 笔身份三项：MCU 在一次连接内只答复一次，DeviceRuntime 已经缓存好，这里只是转发。
-    out.hasPenFirmware = state.hasFirmwareVersion;
-    CopyCString(out.penFirmware, sizeof(out.penFirmware), state.firmwareVersion);
-    out.hasPenHardware = state.hasHardwareVersion;
-    CopyCString(out.penHardware, sizeof(out.penHardware), state.hardwareVersion);
-    out.hasPenSerial = state.hasSerialNumber;
-    CopyCString(out.penSerial, sizeof(out.penSerial), state.serialNumber);
-
-    {
-        std::lock_guard<std::mutex> lk(m_impl->m_kbdStateMutex);
-        const auto& kbd = m_impl->m_kbdState;
-        out.hasKbdPresent = kbd.hasPresent;
-        out.kbdPresent = kbd.present;
-        out.hasKbdDetached = kbd.hasDetached;
-        out.kbdDetached = kbd.detached;
-        out.hasKbdBattery = kbd.hasBattery;
-        out.kbdBatteryLevel = kbd.battery;
-        out.hasKbdCharging = kbd.hasCharging;
-        out.kbdCharging = kbd.charging;
-        CopyCString(out.kbdModelName, sizeof(out.kbdModelName), kbd.modelName);
-        CopyCString(out.kbdFirmware, sizeof(out.kbdFirmware), kbd.firmware);
-    }
-
-    // 托盘菜单靠这个值决定哪一项打勾，而不是靠它自己提交过什么——提交可能被服务按枚举
-    // 校验拒绝，也可能被 IPC 配置改写。
-    out.hasPenButtonMode = true;
-    out.penButtonMode = static_cast<uint8_t>(
-        m_impl->m_effectivePenButtonMode.load(std::memory_order_acquire));
-    out.hasEraserActive = state.hasEraserToggle;
-    out.eraserActive = state.eraserToggle != 0;
-    out.hasTouchProvider = true;
-    out.touchProvider = m_impl->m_touchProvider.load(std::memory_order_acquire);
-    const auto providerError =
-        m_impl->m_touchProviderError.load(std::memory_order_acquire);
-    out.hasProviderError = providerError != TouchProviderError::None;
-    out.providerError = static_cast<uint8_t>(providerError);
-    out.hasInputSuppressed = true;
-    out.inputSuppressed =
-        m_impl->m_inputSuppressed.load(std::memory_order_acquire);
-    out.hasKbdDetachSupport =
-        m_impl->m_kbdDetachSupportKnown.load(std::memory_order_acquire);
-    out.kbdDetachSupport =
-        m_impl->m_kbdDetachSupport.load(std::memory_order_acquire);
-
-    m_impl->m_penStatusWriter.Publish(out);
-}
+// 状态快照只有一个构造点。此处曾经还有一个 PublishPenStatus，各自填一份 State 再发布，
+// 于是两者交替覆盖同一块共享内存：它比这里少了充电上限和厂商服务三个字段，键盘那一块又取自
+// PenEventBridge 的缓存而非 hal 快照，笔状态一变，面板上那几项就闪一下。
+//
+// 少一个来源比让两个来源保持同步可靠。DeviceRuntime 状态变化时只触发重新发布，字段仍由
+// 这里统一取——每一项都取权威来源：笔与键盘的身份、电量、固件来自 hal 的宿主快照，橡皮态
+// 来自 DeviceRuntime，其余来自服务自己的原子量。
 
 void ServiceHost::PublishTouchProviderState(
         PenStatus::TouchProviderState state,
@@ -946,7 +885,7 @@ namespace {
 // 把 hal 的两份快照组装成托盘要读的那一份。
 //
 // 型号名直接用厂商固件串里带的那个，不再按 modelId 查本地表：本地表维护不动，也曾出过错。
-void ServiceHost::PublishAccessoryStatus() {
+void ServiceHost::PublishStatusSnapshot() {
     PenStatus::State out{};
 
     Gaokun::Pen::Snapshot pen{};
@@ -967,15 +906,6 @@ void ServiceHost::PublishAccessoryStatus() {
         out.hasPenHardware = has(F::HasHardware);
         CopyCString(out.penHardware, sizeof(out.penHardware), pen.hardware);
 
-        // 侧键当前绑定的功能。4 是 FUNC_ERASER，取自原厂 AlitaPenApp 的 PenKeyFunc 枚举
-        // （0 截屏 / 1 语音 / 2 白板 / 3 关闭 / 4 橡皮擦 / 5 全局批注）。
-        //
-        // 这与旧实现的语义不完全相同：旧值来自 MCU 的 EraserToggle 事件，表示「当前工具是不是
-        // 橡皮」；这里表示「侧键按下会切到橡皮」。PenService.dll 没有暴露 EraserToggle，
-        // 两者在 ToggleEraser 模式下取值一致，其他模式下托盘只用它决定菜单打勾。
-        constexpr uint8_t kPenKeyFuncEraser = 4;
-        out.hasEraserActive = has(F::HasKeyFunc);
-        out.eraserActive = pen.keyFunc == kPenKeyFuncEraser;
         out.hasPenSerial = has(F::HasSerial);
         CopyCString(out.penSerial, sizeof(out.penSerial), pen.serial);
         // 产品名由 hal 按模组 ID 查表填好，这里直接转发。本仓库不再自带型号表：先前那份
@@ -1016,6 +946,16 @@ void ServiceHost::PublishAccessoryStatus() {
     out.providerError = static_cast<uint8_t>(providerError);
     out.hasInputSuppressed = true;
     out.inputSuppressed = m_impl->m_inputSuppressed.load(std::memory_order_acquire);
+
+    // 橡皮态只有 DeviceRuntime 知道：它由 MCU 的 0x7F EraserToggle 和 ToggleEraser 模式下的
+    // 双击共同维护，而厂商的 PenService.dll 根本不暴露 EraserToggle。这里一度改用
+    // 「keyFunc == 4」顶替，那是「侧键绑定的是不是橡皮」而不是「当前是不是橡皮」——一个随
+    // 用户设置固定不变的值，托盘据它决定切哪个工具，于是永远切不对。
+    if (m_deviceRuntime) {
+        const auto pen = m_deviceRuntime->GetPenStateSnapshot();
+        out.hasEraserActive = pen.hasEraserToggle;
+        out.eraserActive = pen.eraserToggle != 0;
+    }
 
     // 只有服务有权查 SCM 的启动类型，所以判据由这里给出。名单里的服务全部禁用才算「已禁用」,
     // 部分禁用仍显示为未禁用：那种状态下再点一次开关会把剩下的补上，比显示成已完成有用。
@@ -1147,10 +1087,7 @@ void ServiceHost::TickInputSuppressionTimeout() {
 }
 
 void ServiceHost::RepublishPenStatus() {
-    if (!m_deviceRuntime) {
-        return;
-    }
-    PublishPenStatus(m_deviceRuntime->GetPenStateSnapshot());
+    PublishStatusSnapshot();
 }
 
 void ServiceHost::ApplyPenButtonMode(PenButtonMode mode, const char* source, bool persist) {
@@ -1425,7 +1362,7 @@ void ServiceHost::Stop() {
     });
 }
 
-// 与 IPC 无关的字符串助手，因此不在下面那个守卫里：PublishPenStatus 在所有配置里都要编，
+// 与 IPC 无关的字符串助手，因此不在下面那个守卫里：状态发布在所有配置里都要编，
 // 而笔状态通道在 Release 中同样要工作。
 void ServiceHost::CopyCString(char* dst, size_t dstSize, std::string_view src) {
     if (!dst || dstSize == 0) return;
