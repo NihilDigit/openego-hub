@@ -945,6 +945,9 @@ winrt::hstring MainWindow::ProviderErrorText(uint8_t error) {
     case 4: return L"EGoTouchRev 停止失败，暂未切换";
     case 5: return L"HuaweiTHP 恢复失败，已继续使用 EGoTouchRev";
     case 6: return L"两个触控提供方都无法启动";
+    // 不说「已交还 HuaweiTHP」：走到这一步时交还本身也可能失败，那种情况下的提供方状态
+    // 由上面那个 switch 单独显示，这里只交代原因。
+    case 7: return L"触控宿主反复退出，已停止接管";
     default: return L"触控提供方切换失败";
     }
 }

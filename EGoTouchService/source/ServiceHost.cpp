@@ -529,6 +529,15 @@ bool ServiceHost::StartRuntimeAndPipeline() {
     };
     providerOps.startEGo = [this] { return StartEGoTouchProvider(); };
     providerOps.stopEGo = [this] { return StopEGoTouchProvider(); };
+    // 只有 coordinator 认定触控归 EGo 时才会问到这里，所以返回 false 就是宿主意外没了。
+    // 退出码在这一刻还取得到，交还原厂之后 Start 会把句柄换掉，那时再查就是下一条命的了。
+    providerOps.egoAlive = [this] {
+        if (m_thpHost.IsRunning()) return true;
+        LOG_ERROR("Service", "EGoAlive", "Provider",
+                  "THP host is gone (exit={}); restarting it or handing touch back to Huawei.",
+                  m_thpHost.ExitCode());
+        return false;
+    };
     providerOps.restoreHuawei = [] {
         const bool ok = RestoreHuaweiThpService();
         if (!ok) {
