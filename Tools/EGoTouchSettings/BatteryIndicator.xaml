@@ -39,21 +39,33 @@
                     BorderThickness="1.25"
                     BorderBrush="{ThemeResource TextFillColorSecondaryBrush}"
                     CornerRadius="3">
-                <Grid Margin="2">
+                <!-- 内腔与外框之间只留一点点，电量条几乎顶到外框上。留空大了，13 px 高的
+                     电池里电量条只剩一条细线。 -->
+                <Grid Margin="1.25">
                     <Border x:Name="BatteryFill"
                             HorizontalAlignment="Left"
                             Background="{ThemeResource BatteryFillBrush}"
                             CornerRadius="1" />
                     <!-- 充电时从空扫到满、循环，压在电量条上表示正在往里灌。不做成「电量条
                          自己涨到满」：电量九成以上时那点行程几乎看不出来，而充电恰恰是电量
-                         高的时候看得最多。也不再另摆一个闪电图标——两个图标并排读起来是
-                         两件事。 -->
+                         高的时候看得最多。 -->
                     <Border x:Name="BatteryPulse"
                             HorizontalAlignment="Left"
                             Background="{ThemeResource BatteryChargingBrush}"
                             CornerRadius="1"
-                            Opacity="0"
                             Visibility="Collapsed" />
+                    <!-- 闪电自己画，不用 E945 那个字形：字形是细笔画的，缩到 9 px 高只剩
+                         几根线，压在电量条上看不清。这里是实心的折线，笔画宽度跟着高度走。
+                         取窗口底色，压在电量条和脉冲上是挖空的效果——它下面可能是电量条、
+                         是脉冲、也可能是空腔，三者的明暗各不相同，只有挖空在哪一层上都成立。 -->
+                    <Path x:Name="ChargingGlyph"
+                          Data="M 10 0 L 2.5 11.5 L 7.5 11.5 L 5.5 20 L 13.5 8 L 8.5 8 Z"
+                          Fill="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                          Stretch="Uniform"
+                          Height="7.5"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          Visibility="Collapsed" />
                 </Grid>
             </Border>
             <Border Width="2" Height="7"

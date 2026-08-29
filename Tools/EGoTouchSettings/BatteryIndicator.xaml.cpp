@@ -13,8 +13,8 @@ using namespace Microsoft::UI::Xaml::Media::Animation;
 namespace winrt::EGoTouchSettings::implementation {
 
 namespace {
-// 电池内腔的宽度，与 XAML 里那圈边框和内边距对应：23 - 2 * 1.25 边框 - 2 * 2 内边距。
-constexpr double kInnerWidth = 17.0;
+// 电池内腔的宽度，与 XAML 里那圈边框和内边距对应：23 - 2 * 1.25 边框 - 2 * 1.25 内边距。
+constexpr double kInnerWidth = 18.0;
 constexpr int kChargingCycleMs = 1800;
 
 double FillWidthFor(uint8_t level) {
@@ -26,9 +26,9 @@ BatteryIndicator::BatteryIndicator() {
     InitializeComponent();
 }
 
-// 充电动画：脉冲条从空扫到满，同时淡出，循环。Width 不是独立属性，动画只能跑在 UI 线程
-// 上，所以要显式打开 EnableDependentAnimation——这里只有一个 Border 在动，代价可以忽略；
-// 换成独立属性（缩放或位移）就得再套一层裁剪，反而更绕。
+// 充电动画：脉冲条从空扫到满，循环。Width 不是独立属性，动画只能跑在 UI 线程上，所以要
+// 显式打开 EnableDependentAnimation——这里只有一个 Border 在动，代价可以忽略；换成独立
+// 属性（缩放或位移）就得再套一层裁剪，反而更绕。
 void BatteryIndicator::StartChargingAnimation() {
     if (m_charging) return;
 
@@ -43,20 +43,12 @@ void BatteryIndicator::StartChargingAnimation() {
     Storyboard::SetTarget(sweep, BatteryPulse());
     Storyboard::SetTargetProperty(sweep, L"Width");
 
-    // 越接近满越淡，扫到头时正好消失，于是归位那一下看不见接缝。
-    DoubleAnimation fade;
-    fade.From(1.0);
-    fade.To(0.0);
-    fade.Duration(duration);
-    Storyboard::SetTarget(fade, BatteryPulse());
-    Storyboard::SetTargetProperty(fade, L"Opacity");
-
     Storyboard storyboard;
     storyboard.Children().Append(sweep);
-    storyboard.Children().Append(fade);
     storyboard.RepeatBehavior(RepeatBehaviorHelper::Forever());
     m_charging = storyboard;
     BatteryPulse().Visibility(Visibility::Visible);
+    ChargingGlyph().Visibility(Visibility::Visible);
     storyboard.Begin();
 }
 
@@ -65,7 +57,7 @@ void BatteryIndicator::StopChargingAnimation() {
     m_charging.Stop();
     m_charging = nullptr;
     BatteryPulse().Visibility(Visibility::Collapsed);
-    BatteryPulse().Opacity(0.0);
+    ChargingGlyph().Visibility(Visibility::Collapsed);
 }
 
 void BatteryIndicator::SetState(bool hasLevel, uint8_t level, bool charging) {
