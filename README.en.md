@@ -13,59 +13,73 @@
 
 <p align="center"><a href="README.md">中文</a> | English</p>
 
-A control centre for the HUAWEI MateBook E Go, in place of Huawei PC Manager: the pen,
-the detachable keyboard, battery, display and the touch service.
+OpenEGo Hub is a hardware control centre for the HUAWEI MateBook E Go on Windows 11
+ARM64, covering touch, pen and keyboard configuration, battery and power management, and
+display colour.
 
-Huawei delivers all of that through x64 user-mode software. This project does not run
-it. ARM64EC hosts load the components directly instead, so the touch algorithm, the
-panel's factory calibration and the charging policy are still the vendor's own, while PC
-Manager and its background services no longer have to be resident.
+It is built as a native ARM64 service alongside ARM64EC host processes. Those hosts call
+the vendor's own modules for the low-level algorithms and take over the hardware, so
+every feature here keeps working with Huawei PC Manager and its background services
+disabled.
 
 ---
 
-## What it does
+## Features
 
-- **Touch.** Multi-touch, with palm rejection while writing and fingers ignored while
-  the pen is in use.
-- **Pen.** Pressure and tilt for the M-Pencil. The side-button double click either
-  follows the system pen setting or switches between writing and erasing, the latter
-  with an optional OneNote compatibility mode.
-- **Keyboard.** Wireless-on-detach can be turned on and off.
-- **Battery.** A charge threshold, either the vendor's smart charging or a manual
-  window. Battery health, cycle count and time remaining.
-- **Display.** Gamut, colour temperature and eye comfort. The values come from the
-  panel's factory calibration and are applied by the display driver, not by a software
-  filter.
-- **Services.** Huawei's background services can be disabled and restored at any time.
-- **Device information.** Battery, charge and attach state, firmware version and serial
-  number for the pen and the keyboard; model, processor, memory and OS build for the
-  machine itself.
+- **Touch.** Multi-touch with palm rejection while writing; finger input is suppressed
+  while the pen is down.
+- **Pen.** Pressure and tilt for the HUAWEI M-Pencil. The side button's double-tap is
+  configurable — either the system pen shortcut, or switching between writing and the
+  eraser — and a OneNote compatibility mode is built in.
+- **Keyboard.** Control over whether the detachable keyboard keeps its wireless link once
+  detached.
+- **Battery and power.** Smart charging or a charge threshold of your own, plus battery
+  health, cycle count and remaining runtime.
+- **Colour and display.** sRGB and Display P3 gamuts, colour temperature and an eye
+  comfort mode. The values reach the panel through the display driver, from its factory
+  calibration.
+- **Services.** Status and start/stop control for Huawei's background services.
+- **Device information.** Live battery level, charge state, attach state, firmware
+  version and serial number for the pen and the keyboard; model, processor, memory and OS
+  build for the machine itself.
 
-The accessories page carries the battery level, firmware and serial number for the pen
-and the keyboard, and it is where the pen's side button is configured.
+---
+
+## Screenshots
+
+### Accessories
+
+Battery level, connection state, firmware version and serial number for the pen and the
+keyboard, along with the side-button configuration.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/accessories.png" alt="Accessories page" width="820">
 </p>
 
-The tray sits in the notification area with accessory status and raises a prompt when
-the pen or keyboard connects.
+### Tray and connection prompts
+
+The tray sits in the notification area with accessory status, and raises a prompt when
+the pen or the keyboard connects.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-pen.png" alt="Pen connection prompt" width="340">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-keyboard.png" alt="Keyboard connection prompt" width="340">
 </p>
 
-The battery page holds the charge threshold and the health readings; the screen page
-adjusts gamut, colour temperature and the eye comfort filter.
+### Battery and display
+
+Charge threshold and battery health on one page; gamut, colour temperature and eye
+comfort on the other.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="Battery page" width="410">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="Screen page" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="Display page" width="410">
 </p>
 
-The services page disables and restores Huawei's background services; the device page
-lists what this machine is made of.
+### Services and device information
+
+Start/stop control for Huawei's background services, and an overview of what this
+machine is made of.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="Services page" width="410">
@@ -76,74 +90,100 @@ lists what this machine is made of.
 
 ## Supported hardware
 
-- HUAWEI MateBook E Go, Windows 11 on ARM64.
-- Pen: M-Pencil first through third generations (CD52, CD54, CD54R, CD54S). Only the
-  CD54R has been tested on hardware.
-- Keyboard: the HUAWEI smart magnetic keyboard. Third-party keyboards are not
-  recognised.
+- **Machine.** HUAWEI MateBook E Go, Windows 11 ARM64.
+- **Pen.** HUAWEI M-Pencil — CD52, CD54, CD54R and CD54S; only CD54R has been tested on
+  real hardware.
+- **Keyboard.** The HUAWEI smart magnetic keyboard.
 
 ---
 
 ## Installation
 
-Download `OpenEGoHubSetup_arm64_vX.Y.Z.msi` from the Releases page and run it;
-registering the service requires administrator rights. The service then starts with
-Windows, and there is a Start menu entry.
+### Prerequisites
 
-**The Huawei driver and PC Manager have to stay installed** — remove them and touch
-stops working. Touch, display colour, the charge threshold and the keyboard's wireless
-link all reuse components from there.
+The factory Huawei drivers and PC Manager have to stay installed. Touch, panel colour
+calibration, the charge threshold and the keyboard's wireless link all rely on DLLs that
+come with them.
 
-Installing disables the vendor touch service — the two cannot drive the same hardware at
-once. This program holds touch while it runs and hands it back on exit or on a crash;
-switching back does not need an uninstall, just quit from the settings window.
+### Steps
+
+1. Download the latest `OpenEGoHubSetup_arm64_vX.Y.Z.msi` from the
+   [Releases](https://github.com/NihilDigit/openego-hub/releases/latest) page.
+2. Run the installer. Registering the system service requires administrator rights.
+3. The service starts with Windows from then on, and the settings window opens from the
+   Start menu.
+
+### How it behaves
+
+- **Touch handover.** The program holds the touch input path while it runs. On exit or on
+  a crash, touch returns to the system's own touch service.
+- **Going back.** To hand touch back to Huawei's service, quit OpenEGo Hub from the
+  settings window.
 
 ---
 
 ## Build from source
 
-Requires CMake, Ninja, the ARM64 MSVC toolchain, and WiX v4 for packaging.
+### Requirements
 
-The `arm64-*` presets resolve `cl.exe` from `PATH`, so the ARM64 developer environment
-has to be in the shell first. `scripts\build.ps1` imports it:
+- CMake 3.20 or newer
+- Ninja
+- The Visual Studio ARM64 MSVC toolchain (`cl.exe`)
+- WiX Toolset v4, for the MSI
+
+### Building
+
+The ARM64 build environment has to be loaded into the PowerShell session first;
+`scripts\build.ps1` does that itself:
 
 ```powershell
-.\scripts\build.ps1 -Config Release           # configure and build
-.\scripts\build.ps1 -Config Debug -Test       # build, then run ctest
+# Release build
+.\scripts\build.ps1 -Config Release
+
+# Debug build, followed by the test suite
+.\scripts\build.ps1 -Config Debug -Test
 ```
 
-After `vcvarsarm64.bat`, the presets also work directly:
+In a shell that has already run `vcvarsarm64.bat`, the presets work directly:
 
 ```powershell
 cmake --preset arm64-Release
 cmake --build --preset arm64-Release
 ```
 
-`hal/` builds separately and has to go first: the main tree links the `GaokunHal.lib`
-it produces, and configuration fails without it. Debug and Release each need their own
-build.
+### The HAL builds separately
+
+The hardware abstraction layer and its host processes under `hal/` build on their own,
+and have to go first: the main project links the `GaokunHal.lib` they produce.
 
 ```powershell
-cd hal; .\scripts\build.ps1 -Config Debug
+cd hal
+.\scripts\build.ps1 -Config Debug
+cd ..
 ```
 
-The service itself is native ARM64. Only the hosts under `hal/` that load Huawei's x64
-DLLs are ARM64EC, and they come from hal's own build script rather than the presets
-here.
+> The service itself is native ARM64. Only the hosts under `hal/` that load Huawei's x64
+> DLLs are compiled as ARM64EC, and they come from the HAL's own build script.
 
-On a development machine, install the Debug service as Administrator, then use
-DevCycle:
+### Development loop
+
+Register the Debug service once from an elevated shell, then iterate with the development
+scripts:
 
 ```powershell
+# Register the Debug service
 scripts\install_debug_service.bat
+
+# Rebuild and restart it (needs administrator rights)
 pwsh -File scripts\dev-cycle.ps1
+
+# Restore the installed Release service
+pwsh -File scripts\dev-cycle.ps1 -RestoreRelease
 ```
 
-`pwsh -File scripts\dev-cycle.ps1 -RestoreRelease` stops debugging and restores the
-installed Release service. `-NoTray` starts the service without taking the lease, so
-touch intentionally stays with Huawei.
+### Packaging
 
-Packaging:
+WiX produces the ARM64 MSI:
 
 ```powershell
 dotnet tool install --global wix
@@ -154,68 +194,64 @@ wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
     -out build\OpenEGoHubSetup_arm64_v1.2.3.msi
 ```
 
-The HAL hosts in the installer come from `HalOutputDir`, which
-`hal\scripts\build.ps1 -Config Release` has to produce first.
-`scripts\pack_release_version.bat` does the build and the packaging in one go, so the
-arguments do not have to be assembled by hand.
+Or let the packaging script do the whole thing:
 
-`scripts\dev-cycle.ps1` stops the service, rebuilds and restarts it; `scripts\verify.ps1`
-builds, runs the tests and catches the "build stopped early, tests still green" kind of
-false success. Both need an elevated shell.
+```powershell
+scripts\pack_release_version.bat
+```
 
 ---
 
 ## Layout
 
-- `EGoTouchService/`: the service. `Device/` is acquisition and injection, `Tsa/` the
-  vendor backend adapter, `Host/` the OS interfaces.
-- `hal/`: the vendor hardware layer. Everything that loads a Huawei x64 DLL lives here,
-  each capability in its own ARM64EC process.
-- `Common/`: cross-process channels and shared configuration.
-- `Tools/`: tray and settings window.
-- `docs/`: reverse-engineered protocol documentation.
-- `scripts/`: build, packaging and development scripts.
+- `EGoTouchService/`: the system service. `Device/` for acquisition and virtual HID
+  injection, `Tsa/` for the vendor algorithm adapter, `Host/` for the system interfaces.
+- `hal/`: the hardware abstraction layer and its ARM64EC hosts, which isolate and drive
+  Huawei's x64 DLLs.
+- `Common/`: cross-process channel definitions, shared-memory layouts and common
+  configuration.
+- `Tools/`: the user-session applications — the tray (`EGoTouchTray`) and the WinUI 3
+  settings window (`EGoTouchSettings`).
+- `docs/`: reverse-engineered protocol documentation and design notes.
+- `scripts/`: build, test, packaging and development scripts.
 
 ---
 
 ## Credits
 
-This project is a fork of
-**[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)** (MIT, © Detach2233). The
-Himax frame acquisition, the pen MCU transport, the VHF injection layer and the service
-runtime all come from there. That notice is preserved in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+This project is derived from **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**
+(MIT License, © Detach2233) and inherits its Himax frame acquisition, the pen's MCU
+protocol, the VHF virtual HID injection layer and the service runtime. The full licence
+notice is in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Earlier projects on this device were also consulted:
+The following projects and community work were consulted along the way, with thanks:
 
-- **[MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)** by eiyooooo
-- **[goodies](https://github.com/matebook-e-go/goodies)** by dantmnf
-- **[EgoTools](https://github.com/SaKongA/EgoTools)** by SaKongA
-- **[HuaweiPenEraserService](https://github.com/qwqVictor/HuaweiPenEraserService)** by qwqVictor
+- [MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen) (by eiyooooo)
+- [goodies](https://github.com/matebook-e-go/goodies) (by dantmnf)
+- [EgoTools](https://github.com/SaKongA/EgoTools) (by SaKongA)
+- [HuaweiPenEraserService](https://github.com/qwqVictor/HuaweiPenEraserService) (by qwqVictor)
 
 ---
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+Released under the [MIT License](LICENSE).
 
-The upstream copyright notice is preserved in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and must accompany any redistribution,
-in source or binary form.
+Per its terms, any redistribution in source or binary form has to keep the copyright
+notices in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ---
 
 ## Disclaimers
 
-This project is not affiliated with, authorised by, or connected to HUAWEI, Himax, or
-any other trademark holder. All product and company names belong to their owners. It
-was developed through reverse engineering for interoperability, research and
-educational purposes.
-
-The tray reads pen artwork and battery icons from an existing PC Manager installation
-at runtime and falls back to drawing its own when PC Manager is absent. Those images
-are HUAWEI's and are never redistributed with this project.
-
-**Use at your own risk.** This replaces a low-level hardware driver. The authors and
-contributors accept no liability for hardware damage, data loss, system instability, or
-any violation of third-party terms of service arising from its use.
+- **Trademarks.** This project has no official affiliation with, or endorsement from,
+  HUAWEI, Himax or any other rights holder. Product names, trademarks and company names
+  belong to their respective owners.
+- **Third-party assets.** At runtime the tray tries to load the pen and status icons from
+  a locally installed Huawei PC Manager, and falls back to built-in vector drawing when it
+  is not present. Those copyrighted vendor assets are in neither the source nor the
+  releases.
+- **Use at your own risk.** This project works against low-level hardware drivers and
+  system services, and exists for interoperability research and technical exchange. You
+  assume the risk of using it; the authors and contributors accept no liability for
+  hardware faults, data loss or system instability arising from it.
