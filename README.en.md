@@ -39,21 +39,35 @@ The acquisition and injection layers originate there and have been modified sinc
   number for the pen and the keyboard; model, processor, memory and OS build for the
   machine itself.
 
+The accessories page carries the battery level, firmware and serial number for the pen
+and the keyboard, and it is where the pen's side button is configured.
+
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/devices.png" alt="Device page" width="720">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/accessories.png" alt="Accessories page" width="820">
 </p>
 
 The tray sits in the notification area with accessory status and raises a prompt when
 the pen or keyboard connects.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup.png" alt="Connection prompt" width="480">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-pen.png" alt="Pen connection prompt" width="340">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-keyboard.png" alt="Keyboard connection prompt" width="340">
 </p>
 
-The settings window holds every switch.
+The battery page holds the charge threshold and the health readings; the screen page
+adjusts gamut, colour temperature and the eye comfort filter.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/settings.png" alt="Settings window" width="720">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="Battery page" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="Screen page" width="410">
+</p>
+
+The services page disables and restores Huawei's background services; the device page
+lists what this machine is made of.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="Services page" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/device.png" alt="Device page" width="410">
 </p>
 
 ---

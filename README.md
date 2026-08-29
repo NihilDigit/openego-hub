@@ -29,20 +29,31 @@ HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为�
 - **服务**：停用华为的后台服务，可随时恢复。
 - **设备信息**：笔与键盘的电量、充电与吸附状态、固件版本、序列号；主机型号、处理器、内存、系统版本。
 
+配件页显示笔与键盘的电量、固件与序列号，笔的侧键行为也在这里设定。
+
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/devices.png" alt="设备页" width="720">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/accessories.png" alt="配件页" width="820">
 </p>
 
 托盘常驻显示配件状态，笔或键盘接入时弹出提示。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup.png" alt="接入提示" width="480">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-pen.png" alt="手写笔接入提示" width="340">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-keyboard.png" alt="磁吸键盘接入提示" width="340">
 </p>
 
-设置窗口集中全部开关。
+电池页管充电阈值与健康状况，屏幕页调色域、色温与护眼。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/settings.png" alt="设置窗口" width="720">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="电池页" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="屏幕页" width="410">
+</p>
+
+服务页停用或恢复华为的后台服务，设备页列出本机规格。
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="服务页" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/device.png" alt="设备页" width="410">
 </p>
 
 ---
