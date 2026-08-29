@@ -74,9 +74,9 @@ lists what this machine is made of.
 
 ## Touch runs on the vendor's own algorithm
 
-Touch and pen recognition is not reimplemented. The project starts a host process of its
-own and loads Huawei's `THP_Service.dll` into it, so frames travel from the Himax
-controller through the vendor chain straight to Windows:
+Touch and pen recognition is not reimplemented. The project loads Huawei's
+`THP_Service.dll`, so frames travel from the Himax controller through the vendor chain
+straight to Windows:
 
 ```
 Himax -> THP_Service -> TSACore -> vendor VHF -> Windows HID
@@ -84,19 +84,18 @@ Himax -> THP_Service -> TSACore -> vendor VHF -> Windows HID
 
 Palm rejection, pressure, tilt and pen/finger arbitration are therefore identical to
 stock. What this project replaces is the thin .NET service shell Huawei ships around
-that chain. The cost is that the Huawei driver has to stay installed; remove it and touch
-stops working.
+that chain.
 
-Handover is lease-based rather than automatic. Touch still belongs to Huawei when the
-service starts, so the login screen works and so does a machine whose tray has not come
-up. The tray takes a lease to switch over, and dropping it — on exit or on a crash —
-switches back. No failure path leaves touch without a provider.
+**The Huawei driver and PC Manager have to stay installed** — remove them and touch
+stops working. Display colour, the charge threshold and the keyboard's wireless link go
+through their components too.
 
-Display colour, the charge threshold and the keyboard's wireless link also go through
-Huawei's components, which are compiled for x64. An ARM64 process cannot load an x64
-DLL, so each of these runs in its own process; they live under `hal/`.
+Touch belongs to Huawei until a lease says otherwise: it still does when the service
+starts, the tray takes a lease to switch over, and dropping that lease — on exit or on a
+crash — switches back. The login screen keeps working, and so does the machine once this
+program has been closed.
 
-See [`hal/README.md`](hal/README.md) for the details.
+See [`hal/README.md`](hal/README.md) for how that is put together.
 
 ---
 
