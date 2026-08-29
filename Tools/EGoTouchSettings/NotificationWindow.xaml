@@ -9,9 +9,11 @@
     </Window.SystemBackdrop>
 
     <Grid x:Name="NotificationRoot" Background="Transparent" Opacity="0">
+        <!-- 圆角必须与 DWM 给窗口裁的那一档一致，见 ConfigureWindow 里的说明。
+             OverlayCornerRadius 就是那一档，写死数值会在下一次系统改半径时重新错开。 -->
         <Border x:Name="NotificationCard"
                 Padding="16"
-                CornerRadius="16"
+                CornerRadius="{ThemeResource OverlayCornerRadius}"
                 BorderThickness="1"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
             <Grid>

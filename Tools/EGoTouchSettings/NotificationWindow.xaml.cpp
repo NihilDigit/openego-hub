@@ -69,6 +69,9 @@ void NotificationWindow::ConfigureWindow() {
     LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     exStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+    // 窗口本身是矩形的：亚克力底铺满整个客户区，圆角只能由 DWM 裁。卡片描边因此不能自己
+    // 定半径——描边比裁切大时，四角会露出一截被裁掉的窗口底，看起来像圆角外又画了一圈边框。
+    // XAML 那边用 OverlayCornerRadius，与这里的 ROUND 是同一档。
     const int corner = kDwmCornerRound;
     (void)DwmSetWindowAttribute(hwnd, kDwmwaWindowCornerPreference, &corner, sizeof(corner));
 }
