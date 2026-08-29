@@ -48,20 +48,32 @@ OpenEGo Hub 是面向 HUAWEI MateBook E Go（Windows 11 ARM64）的硬件控制�
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-keyboard.png" alt="磁吸键盘连接提示" width="340">
 </p>
 
-### 电池与显示设置
-提供充电阈值设定、电池健康监控、色彩空间切换、色温调节与护眼模式配置。
+### 电池与电源
+提供智能充电模式与自定义充电阈值，并显示电池健康度、循环次数及剩余续航时间。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="电池设置界面" width="410">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="显示设置界面" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="电池设置界面" width="820">
 </p>
 
-### 服务控制与设备信息
-提供华为后台服务启停控制及本机硬件规格概览。
+### 色彩与显示
+提供色域切换、色温调节与护眼模式配置。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="服务管理界面" width="410">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/device.png" alt="设备信息界面" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="显示设置界面" width="820">
+</p>
+
+### 服务管理
+提供华为后台服务的状态监控与启停控制。
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="服务管理界面" width="820">
+</p>
+
+### 设备信息
+显示主机型号、处理器规格、内存容量及系统版本等硬件信息。
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/device.png" alt="设备信息界面" width="820">
 </p>
 
 ---

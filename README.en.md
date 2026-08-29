@@ -66,24 +66,37 @@ the pen or the keyboard connects.
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-keyboard.png" alt="Keyboard connection prompt" width="340">
 </p>
 
-### Battery and display
+### Battery and power
 
-Charge threshold and battery health on one page; gamut, colour temperature and eye
-comfort on the other.
+Smart charging or a charge threshold of your own, with battery health, cycle count and
+remaining runtime.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="Battery page" width="410">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="Display page" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="Battery page" width="820">
 </p>
 
-### Services and device information
+### Colour and display
 
-Start/stop control for Huawei's background services, and an overview of what this
-machine is made of.
+Gamut, colour temperature and the eye comfort mode.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="Services page" width="410">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/device.png" alt="Device page" width="410">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="Display page" width="820">
+</p>
+
+### Services
+
+Status and start/stop control for Huawei's background services.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="Services page" width="820">
+</p>
+
+### Device information
+
+Model, processor, memory and OS build for the machine itself.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/device.png" alt="Device page" width="820">
 </p>
 
 ---
