@@ -3,18 +3,31 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
+    <UserControl.Resources>
+        <!-- 包一层 SolidColorBrush，代码才拿得到；直接写在 FontIcon 上的 ThemeResource
+             取不回来。Color 仍走 ThemeResource，主题切换时跟着变。 -->
+        <SolidColorBrush x:Key="BatteryNormalBrush" Color="{ThemeResource TextFillColorPrimary}" />
+        <SolidColorBrush x:Key="BatteryChargingBrush" Color="{ThemeResource SystemFillColorSuccess}" />
+        <SolidColorBrush x:Key="BatteryLowBrush" Color="{ThemeResource SystemFillColorCritical}" />
+    </UserControl.Resources>
+
     <StackPanel x:Name="IndicatorRoot"
                 Orientation="Horizontal"
                 Spacing="7"
                 VerticalAlignment="Center"
                 Visibility="Collapsed">
-        <!-- 电量图用 Segoe Fluent Icons 里现成的那一组：Battery0..Battery10 是十一档电量，
-             BatteryCharging0..10 是对应的充电态，外框、电量条和闪电都在字形里。字形跟着
-             字号缩放、颜色跟前景走，深浅两色不必各调一遍。挑哪一个字形见 SetState。 -->
-        <FontIcon x:Name="BatteryGlyph"
-                  FontSize="20"
-                  Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                  VerticalAlignment="Center" />
+        <!-- 电量图用 Segoe Fluent Icons 里现成的电池字形，外框、电量条和闪电都在字形里，
+             跟着字号缩放。字号取得比字面上的一致大一些：字形在 em 框里自带留白，与旁边
+             的数字取同一个字号会明显矮一截。哪一档用哪个码点见 SetState。 -->
+        <!-- 两层叠出双色：下面这层出电量，颜色随状态走；上面压一个同组的空电池字形，把外框
+             重新描成文字色，于是染色只落在内舱里。两层必须取自同一组——充电组的电池被左边
+             的闪电挤窄了一点，拿普通组的空电池去盖对不齐。 -->
+        <Grid VerticalAlignment="Center">
+            <FontIcon x:Name="BatteryLevelGlyph" FontSize="26" />
+            <FontIcon x:Name="BatteryShellGlyph"
+                      FontSize="26"
+                      Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+        </Grid>
 
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
             <TextBlock x:Name="BatteryValue"
