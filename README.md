@@ -15,41 +15,41 @@
 
 HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为触控服务与 PC Manager。
 
-本项目 fork 自 [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)，采集与注入的骨架源自该项目，此后经过修改。
+本项目 fork 自 [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)，采集与注入的骨架来自该项目。
 
 ---
 
 ## 功能
 
-- **触控**：多指触控。写字时手掌压在屏幕上不会误触，用笔时忽略手指。
-- **手写笔**：M-Pencil 的压力与倾斜。侧键双击可设为遵循系统笔设置，或切换书写与橡皮擦（后者可启用 OneNote 兼容）。
-- **键盘**：可开关「分离后保持无线连接」。
-- **电池**：充电阈值，可用厂商的智能充电，也可手动设定区间。电池健康、循环次数、剩余时间。
+- **触控**：多指触控与掌拒。笔在屏时忽略手指。
+- **手写笔**：M-Pencil 的压力与倾斜。侧键双击两种行为：遵循系统笔设置，或书写与橡皮擦互切（后者含 OneNote 兼容）。
+- **键盘**：「分离后保持无线连接」开关。
+- **电池**：充电阈值，厂商的智能充电与手动区间二选一。电池健康、循环次数、剩余时间。
 - **屏幕**：色域、色温、护眼模式。取值来自面板的出厂标定，由显示驱动下发，不经软件后处理。
-- **服务**：停用华为的后台服务，可随时恢复。
+- **服务**：华为后台服务的停用与恢复。
 - **设备信息**：笔与键盘的电量、充电与吸附状态、固件版本、序列号；主机型号、处理器、内存、系统版本。
 
-配件页显示笔与键盘的电量、固件与序列号，笔的侧键行为也在这里设定。
+配件页：笔与键盘的电量、固件与序列号，以及侧键行为。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/accessories.png" alt="配件页" width="820">
 </p>
 
-托盘常驻显示配件状态，笔或键盘接入时弹出提示。
+托盘常驻显示配件状态。笔或键盘接入时弹出浮窗。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-pen.png" alt="手写笔接入提示" width="340">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-keyboard.png" alt="磁吸键盘接入提示" width="340">
 </p>
 
-电池页管充电阈值与健康状况，屏幕页调色域、色温与护眼。
+电池页为充电阈值与电池健康，屏幕页为色域、色温与护眼。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="电池页" width="410">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="屏幕页" width="410">
 </p>
 
-服务页停用或恢复华为的后台服务，设备页列出本机规格。
+服务页为华为后台服务的开关，设备页为本机规格。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="服务页" width="410">
@@ -58,19 +58,19 @@ HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为�
 
 ---
 
-## 触控用的是原厂算法
+## 触控：原厂算法
 
-触控与手写笔没有重新实现。本项目启动一个自己的宿主进程，在其中加载华为原本的 `THP_Service.dll`，数据从 Himax 控制器经原厂算法链直达 Windows：
+触控与手写笔并非重新实现。本项目的宿主进程加载华为原本的 `THP_Service.dll`，数据从 Himax 控制器经原厂算法链直达 Windows：
 
 ```
 Himax → THP_Service → TSACore → 原厂 VHF → Windows HID
 ```
 
-因此掌拒、压力、倾斜、笔与手指的仲裁都与原厂一致。替换掉的只是华为那个很薄的 .NET 服务外壳。代价是不能卸载华为驱动，否则触控失效。
+掌拒、压力、倾斜、笔与手指的仲裁因此与原厂一致，替换的只是华为的 .NET 服务外壳。前提是保留华为驱动，卸载后触控失效。
 
-接管是租约式的，不是开机就抢。服务启动时触控仍归华为，登录界面和托盘未启动时照常可用；托盘取得租约后才切换，租约断开（托盘退出或崩溃）则自动交还。任一环节失败都不会让触控无人负责。
+接管以租约为准，非开机即接管。服务启动时触控仍归华为，登录界面与托盘未启动时照常可用；托盘取得租约后切换，租约断开（托盘退出或崩溃）后自动交还。任一环节失败时触控仍有提供方。
 
-屏幕色彩、电池阈值、键盘无线连接同样依赖华为的组件，而这些组件编译为 x64。ARM64 进程无法加载 x64 DLL，因此每项能力各自运行在独立进程中，统一放在 `hal/` 下。
+屏幕色彩、电池阈值、键盘无线连接同样依赖华为的组件，而这些组件编译为 x64。ARM64 进程无法加载 x64 DLL，因此每项能力各自独立进程，统一置于 `hal/` 下。
 
 细节见 [`hal/README.md`](hal/README.md)。
 
@@ -79,7 +79,7 @@ Himax → THP_Service → TSACore → 原厂 VHF → Windows HID
 ## 支持的设备
 
 - HUAWEI MateBook E Go，Windows 11 ARM64。
-- 手写笔：M-Pencil 一代至三代（CD52、CD54、CD54R、CD54S），仅在 CD54R 上实测。
+- 手写笔：M-Pencil 一代至三代（CD52、CD54、CD54R、CD54S），仅 CD54R 实测。
 - 键盘：华为智能磁吸键盘，不支持第三方键盘。
 
 ---
@@ -94,17 +94,17 @@ Himax → THP_Service → TSACore → 原厂 VHF → Windows HID
 
 ## 安装
 
-从 Releases 下载 `OpenEGoHubSetup_arm64_vX.Y.Z.msi` 并运行，注册服务需要管理员权限。安装后服务随 Windows 启动，开始菜单中有入口。
+从 Releases 下载 `OpenEGoHubSetup_arm64_vX.Y.Z.msi` 运行。服务注册需要管理员权限；安装后随 Windows 启动，入口在开始菜单。
 
-安装时华为触控服务会被停用，两者不能同时驱动同一块硬件。切换回华为驱动无需卸载，在设置窗口中退出即可。
+安装过程停用华为触控服务，两者不能同时驱动同一块硬件。切换回华为驱动无需卸载，在设置窗口中退出。
 
 ---
 
 ## 从源码构建
 
-需要 CMake、Ninja、ARM64 MSVC 工具链，打包还需要 WiX v4。
+需要 CMake、Ninja、ARM64 MSVC 工具链，打包另需 WiX v4。
 
-`arm64-*` preset 从 `PATH` 解析 `cl.exe`，shell 中需先具备 ARM64 开发者环境。`scripts\build.ps1` 会自行导入：
+`arm64-*` preset 从 `PATH` 解析 `cl.exe`，shell 中需先具备 ARM64 开发者环境。`scripts\build.ps1` 自行导入：
 
 ```powershell
 .\scripts\build.ps1 -Config Release           # 配置并构建
@@ -118,15 +118,15 @@ cmake --preset arm64-Release
 cmake --build --preset arm64-Release
 ```
 
-`hal/` 单独构建，且要先于主项目——主项目链接它产出的 `GaokunHal.lib`，缺了会在配置阶段失败。Debug 与 Release 各需构建一次：
+`hal/` 单独构建，且先于主项目：主项目链接其产出的 `GaokunHal.lib`，缺失时配置阶段失败。Debug 与 Release 各需一次：
 
 ```powershell
 cd hal; .\scripts\build.ps1 -Config Debug
 ```
 
-服务本身是原生 ARM64。需要 ARM64EC 的只有 `hal/` 下那几个加载华为 x64 DLL 的宿主，它们由 hal 自己的构建脚本产出，不经过这里的 preset。
+服务为原生 ARM64。ARM64EC 只用于 `hal/` 下加载华为 x64 DLL 的那几个宿主，它们由 hal 自己的构建脚本产出，不经过此处的 preset。
 
-开发机上以管理员身份安装 Debug 服务，随后用 DevCycle 循环：
+开发机以管理员身份安装 Debug 服务，之后进入 DevCycle 循环：
 
 ```powershell
 scripts\install_debug_service.bat
@@ -134,7 +134,7 @@ pwsh -File scripts\dev-cycle.ps1
 ```
 
 退出调试并恢复发行服务用 `pwsh -File scripts\dev-cycle.ps1 -RestoreRelease`。
-`-NoTray` 只启动服务而不取得租约，因此会按设计继续由华为提供触控。
+`-NoTray` 只启动服务、不取得租约，触控按设计仍由华为提供。
 
 打包：
 
@@ -147,17 +147,17 @@ wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
     -out build\OpenEGoHubSetup_arm64_v1.2.3.msi
 ```
 
-安装包里的 `hal\` 宿主取自 `HalOutputDir`，那个目录要先由 `hal\scripts\build.ps1 -Config
-Release` 产出。`scripts\pack_release_version.bat` 把构建和打包一次做完，参数不必自己拼。
+安装包中的 `hal\` 宿主取自 `HalOutputDir`，该目录先由 `hal\scripts\build.ps1 -Config
+Release` 产出。`scripts\pack_release_version.bat` 一次完成构建与打包，无需手写参数。
 
-`scripts\dev-cycle.ps1` 停服务、重新构建、再启动；`scripts\verify.ps1` 构建后跑测试，并挡住「构建没走完、测试却全绿」这一类假成功。两者都需要提权 shell。
+`scripts\dev-cycle.ps1` 停服务、重新构建、再启动。`scripts\verify.ps1` 构建后运行测试，并拦截「构建未走完、测试却全绿」的假成功。两者需要提权 shell。
 
 ---
 
 ## 目录结构
 
 - `EGoTouchService/`：服务。`Device/` 采集与注入，`Tsa/` 厂商后端适配，`Host/` 系统接口。
-- `hal/`：厂商硬件层。凡是需要加载华为 x64 DLL 的部分都在这里，各自独立进程、编译为 ARM64EC。
+- `hal/`：厂商硬件层。凡需加载华为 x64 DLL 的部分都在这里，各自独立进程，编译为 ARM64EC。
 - `Common/`：跨进程通道与共享配置。
 - `Tools/`：托盘与设置窗口。
 - `docs/`：逆向所得的协议文档。
@@ -167,9 +167,9 @@ Release` 产出。`scripts\pack_release_version.bat` 把构建和打包一次做
 
 ## 致谢
 
-本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233）。Himax 帧采集、笔的 MCU 传输、VHF 注入与服务骨架都源自该项目；触控算法原先也是，后来换成厂商后端并移除。其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233）。Himax 帧采集、笔的 MCU 传输、VHF 注入与服务骨架均来自该项目；触控算法原先也是，后换为厂商后端并移除。其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
-另有几个更早在这台设备上做过工作的项目，本项目参考过它们：
+另有几个更早在这台设备上的项目，本项目参考过：
 
 - **[MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)**，作者 eiyooooo
 - **[goodies](https://github.com/matebook-e-go/goodies)**，作者 dantmnf
