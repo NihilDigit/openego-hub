@@ -120,12 +120,15 @@
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="NavBattery" Content="电池" Tag="battery">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE83E;" />
+                        <!-- 与电量指示器取自同一组线框电池，见 BatteryIndicator。 -->
+                        <FontIcon Glyph="&#xE859;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="NavScreen" Content="屏幕" Tag="screen">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE7F4;" />
+                        <!-- 这一页调的是色温、护眼和色域，用亮度而不是显示器：本机是一块
+                             平板，画一台带底座的显示器指的是别的东西。 -->
+                        <FontIcon Glyph="&#xE706;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="NavGeneral" Content="服务" Tag="general">
@@ -135,7 +138,8 @@
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="NavDevice" Content="设备" Tag="device">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE977;" />
+                        <!-- 这一页列的是处理器、内存这些本机规格，不是「另一台设备」。 -->
+                        <FontIcon Glyph="&#xE950;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>
@@ -993,28 +997,32 @@
                         <!-- 整机图取自本机键盘插件里的 snapping.png，见 AccessoryImages::ResolveMachine。
                              机型名用 SMBIOS 的 Family 字段，固件里写的就是「MateBook E」，
                              不需要自己维护型号码到营销名的映射。 -->
-                        <Grid ColumnSpacing="20">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Spacing="4" VerticalAlignment="Center">
-                                <TextBlock
-                                    x:Name="MachineNameText"
-                                    Text="本机"
-                                    Style="{ThemeResource TitleTextBlockStyle}" />
-                                <TextBlock
-                                    x:Name="MachineIdentityText"
-                                    Style="{StaticResource SettingsDescriptionStyle}" />
-                            </StackPanel>
-                            <Image
-                                x:Name="MachineImage"
-                                Grid.Column="1"
-                                Width="132"
-                                Height="132"
-                                Stretch="Uniform"
-                                VerticalAlignment="Center" />
-                        </Grid>
+                        <!-- 这一段也装进卡片，与页面上其余各段一致。整机图是深灰的，摊在页面
+                             底色上时深色主题里几乎看不出边界，卡片的底色和描边正好把它托住。 -->
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="4" VerticalAlignment="Center">
+                                    <TextBlock
+                                        x:Name="MachineNameText"
+                                        Text="本机"
+                                        Style="{ThemeResource TitleTextBlockStyle}" />
+                                    <TextBlock
+                                        x:Name="MachineIdentityText"
+                                        Style="{StaticResource SettingsDescriptionStyle}" />
+                                </StackPanel>
+                                <Image
+                                    x:Name="MachineImage"
+                                    Grid.Column="1"
+                                    Width="120"
+                                    Height="120"
+                                    Stretch="Uniform"
+                                    VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
 
                         <!-- 硬件 -->
                         <StackPanel Spacing="4">
