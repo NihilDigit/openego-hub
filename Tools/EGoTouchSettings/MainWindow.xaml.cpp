@@ -56,16 +56,14 @@ DWORD SettingFromTheme(ElementTheme theme) {
     }
 }
 
-// 应用的深浅，不是任务栏的——那是 SystemUsesLightTheme，两者可以各走各的。
-bool SystemUsesDarkApps() {
-    DWORD value = 1, size = sizeof(value), type = 0;
-    if (RegGetValueW(HKEY_CURRENT_USER,
-                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, &type, &value, &size)
-        != ERROR_SUCCESS) {
-        return false;
+// 最小化、最大化、关闭这三个按钮由 AppWindowTitleBar 画，不在 XAML 的内容树里，所以窗口
+// 内容换成深色时它们还按系统那一档上色。PreferredTheme 就是给这种情况准备的，交代一次
+// 深浅即可，不必逐个去设按钮的前景、悬停和按下色。
+void ApplyCaptionButtonTheme(Microsoft::UI::Windowing::AppWindow const& appWindow, bool dark) {
+    if (const auto titleBar = appWindow.TitleBar()) {
+        titleBar.PreferredTheme(
+            dark ? TitleBarTheme::Dark : TitleBarTheme::Light);
     }
-    return value == 0;
 }
 
 // 设备页取不到的项显示一个破折号，不留空。这些值要么固件里就有、要么永远不会有，没有
@@ -151,6 +149,14 @@ MainWindow::MainWindow() {
 
     ConfigureWindow();
     CreateBridgeWindow();
+
+    // 内容那一侧由 RequestedTheme 管，窗框和标题栏按钮要自己跟上。订在 ActualThemeChanged
+    // 上，用户改外观和系统改主题走的是同一条路。
+    RootLayout().ActualThemeChanged(
+        [this](FrameworkElement const&, IInspectable const&) { SyncFrameTheme(); });
+    // 元素上树之前 ActualTheme 还不是生效值，首次同步要等到这里。
+    RootLayout().Loaded([this](IInspectable const&, RoutedEventArgs const&) { SyncFrameTheme(); });
+
     LoadStoredSettings();
     ShowAboutVersion();
     FillDevicePage();
@@ -327,7 +333,7 @@ void MainWindow::ShowNotification(EGoTouchTrayIpc::Notification notification, LP
         m_notificationWindow);
     // 弹窗是另一个 Window，主题不会从主窗口继承下来。每次弹出前推一遍而不是只在创建时推：
     // 跟随系统时系统自己会变，而弹窗一天只弹几次，重设一次属性不值得为它记状态。
-    implementation->ApplyTheme(RootLayout().RequestedTheme(), IsDarkTheme());
+    implementation->ApplyTheme(RootLayout().RequestedTheme());
     if (notification == EGoTouchTrayIpc::Notification::PenDeviation) {
         implementation->ShowDeviation();
         return;
@@ -756,35 +762,29 @@ void MainWindow::ThemeSelected(IInspectable const& sender, RoutedEventArgs const
     WriteUserSetting(kThemeSettingName, SettingFromTheme(theme));
 }
 
+// 只表达意图。真正生效的那一档由 XAML 解析出来，随后从 ActualThemeChanged 回来。
 void MainWindow::ApplyTheme(ElementTheme theme) {
     RootLayout().RequestedTheme(theme);
     ThemeSystemItem().IsChecked(theme == ElementTheme::Default);
     ThemeLightItem().IsChecked(theme == ElementTheme::Light);
     ThemeDarkItem().IsChecked(theme == ElementTheme::Dark);
-    SyncFrameTheme();
     if (m_notificationWindow) {
         get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
-            m_notificationWindow)->ApplyTheme(theme, IsDarkTheme());
+            m_notificationWindow)->ApplyTheme(theme);
     }
 }
 
-// 当前实际生效的深浅。跟随系统时 RequestedTheme 是 Default，问它得不到答案，只能自己去读
-// 系统那一档。ActualTheme 也不行：窗口刚建好、内容还没上树时它读不到生效值。
-bool MainWindow::IsDarkTheme() {
-    const ElementTheme theme = RootLayout().RequestedTheme();
-    return theme == ElementTheme::Dark ||
-        (theme == ElementTheme::Default && SystemUsesDarkApps());
-}
-
-// 非客户区不在 XAML 的管辖内：窗框那一像素和标题栏按钮的明暗由 DWM 决定，RequestedTheme
-// 传不过去。跟随系统时还要跟着系统改，所以这一条也挂在每秒的刷新上。
+// 窗框和标题栏按钮不在 XAML 的管辖内，得单独交代深浅。挂在 ActualTheme 上而不是自己去读
+// 注册表：跟随系统时这个事件同样会来，用户改一次系统主题就通知一次，不需要轮询，也不需要
+// 区分「用户选的」和「系统给的」——ActualTheme 已经是两者合成之后的结果。
 void MainWindow::SyncFrameTheme() {
-    const bool dark = IsDarkTheme();
-    if (m_frameDarkApplied == static_cast<int>(dark)) return;
-    m_frameDarkApplied = static_cast<int>(dark);
+    const bool dark = RootLayout().ActualTheme() == ElementTheme::Dark;
+    const HWND hwnd = WindowHandle();
     const BOOL value = dark ? TRUE : FALSE;
-    (void)DwmSetWindowAttribute(
-        WindowHandle(), kDwmwaUseImmersiveDarkMode, &value, sizeof(value));
+    (void)DwmSetWindowAttribute(hwnd, kDwmwaUseImmersiveDarkMode, &value, sizeof(value));
+
+    ApplyCaptionButtonTheme(
+        Microsoft::UI::Windowing::AppWindow::GetFromWindowId(GetWindowIdFromWindow(hwnd)), dark);
 }
 
 void MainWindow::DeviceCardsSizeChanged(IInspectable const&,
@@ -1036,7 +1036,6 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
 }
 
 void MainWindow::RefreshState() {
-    SyncFrameTheme();
     m_trayConnected = FindTrayWindow() != nullptr;
     if (m_exitPending && !m_trayConnected) {
         Close();

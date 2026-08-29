@@ -41,6 +41,12 @@ NotificationWindow::NotificationWindow() {
     InitializeComponent();
     ConfigureWindow();
 
+    NotificationRoot().ActualThemeChanged(
+        [this](FrameworkElement const&, IInspectable const&) { SyncFrameTheme(); });
+    // 元素上树之前 ActualTheme 还不是生效值，首次同步要等到这里。
+    NotificationRoot().Loaded(
+        [this](IInspectable const&, RoutedEventArgs const&) { SyncFrameTheme(); });
+
     m_dwellTimer = DispatcherTimer();
     m_dwellTimer.Interval(Windows::Foundation::TimeSpan{30'000'000});
     m_dwellTimer.Tick([this](IInspectable const&, IInspectable const&) {
@@ -320,17 +326,21 @@ void NotificationWindow::ShowToolChanged(bool eraser) {
 // 弹窗是独立的 Window，主题不从主窗口继承，由 MainWindow 在每次弹出前推给它。深浅也一并
 // 传进来：跟随系统时 theme 是 Default，而 ActualTheme 在窗口刚建好、内容还没上树时读不到
 // 真正生效的那一档——照它设边框色，深色下会得到一条白边，正是要修的东西。
-void NotificationWindow::ApplyTheme(ElementTheme theme, bool dark) {
+void NotificationWindow::ApplyTheme(ElementTheme theme) {
     NotificationRoot().RequestedTheme(theme);
+}
+
+// 窗口的边界由 DWM 画，不归 RequestedTheme 管，得按 ActualTheme 单独交代。
+void NotificationWindow::SyncFrameTheme() {
+    const bool dark = NotificationRoot().ActualTheme() == ElementTheme::Dark;
+    const HWND hwnd = WindowHandle();
 
     const BOOL immersive = dark ? TRUE : FALSE;
-    (void)DwmSetWindowAttribute(
-        WindowHandle(), kDwmwaUseImmersiveDarkMode, &immersive, sizeof(immersive));
-    // 窗口的边界只剩这条 DWM 边框（XAML 那侧不描边，两条叠起来就是深色下最扎眼的白边）。
-    // DWMWA_COLOR_NONE 对这个无标题栏的窗口不起作用，实测仍会描一条，所以给它一个贴着卡片
-    // 的颜色，让它退到轮廓的位置上。
+    (void)DwmSetWindowAttribute(hwnd, kDwmwaUseImmersiveDarkMode, &immersive, sizeof(immersive));
+    // 卡片自己不描边，边界只剩这一条。DWMWA_COLOR_NONE 对这个无标题栏的窗口不起作用，实测
+    // 仍会描一条系统默认色的线，所以给它一个贴着卡片的颜色，让它退到轮廓的位置上。
     const COLORREF border = dark ? kBorderColorDark : kBorderColorLight;
-    (void)DwmSetWindowAttribute(WindowHandle(), kDwmwaBorderColor, &border, sizeof(border));
+    (void)DwmSetWindowAttribute(hwnd, kDwmwaBorderColor, &border, sizeof(border));
 }
 
 void NotificationWindow::HideNotification() {
