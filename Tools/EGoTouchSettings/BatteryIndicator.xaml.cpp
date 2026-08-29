@@ -8,17 +8,20 @@
 
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
-using namespace Microsoft::UI::Xaml::Media::Animation;
 
 namespace winrt::EGoTouchSettings::implementation {
 
 namespace {
-// 电池内腔的宽度，与 XAML 里那圈边框和内边距对应：23 - 2 * 1.25 边框 - 2 * 1.25 内边距。
-constexpr double kInnerWidth = 18.0;
-constexpr int kChargingCycleMs = 1800;
+// Segoe Fluent Icons 里两组连号的字形：Battery0..Battery10 和 BatteryCharging0..10，
+// 各十一档，档位就是码点的偏移量。
+constexpr wchar_t kBatteryBase = 0xE850;
+constexpr wchar_t kBatteryChargingBase = 0xE85B;
+constexpr int kSteps = 10;
+// 充电时逐档播放一遍需要的节拍。整轮约两秒，与相邻的动效节奏接近。
+constexpr int kChargingFrameMs = 180;
 
-double FillWidthFor(uint8_t level) {
-    return std::max(1.0, kInnerWidth * static_cast<double>(level) / 100.0);
+int StepFor(uint8_t level) {
+    return std::clamp((level + 5) / 10, 0, kSteps);
 }
 } // namespace
 
@@ -26,38 +29,30 @@ BatteryIndicator::BatteryIndicator() {
     InitializeComponent();
 }
 
-// 充电动画：脉冲条从空扫到满，循环。Width 不是独立属性，动画只能跑在 UI 线程上，所以要
-// 显式打开 EnableDependentAnimation——这里只有一个 Border 在动，代价可以忽略；换成独立
-// 属性（缩放或位移）就得再套一层裁剪，反而更绕。
+void BatteryIndicator::ShowStep(int step, bool charging) {
+    const wchar_t glyph[2]{
+        static_cast<wchar_t>((charging ? kBatteryChargingBase : kBatteryBase) + step), L'\0'};
+    BatteryGlyph().Glyph(glyph);
+}
+
+// 充电动画就是把充电态那十一个字形挨个放一遍再从头来。动画只表示「在充」，不表示充到了
+// 多少——真实电量在旁边的百分比里，而按真实档位播放的话，九成以上的电量只剩一两帧行程。
 void BatteryIndicator::StartChargingAnimation() {
-    if (m_charging) return;
-
-    const auto duration = DurationHelper::FromTimeSpan(
-        Windows::Foundation::TimeSpan{static_cast<int64_t>(kChargingCycleMs) * 10'000});
-
-    DoubleAnimation sweep;
-    sweep.From(0.0);
-    sweep.To(kInnerWidth);
-    sweep.EnableDependentAnimation(true);
-    sweep.Duration(duration);
-    Storyboard::SetTarget(sweep, BatteryPulse());
-    Storyboard::SetTargetProperty(sweep, L"Width");
-
-    Storyboard storyboard;
-    storyboard.Children().Append(sweep);
-    storyboard.RepeatBehavior(RepeatBehaviorHelper::Forever());
-    m_charging = storyboard;
-    BatteryPulse().Visibility(Visibility::Visible);
-    ChargingGlyph().Visibility(Visibility::Visible);
-    storyboard.Begin();
+    if (m_chargingTimer) return;
+    m_chargingFrame = 0;
+    m_chargingTimer = DispatcherTimer();
+    m_chargingTimer.Interval(std::chrono::milliseconds(kChargingFrameMs));
+    m_chargingTimer.Tick([this](IInspectable const&, IInspectable const&) {
+        m_chargingFrame = (m_chargingFrame + 1) % (kSteps + 1);
+        ShowStep(m_chargingFrame, true);
+    });
+    m_chargingTimer.Start();
 }
 
 void BatteryIndicator::StopChargingAnimation() {
-    if (!m_charging) return;
-    m_charging.Stop();
-    m_charging = nullptr;
-    BatteryPulse().Visibility(Visibility::Collapsed);
-    ChargingGlyph().Visibility(Visibility::Collapsed);
+    if (!m_chargingTimer) return;
+    m_chargingTimer.Stop();
+    m_chargingTimer = nullptr;
 }
 
 void BatteryIndicator::SetState(bool hasLevel, uint8_t level, bool charging) {
@@ -70,12 +65,14 @@ void BatteryIndicator::SetState(bool hasLevel, uint8_t level, bool charging) {
     level = std::min<uint8_t>(level, 100);
     BatteryValue().Text(to_hstring(static_cast<unsigned>(level)));
 
-    BatteryFill().Width(FillWidthFor(level));
+    if (charging) {
+        // 已经在放就别重来：状态每秒刷新一次，每次都从头会让它停在第一帧。
+        StartChargingAnimation();
+        return;
+    }
 
-    // 状态每秒刷新一次，而动画一轮 1.8 秒。已经在放就别重来，否则每次刷新都把它按回起点，
-    // 看上去就是不动。
-    if (charging) StartChargingAnimation();
-    else StopChargingAnimation();
+    StopChargingAnimation();
+    ShowStep(StepFor(level), false);
 }
 
 } // namespace winrt::EGoTouchSettings::implementation
