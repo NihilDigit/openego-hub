@@ -79,6 +79,7 @@ private:
     Gaokun::Pen::HostController m_penHost;
     Gaokun::Pen::SnapshotReader m_penSnapshots;
     Gaokun::Pen::EventReader m_penEvents;
+    Gaokun::Pen::CommandWriter m_penCommands;
     Gaokun::Keyboard::HostController m_kbdHost;
     Gaokun::Keyboard::SnapshotReader m_kbdSnapshots;
     Gaokun::Keyboard::EventReader m_kbdEvents;
@@ -131,4 +132,3 @@ private:
 };
 
 } // namespace Service
-

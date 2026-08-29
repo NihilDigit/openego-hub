@@ -224,6 +224,11 @@ public:
     using PenDoubleClickCallback = std::function<bool()>;
     void SetPenDoubleClickCallback(PenDoubleClickCallback cb);
 
+    // ToggleEraser 需要让 ARM64EC 宿主调用厂商 PenService.dll。返回值只用于日志；即使厂商
+    // 命令暂时失败，用户会话里的 OneNote workaround 仍照常收到这次边沿。
+    using PenCurrentFuncCommandCallback = std::function<bool(bool)>;
+    void SetPenCurrentFuncCommandCallback(PenCurrentFuncCommandCallback cb);
+
 private:
     friend struct DeviceRuntimePenStateTestAccess;
     void HandlePenButtonStatusCode(uint8_t statusCode,
@@ -260,4 +265,6 @@ private:
     PenStateChangedCallback m_penStateChangedCb;
     mutable std::mutex m_penDoubleClickCbMu;
     PenDoubleClickCallback m_penDoubleClickCb;
+    mutable std::mutex m_penCurrentFuncCommandCbMu;
+    PenCurrentFuncCommandCallback m_penCurrentFuncCommandCb;
 };

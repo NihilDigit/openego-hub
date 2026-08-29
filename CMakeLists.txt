@@ -327,6 +327,23 @@ target_include_directories(EGoTouchService PRIVATE
 )
 target_link_libraries(EGoTouchService PRIVATE EGoTouchServiceCore Device Host Common advapi32 setupapi hid shell32 "${GAOKUN_HAL_LIB}")
 
+# 服务开发构建必须使用与 GaokunHal.lib 同一配置生成的笔宿主。ResolveHostPath 的历史回退固定
+# 指向 hal/build/Release，Debug 服务因而会悄悄启动旧宿主；新增 IPC 后表现为服务端代码已更新、
+# 命令管道却永远不存在。把宿主放到服务同目录，部署路径和开发路径便使用同一条优先规则。
+set(GAOKUN_PEN_HOST_EXE
+    "${GAOKUN_HAL_ROOT}/build/${GAOKUN_HAL_CONFIG}/GaokunPenHost.exe")
+set(EGO_PEN_HOST_EXE "${CMAKE_CURRENT_BINARY_DIR}/GaokunPenHost.exe")
+add_custom_command(
+    OUTPUT "${EGO_PEN_HOST_EXE}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${GAOKUN_PEN_HOST_EXE}" "${EGO_PEN_HOST_EXE}"
+    DEPENDS "${GAOKUN_PEN_HOST_EXE}"
+    COMMENT "Copying Gaokun pen host beside OpenEGoHubService"
+    VERBATIM
+)
+add_custom_target(EGoTouchPenRuntime ALL DEPENDS "${EGO_PEN_HOST_EXE}")
+add_dependencies(EGoTouchService EGoTouchPenRuntime)
+
 ego_copy_config_to_output(EGoTouchService)
 
 install(TARGETS EGoTouchService
@@ -436,6 +453,29 @@ set_target_properties(EGoTouchTray PROPERTIES OUTPUT_NAME OpenEGoHubTray)
 if(TARGET EGoTouchSettings)
     add_dependencies(EGoTouchTray EGoTouchSettings)
 endif()
+
+# 色温与护眼命令由用户会话里的托盘执行，GaokunDisplay 因而必须和托盘在同一目录；
+# qdcmlib 也必须紧挨 GaokunDisplay，不能误加载 System32 里的不兼容版本。安装脚本已有同样
+# 的布局，这里补齐直接从 build 目录运行的 Debug/Release 开发链路。
+set(GAOKUN_DISPLAY_EXE
+    "${GAOKUN_HAL_ROOT}/build/${GAOKUN_HAL_CONFIG}/GaokunDisplay.exe")
+set(GAOKUN_QDCM_DLL
+    "${GAOKUN_HAL_ROOT}/build/${GAOKUN_HAL_CONFIG}/qdcmlib.dll")
+set(EGO_DISPLAY_RUNTIME_EXE "${CMAKE_CURRENT_BINARY_DIR}/GaokunDisplay.exe")
+set(EGO_DISPLAY_RUNTIME_DLL "${CMAKE_CURRENT_BINARY_DIR}/qdcmlib.dll")
+add_custom_command(
+    OUTPUT "${EGO_DISPLAY_RUNTIME_EXE}" "${EGO_DISPLAY_RUNTIME_DLL}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${GAOKUN_DISPLAY_EXE}" "${EGO_DISPLAY_RUNTIME_EXE}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${GAOKUN_QDCM_DLL}" "${EGO_DISPLAY_RUNTIME_DLL}"
+    DEPENDS "${GAOKUN_DISPLAY_EXE}" "${GAOKUN_QDCM_DLL}"
+    COMMENT "Copying Gaokun display runtime beside OpenEGoHubTray"
+    VERBATIM
+)
+add_custom_target(EGoTouchDisplayRuntime ALL
+    DEPENDS "${EGO_DISPLAY_RUNTIME_EXE}" "${EGO_DISPLAY_RUNTIME_DLL}")
+add_dependencies(EGoTouchTray EGoTouchDisplayRuntime)
 
 # 面向用户的可执行文件名随产品走，CMake target 名保持不变：target 名只出现在构建脚本、
 # CI 与 add_dependencies 里，改它没有用户可见的收益，却会牵连每一处引用。

@@ -64,12 +64,17 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
 
     Wire::SnapshotWriter snapshots;
     Wire::EventWriter events;
+    Wire::CommandReader commands;
     if (!snapshots.Open(Wire::kSnapshotName)) {
         wprintf(L"cannot create the snapshot mapping (err=%lu)\n", GetLastError());
         return 1;
     }
     if (!events.Open(Wire::kEventPipeName)) {
         wprintf(L"cannot create the event pipe (err=%lu)\n", GetLastError());
+        return 1;
+    }
+    if (!commands.Open(Wire::kCommandPipeName)) {
+        wprintf(L"cannot create the command pipe (err=%lu)\n", GetLastError());
         return 1;
     }
 
@@ -97,6 +102,20 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
         }
 
         events.PollForReader();
+        commands.PollForWriter();
+
+        Command command{};
+        while (commands.Poll(command)) {
+            if (static_cast<CommandKind>(command.kind) != CommandKind::SetCurrentFunc ||
+                (command.value != 0 && command.value != 1)) {
+                if (verbose) {
+                    wprintf(L"ignored command kind=%u value=%d\n", command.kind, command.value);
+                }
+                continue;
+            }
+            if (verbose) wprintf(L"setting PenCurrentFunc(%d)\n", command.value);
+            service.SetCurrentFunc(command.value);
+        }
 
         Event event{};
         while (service.PopEvent(event)) {

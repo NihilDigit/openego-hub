@@ -255,6 +255,8 @@ void TestToggleEraserPublishesStateBeforeNotifyingUserSession() {
     runtime.SetPenButtonMode(PenButtonMode::ToggleEraser);
 
     int notifications = 0;
+    int commands = 0;
+    bool commandStateSeen = false;
     bool stateSeenByFirstNotification = false;
     bool stateSeenBySecondNotification = true;
     runtime.SetPenDoubleClickCallback([&] {
@@ -269,12 +271,23 @@ void TestToggleEraserPublishesStateBeforeNotifyingUserSession() {
         }
         return true;
     });
+    runtime.SetPenCurrentFuncCommandCallback([&](bool eraser) {
+        ++commands;
+        const auto state = runtime.GetPenStateSnapshot();
+        commandStateSeen = state.hasEraserToggle &&
+                           (state.eraserToggle != 0) == eraser;
+        return true;
+    });
 
     DeviceRuntimePenStateTestAccess::DispatchDoubleClick(runtime);
     DeviceRuntimePenStateTestAccess::DispatchDoubleClick(runtime);
 
     Require(notifications == 2,
             "ToggleEraser should notify the user-session companion on every edge");
+    Require(commands == 2,
+            "ToggleEraser should send the vendor current-function command on every edge");
+    Require(commandStateSeen,
+            "the eraser state must be published before sending the vendor command");
     Require(stateSeenByFirstNotification,
             "the enable state must be published before the first notification");
     Require(!stateSeenBySecondNotification,

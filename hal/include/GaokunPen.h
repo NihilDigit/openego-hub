@@ -77,6 +77,19 @@ struct Event {
 };
 static_assert(sizeof(Event) == 16, "Event layout must stay fixed across both sides");
 
+// ---- 下行命令 ----
+
+enum class CommandKind : uint32_t {
+    None = 0,
+    SetCurrentFunc,
+};
+
+struct Command {
+    uint32_t kind = 0;
+    int32_t value = 0;
+};
+static_assert(sizeof(Command) == 8, "Command layout must stay fixed across both sides");
+
 // ---- 读者侧 ----
 
 // 状态快照的读取。宿主未运行时 Read 返回 false，调用方据此显示「未知」而不是零值。
@@ -108,6 +121,22 @@ public:
 
     [[nodiscard]] bool Open() noexcept;
     [[nodiscard]] bool Poll(Event &out) noexcept;
+
+private:
+    void *m_impl = nullptr;
+};
+
+// 向常驻 ARM64EC 宿主发送厂商命令。当前只开放 PenCurrentFunc，避免让服务直接加载 x64 DLL。
+class CommandWriter {
+public:
+    CommandWriter() noexcept = default;
+    ~CommandWriter() noexcept;
+
+    CommandWriter(const CommandWriter &) = delete;
+    CommandWriter &operator=(const CommandWriter &) = delete;
+
+    [[nodiscard]] bool Open() noexcept;
+    [[nodiscard]] bool SetCurrentFunc(bool eraser) noexcept;
 
 private:
     void *m_impl = nullptr;

@@ -10,11 +10,14 @@ namespace Gaokun::Pen::Wire {
 
 inline constexpr wchar_t kSnapshotName[] = L"Global\\GaokunPenSnapshot";
 inline constexpr wchar_t kEventPipeName[] = L"\\\\.\\pipe\\GaokunPenEvents";
+inline constexpr wchar_t kCommandPipeName[] = L"\\\\.\\pipe\\GaokunPenCommands";
 inline constexpr wchar_t kStopEventPrefix[] = L"GaokunPenHostStop";
 
 using SnapshotWriter = Channel::SeqlockWriter<Snapshot>;
 using SnapshotReaderImpl = Channel::SeqlockReader<Snapshot>;
 using EventWriter = Channel::EventPipeWriter<Event>;
 using EventReaderImpl = Channel::EventPipeReader<Event>;
+using CommandReader = Channel::CommandPipeReader<Command>;
+using CommandWriterImpl = Channel::CommandPipeWriter<Command>;
 
 } // namespace Gaokun::Pen::Wire

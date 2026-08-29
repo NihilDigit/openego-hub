@@ -196,6 +196,11 @@ void DeviceRuntime::SetPenDoubleClickCallback(PenDoubleClickCallback cb) {
   m_penDoubleClickCb = std::move(cb);
 }
 
+void DeviceRuntime::SetPenCurrentFuncCommandCallback(PenCurrentFuncCommandCallback cb) {
+  std::lock_guard<std::mutex> lk(m_penCurrentFuncCommandCbMu);
+  m_penCurrentFuncCommandCb = std::move(cb);
+}
+
 void DeviceRuntime::UpdatePenState(std::function<void(RuntimePenState&, PenStateUpdateResult&)> updateFn) {
   PenStateUpdateResult result{};
   bool applyToPipeline = false;
@@ -286,6 +291,14 @@ void DeviceRuntime::DispatchPenButtonAction(const PenButtonAction& action, const
     case PenButtonMode::ToggleEraser: {
       const bool next = !IsEraserActive();
       UpdateEraserState(next);
+      PenCurrentFuncCommandCallback command;
+      {
+        std::lock_guard<std::mutex> lk(m_penCurrentFuncCommandCbMu);
+        command = m_penCurrentFuncCommandCb;
+      }
+      const bool commandOk = command && command(next);
+      LOG_INFO("Runtime", __func__, "PenButton",
+               "PenCurrentFunc({}) delivery_ok={}", next ? 1 : 0, commandOk);
       // 先发布状态、再发边沿，托盘才能读到 next：桌面 OneNote 不消费虚拟笔的 eraser
       // flags，托盘需要在用户会话里同步它自己的绘图工具。
       win32Attempted = true;

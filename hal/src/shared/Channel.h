@@ -269,4 +269,93 @@ private:
     HANDLE m_pipe = nullptr;
 };
 
+// 下行命令管道。宿主是服务端读者，控制进程是客户端写者；与上面的事件管道方向相反。
+// 两端都非阻塞，控制命令不能拖住宿主的 MCU 消息循环，宿主未就绪时调用方也只得到失败。
+template <typename Command>
+class CommandPipeReader {
+public:
+    CommandPipeReader() noexcept = default;
+    ~CommandPipeReader() noexcept {
+        CloseClient();
+        if (m_pipe && m_pipe != INVALID_HANDLE_VALUE) CloseHandle(m_pipe);
+    }
+
+    CommandPipeReader(const CommandPipeReader &) = delete;
+    CommandPipeReader &operator=(const CommandPipeReader &) = delete;
+
+    [[nodiscard]] bool Open(const wchar_t *name) noexcept {
+        SECURITY_ATTRIBUTES sa{};
+        SECURITY_DESCRIPTOR sd{};
+        const bool haveSecurity = BuildSharedSecurity(sa, sd);
+
+        HANDLE pipe = CreateNamedPipeW(name, PIPE_ACCESS_INBOUND,
+                                       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+                                       1, sizeof(Command) * 16, sizeof(Command) * 16, 0,
+                                       haveSecurity ? &sa : nullptr);
+        if (pipe == INVALID_HANDLE_VALUE) return false;
+        m_pipe = pipe;
+        return true;
+    }
+
+    void PollForWriter() noexcept {
+        if (!m_pipe || m_pipe == INVALID_HANDLE_VALUE || m_connected) return;
+        if (ConnectNamedPipe(m_pipe, nullptr)) {
+            m_connected = true;
+            return;
+        }
+        if (GetLastError() == ERROR_PIPE_CONNECTED) m_connected = true;
+    }
+
+    [[nodiscard]] bool Poll(Command &out) noexcept {
+        if (!m_pipe || m_pipe == INVALID_HANDLE_VALUE || !m_connected) return false;
+        DWORD read = 0;
+        if (ReadFile(m_pipe, &out, sizeof(out), &read, nullptr) && read == sizeof(out)) {
+            return true;
+        }
+        const DWORD error = GetLastError();
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) CloseClient();
+        return false;
+    }
+
+private:
+    void CloseClient() noexcept {
+        if (m_pipe && m_pipe != INVALID_HANDLE_VALUE && m_connected) {
+            (void)DisconnectNamedPipe(m_pipe);
+        }
+        m_connected = false;
+    }
+
+    HANDLE m_pipe = nullptr;
+    bool m_connected = false;
+};
+
+template <typename Command>
+class CommandPipeWriter {
+public:
+    CommandPipeWriter() noexcept = default;
+    ~CommandPipeWriter() noexcept {
+        if (m_pipe && m_pipe != INVALID_HANDLE_VALUE) CloseHandle(m_pipe);
+    }
+
+    CommandPipeWriter(const CommandPipeWriter &) = delete;
+    CommandPipeWriter &operator=(const CommandPipeWriter &) = delete;
+
+    [[nodiscard]] bool Open(const wchar_t *name) noexcept {
+        HANDLE pipe = CreateFileW(name, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (pipe == INVALID_HANDLE_VALUE) return false;
+        m_pipe = pipe;
+        return true;
+    }
+
+    [[nodiscard]] bool Send(const Command &command) noexcept {
+        if (!m_pipe || m_pipe == INVALID_HANDLE_VALUE) return false;
+        DWORD written = 0;
+        return WriteFile(m_pipe, &command, sizeof(command), &written, nullptr) &&
+               written == sizeof(command);
+    }
+
+private:
+    HANDLE m_pipe = nullptr;
+};
+
 } // namespace Gaokun::Channel

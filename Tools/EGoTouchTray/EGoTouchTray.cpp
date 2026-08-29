@@ -962,7 +962,7 @@ bool IsEraserToolName(const std::wstring& name) {
     return name == L"笔划橡皮擦" || name == L"Stroke Eraser" || name == L"Eraser";
 }
 
-bool IsFallbackPenName(const std::wstring& name) {
+bool IsPenToolName(const std::wstring& name) {
     return name.rfind(L"笔:", 0) == 0 || name.rfind(L"Pen:", 0) == 0;
 }
 
@@ -997,8 +997,8 @@ bool InvokeTool(IUIAutomationElement* element) {
 struct ToolboxScan {
     ComPtr<IUIAutomationElement> eraser;
     ComPtr<IUIAutomationElement> rememberedPen;
-    ComPtr<IUIAutomationElement> fallbackPen;
     std::wstring selectedPenName;
+    bool eraserSelected = false;
 };
 
 ToolboxScan ScanToolbox(
@@ -1014,18 +1014,17 @@ ToolboxScan ScanToolbox(
         ComPtr<IUIAutomationElement> item;
         if (FAILED(items->GetElement(i, &item)) || !item) continue;
         const std::wstring name = ElementName(item.Get());
-        if (IsEraserToolName(name) && !result.eraser) {
-            result.eraser = item;
+        if (IsEraserToolName(name)) {
+            if (!result.eraser) result.eraser = item;
+            if (IsSelected(item.Get())) result.eraserSelected = true;
             continue;
         }
-        if (!rememberedName.empty() && name == rememberedName &&
+        const bool isPen = IsPenToolName(name);
+        if (isPen && !rememberedName.empty() && name == rememberedName &&
             !result.rememberedPen) {
             result.rememberedPen = item;
         }
-        if (IsFallbackPenName(name) && !result.fallbackPen) {
-            result.fallbackPen = item;
-        }
-        if (result.selectedPenName.empty() && IsSelected(item.Get())) {
+        if (isPen && result.selectedPenName.empty() && IsSelected(item.Get())) {
             result.selectedPenName = name;
         }
     }
@@ -1054,25 +1053,65 @@ bool SelectRibbonTab(IUIAutomationElement* tab) {
 // 否则 UIA 的点击会和正在书写的笔互相干扰，这就是 ScopedOneNoteInputSuppression 的由来。
 // 值得研究的替代路径是 OneNote 自己的对象模型，不经界面直接切工具；没查过它是否暴露了
 // 绘图工具，也没查过桌面版与 UWP 版的差异。
+struct OneNoteToolToggleState {
+    std::wstring penName;
+    HWND window = nullptr;
+    bool armed = false;
+
+    void Disarm() {
+        penName.clear();
+        window = nullptr;
+        armed = false;
+    }
+};
+
+bool CanSyncForegroundOneNoteTool(
+        IUIAutomation* automation,
+        HWND oneNoteWindow,
+        bool eraserActive,
+        const OneNoteToolToggleState& state) {
+    if (!automation || !oneNoteWindow) return false;
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(automation->ElementFromHandle(oneNoteWindow, &root)) || !root) return false;
+
+    const ToolboxScan tools = ScanToolbox(automation, root.Get(), state.penName);
+    if (eraserActive) return !tools.selectedPenName.empty() && tools.eraser;
+    return state.armed && state.window == oneNoteWindow && tools.eraserSelected &&
+           tools.rememberedPen;
+}
+
 bool SyncForegroundOneNoteTool(
         IUIAutomation* automation,
         HWND oneNoteWindow,
         bool eraserActive,
-        std::wstring& lastToolName) {
+        OneNoteToolToggleState& state) {
     if (!automation || !oneNoteWindow) return false;
     ComPtr<IUIAutomationElement> root;
     if (FAILED(automation->ElementFromHandle(oneNoteWindow, &root)) || !root) return false;
 
     auto tryInvoke = [&] {
-        ToolboxScan tools = ScanToolbox(automation, root.Get(), lastToolName);
+        ToolboxScan tools = ScanToolbox(automation, root.Get(), state.penName);
         if (eraserActive) {
-            if (!tools.selectedPenName.empty()) lastToolName = tools.selectedPenName;
-            return InvokeTool(tools.eraser.Get());
+            // 新一轮只能从一支明确选中的笔开始。选择、套索、荧光笔、手动选中的橡皮或
+            // Office 新增的未知工具都不能成为“切回”目标。
+            state.Disarm();
+            if (tools.selectedPenName.empty() || !InvokeTool(tools.eraser.Get())) return false;
+            state.penName = std::move(tools.selectedPenName);
+            state.window = oneNoteWindow;
+            state.armed = true;
+            return true;
         }
-        IUIAutomationElement* pen = tools.rememberedPen
-                                       ? tools.rememberedPen.Get()
-                                       : tools.fallbackPen.Get();
-        return InvokeTool(pen);
+
+        // 只恢复本轮由我们切走的那支笔，而且前台仍必须停在我们选中的橡皮上。用户若已
+        // 手动换成另一支笔或别的工具，就接受用户选择，绝不能再用旧记忆覆盖它。
+        if (!state.armed || state.window != oneNoteWindow ||
+            !tools.eraserSelected || !tools.rememberedPen) {
+            state.Disarm();
+            return false;
+        }
+        auto pen = tools.rememberedPen;
+        state.Disarm();
+        return InvokeTool(pen.Get());
     };
 
     // 最常见路径：用户正在 OneNote 的 Draw 页签里书写，工具节点已经 materialize。一次
@@ -1156,7 +1195,7 @@ private:
 // 在同一个句柄上等待。两者生命周期无关，各持一份最省事。
 void GestureWatcherThread() {
     PenStatus::Reader reader;
-    std::wstring lastOneNoteTool;
+    OneNoteToolToggleState oneNoteToggle;
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     ComPtr<IUIAutomation> automation;
     if (SUCCEEDED(comResult)) {
@@ -1184,17 +1223,27 @@ void GestureWatcherThread() {
             const auto mode = PenButtonModeFromNumeric(state.penButtonMode);
             if (mode == PenButtonMode::WindowsInk) {
                 PenInk::InjectDoubleClickShortcut();
-            } else if (mode == PenButtonMode::ToggleEraser &&
-                       state.hasEraserActive && SUCCEEDED(comResult) &&
-                       g_oneNoteCompatibility.load(std::memory_order_acquire)) {
+            } else if (mode == PenButtonMode::ToggleEraser && state.hasEraserActive) {
+                // Journal 等标准 Ink 应用直接消费厂商 VHF 的 Invert/Eraser 状态。桌面 OneNote
+                // 使用自己的工具状态，只有它仍需要下面的 UIA 兼容路径。
                 HWND oneNoteWindow = nullptr;
-                if (automation && IsOneNoteForeground(oneNoteWindow)) {
-                    ScopedOneNoteInputSuppression suppression(reader);
-                    if (suppression.Begin()) {
-                        (void)SyncForegroundOneNoteTool(
+                if (SUCCEEDED(comResult) &&
+                    g_oneNoteCompatibility.load(std::memory_order_acquire) &&
+                    automation && IsOneNoteForeground(oneNoteWindow)) {
+                    if (CanSyncForegroundOneNoteTool(
                             automation.Get(), oneNoteWindow,
-                            state.eraserActive, lastOneNoteTool);
+                            state.eraserActive, oneNoteToggle)) {
+                        ScopedOneNoteInputSuppression suppression(reader);
+                        if (!suppression.Begin() || !SyncForegroundOneNoteTool(
+                                automation.Get(), oneNoteWindow,
+                                state.eraserActive, oneNoteToggle)) {
+                            oneNoteToggle.Disarm();
+                        }
+                    } else {
+                        oneNoteToggle.Disarm();
                     }
+                } else {
+                    oneNoteToggle.Disarm();
                 }
             }
         } else if (++waitTimeouts >= 5) {

@@ -666,8 +666,18 @@ bool ServiceHost::StartPenSubsystem() {
         // 打不开不算致命：快照读不到时上层显示「未知」，比让整个服务起不来要好。
         for (int i = 0; i < 25 && !m_penSnapshots.Open(); ++i) Sleep(200);
         for (int i = 0; i < 25 && !m_penEvents.Open(); ++i) Sleep(200);
+        bool penCommandsOpen = false;
+        for (int i = 0; i < 25 && !(penCommandsOpen = m_penCommands.Open()); ++i) Sleep(200);
         for (int i = 0; i < 25 && !m_kbdSnapshots.Open(); ++i) Sleep(200);
         for (int i = 0; i < 25 && !m_kbdEvents.Open(); ++i) Sleep(200);
+
+        if (penCommandsOpen) {
+            m_deviceRuntime->SetPenCurrentFuncCommandCallback(
+                [this](bool eraser) { return m_penCommands.SetCurrentFunc(eraser); });
+        } else {
+            LOG_WARN("Service", __func__, "MCU",
+                     "Pen host command channel unavailable; native eraser state will not change.");
+        }
 
         m_accessoryStop.store(false, std::memory_order_release);
         m_accessoryThread = std::thread([this] { AccessoryLoop(); });
@@ -740,8 +750,10 @@ void ServiceHost::AccessoryLoop() {
                                                  std::memory_order_release);
                 m_impl->m_notificationSequence.fetch_add(1, std::memory_order_acq_rel);
             } else if (kind == K::CurrentFunc) {
-                // 侧键。托盘负责注入，因为 SendInput 从会话 0 返回 ERROR_ACCESS_DENIED。
-                (void)m_impl->m_penStatusWriter.SignalDoubleClick();
+                // 这是 CommandSendPenCurrentFunc 的 MCU 回显，不是物理双击。物理手势只由
+                // PenEventBridge 分派；把回显再送给托盘会让一次双击产生两个 UI 边沿。
+                LOG_INFO("Service", __func__, "MCU",
+                         "PenCurrentFunc command echoed value={}.", penEvent.value);
             }
         }
 
@@ -788,6 +800,7 @@ void ServiceHost::StartPenEventBridge() {
 }
 
 void ServiceHost::StopPenSubsystem() {
+    if (m_deviceRuntime) m_deviceRuntime->SetPenCurrentFuncCommandCallback(nullptr);
     if (m_impl->m_penEventBridge) {
         // 先摘回调再 Stop：setter 只换指针，不等在飞的调用结束，真正 join 掉读线程的是
         // Stop()。顺序反过来会让一个晚到的事件打在正在析构的 runtime 上。
