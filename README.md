@@ -167,7 +167,7 @@ Release` 产出。`scripts\pack_release_version.bat` 一次完成构建与打包
 
 ## 致谢
 
-本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233）。Himax 帧采集、笔的 MCU 传输、VHF 注入与服务骨架均来自该项目；触控算法原先也是，后换为厂商后端并移除。其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233）。Himax 帧采集、笔的 MCU 传输、VHF 注入与服务骨架均来自该项目，其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 另有几个更早在这台设备上的项目，本项目参考过：
 

@@ -212,8 +212,7 @@ false success. Both need an elevated shell.
 This project is a fork of
 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)** (MIT, © Detach2233). The
 Himax frame acquisition, the pen MCU transport, the VHF injection layer and the service
-runtime all come from there. So did the touch algorithm, until it was replaced by the
-vendor backend and removed. That notice is preserved in
+runtime all come from there. That notice is preserved in
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Earlier projects on this device were also consulted:
