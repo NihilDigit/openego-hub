@@ -20,12 +20,14 @@
              跟着字号缩放。字号取得比字面上的一致大一些：字形在 em 框里自带留白，与旁边
              的数字取同一个字号会明显矮一截。哪一档用哪个码点见 SetState。 -->
         <!-- 两层叠出双色：下面这层出电量，颜色随状态走；上面压一个同组的空电池字形，把外框
-             重新描成文字色，于是染色只落在内舱里。两层必须取自同一组——充电组的电池被左边
-             的闪电挤窄了一点，拿普通组的空电池去盖对不齐。 -->
+             重新描成文字色，于是染色只落在内舱里。两层必须取自同一组，尺寸才对得上。 -->
         <Grid VerticalAlignment="Center">
-            <FontIcon x:Name="BatteryLevelGlyph" FontSize="26" />
+            <FontIcon x:Name="BatteryLevelGlyph"
+                      FontSize="26"
+                      FontFamily="Segoe Fluent Icons" />
             <FontIcon x:Name="BatteryShellGlyph"
                       FontSize="26"
+                      FontFamily="Segoe Fluent Icons"
                       Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
         </Grid>
 
