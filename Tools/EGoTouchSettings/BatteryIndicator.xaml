@@ -3,6 +3,27 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <!-- 充电脉冲压在电量条上，而电量条的明暗随主题翻转：深色主题里它是近白，
+                     浅色主题里是近黑。所以脉冲的绿要跟它反着走——系统的 SystemFillColorSuccess
+                     恰好同向（深色给亮绿、浅色给深绿），照搬会让脉冲在两种主题下都糊在
+                     电量条里。Default 即深色。 -->
+                <ResourceDictionary x:Key="Default">
+                    <SolidColorBrush x:Key="BatteryFillBrush"
+                                     Color="{ThemeResource TextFillColorPrimary}" />
+                    <SolidColorBrush x:Key="BatteryChargingBrush" Color="#FF107C10" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="BatteryFillBrush"
+                                     Color="{ThemeResource TextFillColorPrimary}" />
+                    <SolidColorBrush x:Key="BatteryChargingBrush" Color="#FF4CC94C" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
     <StackPanel x:Name="IndicatorRoot"
                 Orientation="Horizontal"
                 Spacing="7"
@@ -21,8 +42,18 @@
                 <Grid Margin="2">
                     <Border x:Name="BatteryFill"
                             HorizontalAlignment="Left"
-                            Background="{ThemeResource TextFillColorPrimaryBrush}"
+                            Background="{ThemeResource BatteryFillBrush}"
                             CornerRadius="1" />
+                    <!-- 充电时从空扫到满、循环，压在电量条上表示正在往里灌。不做成「电量条
+                         自己涨到满」：电量九成以上时那点行程几乎看不出来，而充电恰恰是电量
+                         高的时候看得最多。也不再另摆一个闪电图标——两个图标并排读起来是
+                         两件事。 -->
+                    <Border x:Name="BatteryPulse"
+                            HorizontalAlignment="Left"
+                            Background="{ThemeResource BatteryChargingBrush}"
+                            CornerRadius="1"
+                            Opacity="0"
+                            Visibility="Collapsed" />
                 </Grid>
             </Border>
             <Border Width="2" Height="7"
@@ -32,16 +63,6 @@
                     Background="{ThemeResource TextFillColorSecondaryBrush}"
                     CornerRadius="0,1,1,0" />
         </Grid>
-
-        <!-- 闪电放在电池外面。压在电池里要么盖住填充、要么在电量低时落到空白上，而填充是
-             随主题翻转的黑白两色，没有一种闪电颜色能同时压得住两者；放在卡片底色上，一个
-             绿色在深浅两色里都读得出来。 -->
-        <FontIcon x:Name="ChargingGlyph"
-                  Glyph="&#xE945;"
-                  FontSize="12"
-                  Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                  VerticalAlignment="Center"
-                  Visibility="Collapsed" />
 
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
             <TextBlock x:Name="BatteryValue"
