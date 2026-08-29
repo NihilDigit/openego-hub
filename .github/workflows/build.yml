@@ -27,6 +27,14 @@ jobs:
         with:
           arch: arm64
 
+      # gaokun-hal is not part of the main CMake build -- its vendor-DLL hosts are ARM64EC
+      # while the rest of the tree is native ARM64 -- and CMake configuration hard-fails
+      # when hal\build\Release\GaokunHal.lib is absent. So it has to come first. The script
+      # imports the ARM64 developer environment itself and returns early when the step
+      # above already set one up.
+      - name: Build gaokun-hal
+        run: .\hal\scripts\build.ps1 -Config Release
+
       # cl.exe, not clang: the settings window is gated on MSVC (it is built by MSBuild
       # from a .vcxproj), so a clang configuration silently drops it and CI would verify
       # something other than what ships. Do not pass CMAKE_*_COMPILER_TARGET here either

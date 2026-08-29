@@ -3,6 +3,10 @@
   <?ifndef BuildOutputDir ?>
     <?define BuildOutputDir = "build" ?>
   <?endif ?>
+  <!-- hal 不经主 CMake 构建，产物落在自己的目录里，与 BuildOutputDir 无关。 -->
+  <?ifndef HalOutputDir ?>
+    <?define HalOutputDir = "hal\build\Release" ?>
+  <?endif ?>
   <!--
     OpenEGo Hub 核心服务安装包
     - UpgradeCode 全局唯一，永不修改，用于覆盖更新旧版本。
@@ -105,8 +109,51 @@
 
     </ComponentGroup>
 
+    <!--
+      gaokun-hal 的宿主进程。必须与服务同在 INSTALLFOLDER 根下，不能收进子目录：
+      ServiceHost 与托盘解析宿主路径时先看自己旁边，找不到才退到 hal 的构建目录，
+      而安装位置没有那个相对路径。
+
+      GaokunCtl.exe 是开发用 CLI，不进安装包。
+    -->
+    <ComponentGroup Id="HalComponents" Directory="INSTALLFOLDER">
+
+      <Component Id="GaokunThpHostComp" Guid="F2B02781-F81C-4A90-9A70-4E2F07585CE7">
+        <File Id="GaokunThpHostEXE" Source="$(var.HalOutputDir)\GaokunThpHost.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="GaokunPenHostComp" Guid="2639816E-2DD8-4FB0-B67F-C1A31DCC0212">
+        <File Id="GaokunPenHostEXE" Source="$(var.HalOutputDir)\GaokunPenHost.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="GaokunKeyboardHostComp" Guid="00AF713A-51EA-4742-B361-D8CB088FEBB9">
+        <File Id="GaokunKeyboardHostEXE" Source="$(var.HalOutputDir)\GaokunKeyboardHost.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="GaokunDisplayComp" Guid="21DE65AF-4F2E-443F-AB6D-6DEDAC96C882">
+        <File Id="GaokunDisplayEXE" Source="$(var.HalOutputDir)\GaokunDisplay.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="GaokunPowerComp" Guid="DAA69D51-7D99-4D95-AF57-93FE7830AFF9">
+        <File Id="GaokunPowerEXE" Source="$(var.HalOutputDir)\GaokunPower.exe" KeyPath="yes" />
+      </Component>
+
+      <!--
+        色域组件。System32 里的同名 DLL 在本机加载得上、符号也解析得到，工厂函数却返回
+        null，所以 GaokunDisplay 需要旁边这一份，见 hal/src/display/Qdcm.cpp。
+
+        源取 hal 的输出目录而不是 hal/vendor：hal 的 build.ps1 会把它复制过去，与其余五个
+        宿主同源，打包时只认一个目录。
+      -->
+      <Component Id="QdcmLibComp" Guid="885FD01E-D58A-405C-9AFE-2C0688FDAAFD">
+        <File Id="QdcmLibDLL" Source="$(var.HalOutputDir)\qdcmlib.dll" KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
     <Feature Id="MainFeature" Title="EGoTouch Core" Level="1">
       <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="HalComponents" />
     </Feature>
   </Package>
 </Wix>

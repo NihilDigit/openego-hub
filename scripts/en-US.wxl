@@ -6,7 +6,6 @@
        ═══════════════════════════════════════════════════════════ -->
   <String Id="Language" Value="1033" />
   <String Id="ProductName" Value="OpenEGo Hub" />
-  <String Id="ProductNameTest" Value="OpenEGo Hub (Test Version)" />
   <String Id="Manufacturer" Value="OpenEGo Hub" />
   <String Id="DowngradeError" Value="A newer version of [ProductName] is already installed. Please uninstall the newer version before proceeding." />
   <String Id="LicenseRtf" Value="scripts\EULA_en-US.rtf" />
@@ -14,16 +13,13 @@
   <!-- Start menu entry. The name deliberately omits "Settings": the shortcut points at the
        resident tray, and opening settings is only what it does once the tray is running. -->
   <String Id="ShortcutName" Value="OpenEGo Hub" />
-  <String Id="ShortcutNameTest" Value="OpenEGo Hub (Test Version)" />
   <String Id="ShortcutDescription" Value="Start the OpenEGo Hub tray to view accessory status and adjust touch and pen settings." />
 
   <!-- ═══════════════════════════════════════════════════════════
        System Service Info
        ═══════════════════════════════════════════════════════════ -->
   <String Id="ServiceDisplayName" Value="OpenEGo Hub Touch Service" />
-  <String Id="ServiceDescription" Value="OpenEGo Hub Touch Service — manages touch frame acquisition, algorithmic processing, and HID report injection. This service starts automatically with Windows and runs under the SYSTEM account." />
-  <String Id="ServiceDisplayNameTest" Value="OpenEGo Hub Touch Service (Test)" />
-  <String Id="ServiceDescriptionTest" Value="OpenEGo Hub Touch Service (Test Version) — includes the diagnostic workbench and BtMcuTestTool protocol validator for development and debugging." />
+  <String Id="ServiceDescription" Value="OpenEGo Hub Touch Service — hands touch between the vendor provider and OpenEGo Hub, and aggregates pen and keyboard state. This service starts automatically with Windows and runs under the SYSTEM account." />
 
   <!-- ═══════════════════════════════════════════════════════════
        WixUI_InstallDir — Welcome

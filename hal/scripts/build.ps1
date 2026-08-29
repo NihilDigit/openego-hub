@@ -48,6 +48,21 @@ function Import-VsDevEnv {
     )
     $vcvars = $roots | ForEach-Object { Join-Path $_ $rel } |
               Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    # 上面那张表只覆盖开发机上常见的两种安装。CI runner 装的是 Enterprise，落在表外，
+    # 于是这里非得靠调用方先把 VSCMD_ARG_TGT_ARCH 设好才不报错——那是个不该有的隐含依赖。
+    # 与 scripts/vsenv.ps1 同样退到 vswhere，它认识所有版本。
+    if (-not $vcvars) {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (Test-Path $vswhere) {
+            $found = & $vswhere -latest -products * -property installationPath 2>$null |
+                     Select-Object -First 1
+            if ($found) {
+                $candidate = Join-Path $found $rel
+                if (Test-Path $candidate) { $vcvars = $candidate }
+            }
+        }
+    }
     if (-not $vcvars) { throw "vcvarsarm64.bat not found; install the MSVC ARM64 build tools." }
 
     Write-Host "==> Importing ARM64 developer environment ..." -ForegroundColor Cyan
@@ -167,6 +182,16 @@ if ($objs.Count -eq 0) { throw "controller build produced no objects." }
 & lib /nologo /MACHINE:ARM64 "/OUT:$HostLib" @objs
 if ($LASTEXITCODE -ne 0) { throw "controller archive failed." }
 Write-Host "[ok] $HostLib" -ForegroundColor Green
+
+# qdcmlib.dll 不参与编译，但必须落到输出目录：GaokunDisplay 从自己旁边加载它，而系统目录
+# 里那一份在本机会拒绝初始化（见 src/display/Qdcm.cpp）。deploy.ps1 和安装包都从这里取。
+$vendorDll = Join-Path $RepoRoot 'vendor\qdcmlib.dll'
+if (Test-Path $vendorDll) {
+    Copy-Item $vendorDll $OutDir -Force
+    Write-Host "[ok] $(Join-Path $OutDir 'qdcmlib.dll')" -ForegroundColor Green
+} else {
+    Write-Host "[!] vendor\qdcmlib.dll missing; colour gamut presets will not work." -ForegroundColor Yellow
+}
 
 if ($Verify) {
     function Get-PeInfo($path) {

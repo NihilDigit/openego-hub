@@ -131,11 +131,15 @@ pwsh -File scripts\dev-cycle.ps1
 dotnet tool install --global wix
 wix extension add -g WixToolset.UI.wixext
 wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
-    scripts\EGoTouchSetup.wxs -loc scripts\zh-CN.wxl `
+    -d BuildOutputDir=build\arm64-Release -d HalOutputDir=hal\build\Release `
+    scripts\OpenEGoHubSetup.wxs -loc scripts\zh-CN.wxl `
     -out build\OpenEGoHubSetup_arm64_v1.2.3.msi
 ```
 
-`scripts\dev-cycle.ps1` 停服务、重新构建、再启动，`scripts\verify.ps1` 构建后跑测试并重放录制语料。两者都需要提权 shell。
+安装包里的 `hal\` 宿主取自 `HalOutputDir`，那个目录要先由 `hal\scripts\build.ps1 -Config
+Release` 产出。`scripts\pack_release_version.bat` 把构建和打包一次做完，参数不必自己拼。
+
+`scripts\dev-cycle.ps1` 停服务、重新构建、再启动；`scripts\verify.ps1` 构建后跑测试，并挡住「构建没走完、测试却全绿」这一类假成功。两者都需要提权 shell。
 
 ---
 

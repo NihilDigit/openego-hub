@@ -9,8 +9,10 @@
 
 namespace Service {
 
-/// 服务名称常量
-inline constexpr wchar_t kServiceName[] = L"EGoTouchService";
+/// 服务名称常量。必须与 scripts/OpenEGoHubSetup.wxs 的 ServiceInstall Name 一致：
+/// 名字对不上时 --install 会装出第二个服务，与安装包装的那个并存，两个一起驱同一块
+/// Himax；--uninstall 则卸不掉安装包装的那个，因为它按这个名字去找。
+inline constexpr wchar_t kServiceName[] = L"OpenEGoHubService";
 
 /// 最外层壳：负责 Windows SCM 注册和控制台回退。
 /// 不了解任何业务模块，只持有一个 ServiceHost。

@@ -164,12 +164,19 @@ Packaging:
 dotnet tool install --global wix
 wix extension add -g WixToolset.UI.wixext
 wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
-    scripts\EGoTouchSetup.wxs -loc scripts\zh-CN.wxl `
+    -d BuildOutputDir=build\arm64-Release -d HalOutputDir=hal\build\Release `
+    scripts\OpenEGoHubSetup.wxs -loc scripts\zh-CN.wxl `
     -out build\OpenEGoHubSetup_arm64_v1.2.3.msi
 ```
 
+The HAL hosts in the installer come from `HalOutputDir`, which
+`hal\scripts\build.ps1 -Config Release` has to produce first.
+`scripts\pack_release_version.bat` does the build and the packaging in one go, so the
+arguments do not have to be assembled by hand.
+
 `scripts\dev-cycle.ps1` stops the service, rebuilds and restarts it; `scripts\verify.ps1`
-builds, runs the tests and replays the recorded corpora. Both need an elevated shell.
+builds, runs the tests and catches the "build stopped early, tests still green" kind of
+false success. Both need an elevated shell.
 
 ---
 

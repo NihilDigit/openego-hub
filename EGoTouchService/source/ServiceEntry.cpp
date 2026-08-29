@@ -32,7 +32,7 @@ static bool InstallService() {
     SC_HANDLE svc = CreateServiceW(
         scm,
         Service::kServiceName,
-        L"EGoTouch Capacitive Touch Driver",
+        L"OpenEGo Hub 触控服务",
         SERVICE_ALL_ACCESS,
         SERVICE_WIN32_OWN_PROCESS,
         SERVICE_AUTO_START,          // 开机自启
@@ -66,7 +66,7 @@ static bool InstallService() {
     // 服务描述
     SERVICE_DESCRIPTIONW desc{};
     desc.lpDescription = const_cast<wchar_t*>(
-        L"EGoTouch 电容触控控制器驱动服务 — 管理触摸屏帧采集、算法处理与 HID 注入。");
+        L"OpenEGo Hub 触控服务 — 管理触控提供方的接管与交还，并汇总笔与键盘的状态。");
     ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
 
     CloseServiceHandle(svc);
@@ -146,7 +146,7 @@ public:
 #if defined(_DEBUG)
         constexpr const char* kLoggerName = "OpenEGoHubServiceDebug";
 #else
-        constexpr const char* kLoggerName = "EGoTouchService";
+        constexpr const char* kLoggerName = "OpenEGoHubService";
 #endif
 #if EGOTOUCH_SERVICE_ENABLE_IPC
         Common::Logger::Init(kLoggerName, "C:/ProgramData/OpenEGoHub/logs/",

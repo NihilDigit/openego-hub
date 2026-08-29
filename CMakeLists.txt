@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(EGoTouchRev VERSION 0.1.1 LANGUAGES C CXX)
+project(EGoTouchRev VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -296,7 +296,12 @@ add_executable(EGoTouchService
     "${SERVICE_ROOT}/source/PenSettingsStore.cpp"
     "${SERVICE_ROOT}/source/TouchProviderCoordinator.cpp"
     "${SERVICE_ROOT}/source/VendorServices.cpp"
+    "${SERVICE_ROOT}/Service.rc"
 )
+# 与托盘同理：rc.exe 没有 /showIncludes，CMake 不为 .rc 生成 depfile，改了 AppVersion.h
+# 也不会重编这个资源。见 EGoTouchTray 那处的说明。
+set_source_files_properties("${SERVICE_ROOT}/Service.rc" PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Common/include/AppVersion.h")
 # gaokun-hal：凡是与华为 x64 DLL 打交道的部分都在那边。这里链接的只是触控宿主的进程
 # 控制器，它是原生 ARM64 且不加载任何厂商 DLL，因此本服务保持原生 ARM64——真正需要 EC 的
 # GaokunThpHost.exe 是一个独立进程，由 hal 自己的 build.ps1 构建，不经过这里的 preset。
@@ -418,6 +423,12 @@ add_executable(EGoTouchTray WIN32
     Tools/EGoTouchTray/EGoTouchTray.cpp
     Tools/EGoTouchTray/Tray.rc
 )
+# rc.exe 没有 /showIncludes，CMake 因此不为 .rc 生成 depfile：改了 AppVersion.h,ninja
+# 看不出 Tray.rc 需要重编,托盘的 VERSIONINFO 就静默留在上一个版本号上。上面那道断言只
+# 比对 CMakeLists 与头文件两处的字面值,抓不到这种情况——实际发生过一次,0.1.1 跟着
+# 0.2.0 的包一起发了出去。
+set_source_files_properties(Tools/EGoTouchTray/Tray.rc PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Common/include/AppVersion.h")
 target_include_directories(EGoTouchTray PRIVATE "${COMMON_ROOT}/include")
 target_link_libraries(EGoTouchTray PRIVATE Common advapi32 comctl32 d2d1 dwrite dwmapi
     shell32 shcore user32 gdi32 uiautomationcore uxtheme)

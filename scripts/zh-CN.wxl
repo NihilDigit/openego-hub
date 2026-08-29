@@ -6,7 +6,6 @@
        ═══════════════════════════════════════════════════════════ -->
   <String Id="Language" Value="2052" />
   <String Id="ProductName" Value="OpenEGo Hub" />
-  <String Id="ProductNameTest" Value="OpenEGo Hub（测试版）" />
   <String Id="Manufacturer" Value="OpenEGo Hub" />
   <String Id="DowngradeError" Value="已安装更高版本的 [ProductName]，安装无法继续。请先卸载现有版本后再试。" />
   <String Id="LicenseRtf" Value="scripts\EULA_zh-CN.rtf" />
@@ -14,16 +13,13 @@
   <!-- 开始菜单入口。名称不带「设置」二字：这个入口指向常驻托盘，打开设置只是托盘已在运行
        时的行为，写成「设置」会让首次点击的实际效果与名称不符。 -->
   <String Id="ShortcutName" Value="OpenEGo Hub" />
-  <String Id="ShortcutNameTest" Value="OpenEGo Hub（测试版）" />
   <String Id="ShortcutDescription" Value="启动 OpenEGo Hub 托盘，查看配件状态并调整触控与笔设置。" />
 
   <!-- ═══════════════════════════════════════════════════════════
        系统服务信息
        ═══════════════════════════════════════════════════════════ -->
   <String Id="ServiceDisplayName" Value="OpenEGo Hub 触控服务" />
-  <String Id="ServiceDescription" Value="OpenEGo Hub 触控服务 — 负责触摸屏帧采集、算法处理与 HID 报告注入。该服务随系统自动启动，以 SYSTEM 账户运行，无需用户干预。" />
-  <String Id="ServiceDisplayNameTest" Value="OpenEGo Hub 触控服务（测试版）" />
-  <String Id="ServiceDescriptionTest" Value="OpenEGo Hub 触控服务（测试版）— 包含诊断上位机 与 BT MCU 协议测试工具 BtMcuTestTool，适用于开发调试场景。" />
+  <String Id="ServiceDescription" Value="OpenEGo Hub 触控服务 — 管理触控提供方的接管与交还，并汇总笔与键盘的状态。该服务随系统自动启动，以 SYSTEM 账户运行，无需用户干预。" />
 
   <!-- ═══════════════════════════════════════════════════════════
        WixUI_InstallDir 欢迎页

@@ -55,6 +55,27 @@ and are **never** copied into this repository or into the installers.
 
 ---
 
+## qdcmlib.dll
+
+`hal/vendor/qdcmlib.dll` is a Qualcomm display colour management library that ships with
+the platform. It is **not** covered by this project's MIT licence, no licence text for it
+was available to include here, and nothing in this repository grants rights to it.
+
+`GaokunDisplay.exe` loads it to apply a colour gamut LUT to the panel, and it must sit
+next to that executable: the copies in `System32` load and resolve their symbols on this
+machine but both factory functions return null, because their initialisation fails to
+locate the D3DKMT thunk pointers. The reasoning and the measurements are in
+`hal/docs/display-manage.md`.
+
+The copy here is the one distributed with goodies
+(https://github.com/matebook-e-go/goodies), SHA-256
+`c1213a655e1fc7914b45da6eb5d6e195f5f8422421e7460bf1e22288490ea85d`. It is committed to
+this repository and packed into the installer so that colour gamut switching works on a
+machine without PC Manager. Anyone redistributing this software should satisfy themselves
+that they may redistribute this file.
+
+---
+
 ## GitHub Octicons
 
 The GitHub mark displayed on the About page is derived from `mark-github-16` in

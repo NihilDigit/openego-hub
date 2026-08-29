@@ -1,0 +1,39 @@
+﻿// 服务进程的版本资源。服务不画任何界面，这张表出现在别处：文件属性页的「详细信息」、
+// 任务管理器的详细信息列、以及第三方工具列服务时读的版本号。此前服务是三个可执行文件里
+// 唯一没有版本资源的，装好之后无从判断跑的是哪一版。
+//
+// 不带图标：托盘与设置窗口的图标管的是快捷方式和 Alt+Tab，而服务在 session 0，那两处都
+// 到不了它。
+
+#include <windows.h>
+
+#include "AppVersion.h"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    OPENEGO_VERSION_MAJOR, OPENEGO_VERSION_MINOR, OPENEGO_VERSION_PATCH, 0
+    PRODUCTVERSION OPENEGO_VERSION_MAJOR, OPENEGO_VERSION_MINOR, OPENEGO_VERSION_PATCH, 0
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+    FILEFLAGS      0x0L
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "OpenEGo Hub"
+            VALUE "FileDescription",  "OpenEGo Hub 服务"
+            VALUE "FileVersion",      OPENEGO_VERSION_STRING
+            VALUE "InternalName",     "OpenEGoHubService"
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", "OpenEGoHubService.exe"
+            VALUE "ProductName",      "OpenEGo Hub"
+            VALUE "ProductVersion",   OPENEGO_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
