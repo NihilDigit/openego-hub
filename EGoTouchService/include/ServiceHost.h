@@ -121,6 +121,7 @@ private:
     bool StartSystemStateMonitor();
     bool StartIpcSubsystem();
     bool StartPenSubsystem();
+    void StartPenEventBridge();
 
     void StopIpcServer();
     void CloseIpcResources();

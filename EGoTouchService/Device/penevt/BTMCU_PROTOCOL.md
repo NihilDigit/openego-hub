@@ -241,7 +241,7 @@ MCU 从不主动上报电量。`BATTERY_STATUS` (`0x08`) 只在收到查询命�
 | `0x27` | `PEN_KEY_FUNC_GET` | 记录日志 | 无 | 未命名，默认回调/日志 | **Confirmed / acceptable** |
 | `0x2C` | `PEN_BATTERY_AFTER_CONN` | 记录日志 | 无 | 未命名，默认回调/日志 | **Confirmed / acceptable** |
 | `0x2E` | `PEN_PAIR_DETECT_ACK` | 记录日志 | 无 | 未命名，默认回调/日志 | **Confirmed / acceptable** |
-| `0x2F` | `PEN_CURRENT_FUNC` | 更新当前功能；value `1` 映射 erase/status 3 | `0x0B` | ACK + `func==1` 触发 `HandlePenButtonStatusCode(3)` | **Confirmed** |
+| `0x2F` | `PEN_CURRENT_FUNC` | 更新当前功能；payload 是当前橡皮态，不是手势种类 | `0x0B` | ACK + 分派 DoubleClick（不按 payload 过滤） | **Confirmed** |
 | `0x70` | `PEN_AC_STATUS` | 更新 status bit0，通知状态 | `0x00` | ACK + `ApplyFactoryStatusFlagUpdate()` | **Confirmed** |
 | `0x71` | `PEN_CONN_STATUS` | 更新连接状态，调用状态处理 | `0x01` | ACK + status bit + Init/DisconnectStylus | **Confirmed** |
 | `0x72` | `PEN_CUR_STATUS` | 更新当前模式 bits `0x04/0x08` | `0x02` | ACK + status bits + semantic current mode | **Confirmed** |
@@ -369,7 +369,7 @@ ServiceInterface[+0xA8]
 | 核心状态位 | `ApplyFactoryStatusFlagUpdate()` | 符合已逆向 bit mask |
 | 连接/断开 | `PenConnStatus -> InitStylus/DisconnectStylus` | 项目语义等价 |
 | 笔类型 | `PenTypeInfo -> SetStylusId` | 符合 |
-| 当前功能 `0x2F` | `func==1 -> HandlePenButtonStatusCode(3)` | 符合 |
+| 当前功能 `0x2F` | 收到即分派 DoubleClick，不按 payload 过滤 | 见下方订正 |
 | 全局注解 `0x7C` | `HandlePenButtonStatusCode(4)` | 符合 |
 | 橡皮擦 toggle `0x7F` | 保存 eraser state；OEMCustom 写 VHF | 符合项目路由 |
 
@@ -440,3 +440,28 @@ ACK 表：符合原厂
 2. 为 `0x7E01` 增加专用 builder，避免未来误用 `byte[7]=0x20` 的 generic payload builder。
 3. 给 log-only 事件补全名称，提升调试可读性。
 4. 放宽帧头校验到只按 `packet[4]` 分流，与原厂读线程一致。详见 `docs/ACCESSORY_CENTER.md`。
+
+## 订正：`0x2F` 的 payload 不是手势种类
+
+原先此处记「payload 恒为 1」，并据此在 `DeviceRuntime` 里写死 `if (func == 1)` 才分派双击。
+两者都错，而且错得静默：事件收到了、ACK 也回了，只是不分派，日志里连一条记录都不留。
+
+实测（2026-08-29，M-Pencil 第二代，moduleId 0x1011B）：**payload 恒为 `0`**。它表示的是「当前
+是不是橡皮态」而不是手势种类——与原厂托管层的用法一致，`CallbackPenCurrentFunc(1)` 是进入
+橡皮的确认路径，`(0)` 是清理路径（见 `docs/pen_eraser_flow.md`）。取值随侧键绑定与笔当前
+状态而变，不能当作判据。
+
+这支笔只支持一个按键功能（`0x25 GetPenKeySupport` 返回掩码 1），且只在双击时发 `0x2F`，
+单击和长按什么都不发。所以**收到这个事件就等于「侧键被双击了」**，不必也不该按 payload 过滤。
+
+## MCU 要先握手才会上报事件
+
+这条不在原厂文档里，是重构踩坑之后确认的：**没有 `PenEventBridge` 的初始化握手
+（`0x7101` + 两次 `0x7701` + `0x7B` InitParam）并对每帧回 ACK，MCU 不会上报任何事件。**
+
+厂商的 `PenService.dll` 顶不上这个位置——它的 `GetInterruptPipeMsg` 只读不发，自己不做握手
+（见 `docs/penservice_events.md`）。只加载它并注册 `RegisterCallbackPenCurrentFunc`，回调
+永远不响；实测独占 MCU 端点双击 45 秒收不到任何东西，握手一做上立刻就有。
+
+一度以为是多个读者抢包（`docs/KBDMCU_PROTOCOL.md` 6.3 节），实测停掉其余宿主让 THP 独占也
+照样收不到，抢包不是原因。

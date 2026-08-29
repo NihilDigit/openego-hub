@@ -701,13 +701,17 @@ void DeviceRuntime::IngestPenEvent(const Himax::Pen::PenEvent &ev) {
       func = state.currentFunc;
     });
 
-    // 0x25 GetPenKeySupport 在本机返回掩码 1：这支笔只支持一个按键功能，而实测它只在
-    // 双击时发 0x2F（单击和长按什么都不发），payload 恒为 1。所以这里不需要按 payload
-    // 分派手势种类。
-    if (func == 1) {
-      DispatchPenButtonAction({PenButtonAction::Type::DoubleClick, false, func},
-                              "PenCurrentFunc");
-    }
+    // 0x25 GetPenKeySupport 在本机返回掩码 1：这支笔只支持一个按键功能，实测它也只在
+    // 双击时发 0x2F，单击和长按什么都不发。所以收到这个事件就等于「侧键被双击了」，
+    // 不必按 payload 判断手势种类。
+    //
+    // payload 是当前功能编号，不是手势种类——原厂 CallbackPenCurrentFunc 拿它区分的是
+    // 「进入橡皮(1)」还是「退出橡皮(0)」，取值随侧键绑定而变（见 docs/pen_eraser_flow.md）。
+    // 这里此前写死 func == 1 才分派，于是把绑定改成截屏一类之后双击就再也没有反应,
+    // 而日志里连一条分派记录都不会留下。
+    LOG_INFO("Runtime", __func__, "MCU", "PenCurrentFunc payload={}", func);
+    DispatchPenButtonAction({PenButtonAction::Type::DoubleClick, false, func},
+                            "PenCurrentFunc");
     break;
   }
 

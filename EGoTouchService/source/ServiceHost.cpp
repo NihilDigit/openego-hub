@@ -663,6 +663,8 @@ bool ServiceHost::StartPenSubsystem() {
         m_accessoryStop.store(false, std::memory_order_release);
         m_accessoryThread = std::thread([this] { AccessoryLoop(); });
 
+        StartPenEventBridge();
+
         LOG_INFO("Service", __func__, "MCU", "gaokun-hal pen and keyboard hosts started.");
         return true;
     } catch (...) {
@@ -749,7 +751,41 @@ void ServiceHost::AccessoryLoop() {
     }
 }
 
+// 侧键双击的事件源。厂商的 PenService.dll 提供不了它：那边的 0x2F 回调只是
+// CommandSendPenCurrentFunc 的回显，物理双击不经过它——实测独占 MCU 端点双击 45 秒，
+// 一条 0x2F 都收不到。MCU 要先被握手（0x7101 + 0x7701 + 0x7701）、并对每一帧回 ACK
+// 才会持续上报事件，而那套只有 PenEventBridge 实现。
+//
+// 上一次重构把它的实例化删掉了（成员声明还留着），双击于是对任何绑定都没有反应，
+// 连系统笔菜单也调不起来。
+//
+// 起不来只丢双击，不该让整个服务起不来，所以失败只记一条 WARN。
+void ServiceHost::StartPenEventBridge() {
+    auto bridge = std::make_unique<Himax::Pen::PenEventBridge>();
+
+    // 只取侧键。电量、连接、笔尖偏移这些通知已经由 hal 的宿主经 AccessoryLoop 发布，
+    // 两边都发会让 notificationSequence 翻倍，托盘就弹两次。
+    bridge->SetEventCallback([this](const Himax::Pen::PenEvent& ev) {
+        if (m_deviceRuntime) m_deviceRuntime->IngestPenEvent(ev);
+    });
+
+    if (!bridge->Start()) {
+        LOG_WARN("Service", __func__, "MCU",
+                 "PenEventBridge failed to start; the pen side button will not work.");
+        return;
+    }
+    m_impl->m_penEventBridge = std::move(bridge);
+    LOG_INFO("Service", __func__, "MCU", "PenEventBridge started (side-button events).");
+}
+
 void ServiceHost::StopPenSubsystem() {
+    if (m_impl->m_penEventBridge) {
+        // 先摘回调再 Stop：setter 只换指针，不等在飞的调用结束，真正 join 掉读线程的是
+        // Stop()。顺序反过来会让一个晚到的事件打在正在析构的 runtime 上。
+        m_impl->m_penEventBridge->SetEventCallback(nullptr);
+        m_impl->m_penEventBridge->Stop();
+        m_impl->m_penEventBridge.reset();
+    }
     if (m_accessoryThread.joinable()) {
         m_accessoryStop.store(true, std::memory_order_release);
         m_accessoryThread.join();
