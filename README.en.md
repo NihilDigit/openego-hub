@@ -16,9 +16,6 @@
 A driver stack for the HUAWEI MateBook E Go, covering touch, pen and the detachable
 keyboard. It replaces the vendor touch service and PC Manager.
 
-This project is a fork of [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev).
-The acquisition and injection layers originate there and have been modified since.
-
 ---
 
 ## What it does
@@ -72,6 +69,31 @@ lists what this machine is made of.
 
 ---
 
+## Supported hardware
+
+- HUAWEI MateBook E Go, Windows 11 on ARM64.
+- Pen: M-Pencil first through third generations (CD52, CD54, CD54R, CD54S). Only the
+  CD54R has been tested on hardware.
+- Keyboard: the HUAWEI smart magnetic keyboard. Third-party keyboards are not
+  recognised.
+
+---
+
+## Installation
+
+Download `OpenEGoHubSetup_arm64_vX.Y.Z.msi` from the Releases page and run it;
+registering the service requires administrator rights. The service then starts with
+Windows, and there is a Start menu entry.
+
+**The Huawei driver and PC Manager have to stay installed** — remove them and touch
+stops working. Touch, display colour, the charge threshold and the keyboard's wireless
+link all reuse components from there.
+
+Installing disables the vendor touch service — the two cannot drive the same hardware at
+once. Switching back does not need an uninstall: quit from the settings window.
+
+---
+
 ## Touch runs on the vendor's own algorithm
 
 Touch and pen recognition is not reimplemented. The project loads Huawei's
@@ -86,26 +108,9 @@ Palm rejection, pressure, tilt and pen/finger arbitration are therefore identica
 stock. What this project replaces is the thin .NET service shell Huawei ships around
 that chain.
 
-**The Huawei driver and PC Manager have to stay installed** — remove them and touch
-stops working. Display colour, the charge threshold and the keyboard's wireless link go
-through their components too.
-
-Touch belongs to Huawei until a lease says otherwise: it still does when the service
-starts, the tray takes a lease to switch over, and dropping that lease — on exit or on a
-crash — switches back. The login screen keeps working, and so does the machine once this
-program has been closed.
-
-See [`hal/README.md`](hal/README.md) for how that is put together.
-
----
-
-## Supported hardware
-
-- HUAWEI MateBook E Go, Windows 11 on ARM64.
-- Pen: M-Pencil first through third generations (CD52, CD54, CD54R, CD54S). Only the
-  CD54R has been tested on hardware.
-- Keyboard: the HUAWEI smart magnetic keyboard. Third-party keyboards are not
-  recognised.
+This program takes touch over while it runs and hands it back to Huawei on exit or on a
+crash. Before it starts, and on the login screen, touch is Huawei's and works as it
+always did.
 
 ---
 
@@ -114,17 +119,6 @@ See [`hal/README.md`](hal/README.md) for how that is put together.
 - **Firmware update.** Requires vendor-signed images, and a failure bricks hardware.
 - **Voice assistant integration.**
 - **Global annotation.**
-
----
-
-## Installation
-
-Download `OpenEGoHubSetup_arm64_vX.Y.Z.msi` from the Releases page and run it;
-registering the service requires administrator rights. The service then starts with
-Windows, and there is a Start menu entry.
-
-Installing disables the vendor touch service — the two cannot drive the same hardware at
-once. Switching back does not need an uninstall: quit from the settings window.
 
 ---
 

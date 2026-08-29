@@ -15,8 +15,6 @@
 
 HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为触控服务与 PC Manager。
 
-本项目 fork 自 [EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)，采集与注入的骨架来自该项目。
-
 ---
 
 ## 功能
@@ -58,6 +56,24 @@ HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为�
 
 ---
 
+## 支持的设备
+
+- HUAWEI MateBook E Go，Windows 11 ARM64。
+- 手写笔：M-Pencil 一代至三代（CD52、CD54、CD54R、CD54S），仅 CD54R 实测。
+- 键盘：华为智能磁吸键盘，不支持第三方键盘。
+
+---
+
+## 安装
+
+从 Releases 下载 `OpenEGoHubSetup_arm64_vX.Y.Z.msi` 运行。服务注册需要管理员权限；安装后随 Windows 启动，入口在开始菜单。
+
+**华为驱动与 PC Manager 需保留**，卸载后触控失效：触控、屏幕色彩、电池阈值、键盘无线连接都复用其中的原厂组件。
+
+安装过程停用华为触控服务，两者不能同时驱动同一块硬件。切换回华为驱动无需卸载，在设置窗口中退出。
+
+---
+
 ## 触控：原厂算法
 
 触控与手写笔并非重新实现。本项目加载华为原本的 `THP_Service.dll`，数据从 Himax 控制器经原厂算法链直达 Windows：
@@ -68,19 +84,7 @@ Himax → THP_Service → TSACore → 原厂 VHF → Windows HID
 
 掌拒、压力、倾斜、笔与手指的仲裁因此与原厂一致，替换的只是华为的 .NET 服务外壳。
 
-**华为驱动与 PC Manager 需保留**，卸载后触控失效。屏幕色彩、电池阈值、键盘无线连接同样依赖它们的组件。
-
-触控归属以租约为准。服务启动时仍归华为，托盘取得租约后切换，托盘退出或崩溃则自动交还；登录界面、以及退出本程序之后，触控照常可用。
-
-实现细节见 [`hal/README.md`](hal/README.md)。
-
----
-
-## 支持的设备
-
-- HUAWEI MateBook E Go，Windows 11 ARM64。
-- 手写笔：M-Pencil 一代至三代（CD52、CD54、CD54R、CD54S），仅 CD54R 实测。
-- 键盘：华为智能磁吸键盘，不支持第三方键盘。
+本程序运行期间接管触控，退出或异常终止后自动交还华为。登录界面与未启动本程序时，触控由华为提供，照常可用。
 
 ---
 
@@ -89,14 +93,6 @@ Himax → THP_Service → TSACore → 原厂 VHF → Windows HID
 - **固件升级**：需要厂商签名的镜像，刷写失败会导致设备变砖。
 - **语音助手集成**
 - **全局批注**
-
----
-
-## 安装
-
-从 Releases 下载 `OpenEGoHubSetup_arm64_vX.Y.Z.msi` 运行。服务注册需要管理员权限；安装后随 Windows 启动，入口在开始菜单。
-
-安装过程停用华为触控服务，两者不能同时驱动同一块硬件。切换回华为驱动无需卸载，在设置窗口中退出。
 
 ---
 
