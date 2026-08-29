@@ -59,6 +59,7 @@ private:
     void ShowNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload);
     void ApplyTheme(Microsoft::UI::Xaml::ElementTheme theme);
     void SyncFrameTheme();
+    bool IsDarkTheme();
     void ConfigureWindow();
     static void ApplyWindowIcon(HWND hwnd, UINT dpi);
     void LoadStoredSettings();

@@ -13,7 +13,7 @@ struct NotificationWindow : NotificationWindowT<NotificationWindow> {
     void UpdateState(const PenStatus::State& state);
     void ShowDeviation();
     void ShowToolChanged(bool eraser);
-    void ApplyTheme(Microsoft::UI::Xaml::ElementTheme theme);
+    void ApplyTheme(Microsoft::UI::Xaml::ElementTheme theme, bool dark);
     void HideNotification();
 
 private:

@@ -29,6 +29,11 @@ constexpr double kKeyboardImageMaxWidthDip = 96.0;
 constexpr double kKeyboardImageMaxHeightDip = 66.0;
 constexpr UINT kDwmwaWindowCornerPreference = 33;
 constexpr int kDwmCornerRound = 2;
+constexpr UINT kDwmwaUseImmersiveDarkMode = 20;
+constexpr UINT kDwmwaBorderColor = 34;
+// COLORREF 是 0x00BBGGRR。取值贴着亚克力卡片在两种主题下的实际明度，见 ApplyTheme。
+constexpr COLORREF kBorderColorDark = 0x00303030;
+constexpr COLORREF kBorderColorLight = 0x00DFDFDF;
 
 }
 
@@ -71,6 +76,17 @@ void NotificationWindow::ConfigureWindow() {
     LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     exStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+
+    // SetBorderAndTitleBar(false, false) 不动窗口样式位，WS_CAPTION/WS_DLGFRAME 仍留在那里，
+    // DWM 据此在边框最内侧画一条高光——深色卡片外面那圈白边就是它。这条线不受
+    // DWMWA_BORDER_COLOR、ImmersiveDarkMode、NCRENDERING_POLICY 和圆角偏好中的任何一个影响，
+    // 逐个试过；把样式位剥成纯 WS_POPUP，DWM 就不再画它。
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    style &= ~(WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME | WS_SYSMENU);
+    style |= WS_POPUP;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     // 窗口本身是矩形的：亚克力底铺满整个客户区，圆角只能由 DWM 裁。卡片描边因此不能自己
     // 定半径——描边比裁切大时，四角会露出一截被裁掉的窗口底，看起来像圆角外又画了一圈边框。
     // XAML 那边用 OverlayCornerRadius，与这里的 ROUND 是同一档。
@@ -301,9 +317,20 @@ void NotificationWindow::ShowToolChanged(bool eraser) {
     RestartDwellTimer();
 }
 
-// 弹窗是独立的 Window，主题不从主窗口继承，由 MainWindow 在创建和切换时推给它。
-void NotificationWindow::ApplyTheme(ElementTheme theme) {
+// 弹窗是独立的 Window，主题不从主窗口继承，由 MainWindow 在每次弹出前推给它。深浅也一并
+// 传进来：跟随系统时 theme 是 Default，而 ActualTheme 在窗口刚建好、内容还没上树时读不到
+// 真正生效的那一档——照它设边框色，深色下会得到一条白边，正是要修的东西。
+void NotificationWindow::ApplyTheme(ElementTheme theme, bool dark) {
     NotificationRoot().RequestedTheme(theme);
+
+    const BOOL immersive = dark ? TRUE : FALSE;
+    (void)DwmSetWindowAttribute(
+        WindowHandle(), kDwmwaUseImmersiveDarkMode, &immersive, sizeof(immersive));
+    // 窗口的边界只剩这条 DWM 边框（XAML 那侧不描边，两条叠起来就是深色下最扎眼的白边）。
+    // DWMWA_COLOR_NONE 对这个无标题栏的窗口不起作用，实测仍会描一条，所以给它一个贴着卡片
+    // 的颜色，让它退到轮廓的位置上。
+    const COLORREF border = dark ? kBorderColorDark : kBorderColorLight;
+    (void)DwmSetWindowAttribute(WindowHandle(), kDwmwaBorderColor, &border, sizeof(border));
 }
 
 void NotificationWindow::HideNotification() {

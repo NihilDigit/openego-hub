@@ -320,15 +320,14 @@ LRESULT CALLBACK MainWindow::BridgeWndProc(
 }
 
 void MainWindow::ShowNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload) {
-    const bool created = m_notificationWindow == nullptr;
-    if (created) {
+    if (!m_notificationWindow) {
         m_notificationWindow = make<winrt::EGoTouchSettings::implementation::NotificationWindow>();
     }
     auto implementation = get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
         m_notificationWindow);
-    // 弹窗是另一个 Window，主题不会从主窗口继承下来；它又是按需创建的，创建时机在用户选主题
-    // 之后，只能在这里补上。
-    if (created) implementation->ApplyTheme(RootLayout().RequestedTheme());
+    // 弹窗是另一个 Window，主题不会从主窗口继承下来。每次弹出前推一遍而不是只在创建时推：
+    // 跟随系统时系统自己会变，而弹窗一天只弹几次，重设一次属性不值得为它记状态。
+    implementation->ApplyTheme(RootLayout().RequestedTheme(), IsDarkTheme());
     if (notification == EGoTouchTrayIpc::Notification::PenDeviation) {
         implementation->ShowDeviation();
         return;
@@ -765,16 +764,22 @@ void MainWindow::ApplyTheme(ElementTheme theme) {
     SyncFrameTheme();
     if (m_notificationWindow) {
         get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
-            m_notificationWindow)->ApplyTheme(theme);
+            m_notificationWindow)->ApplyTheme(theme, IsDarkTheme());
     }
+}
+
+// 当前实际生效的深浅。跟随系统时 RequestedTheme 是 Default，问它得不到答案，只能自己去读
+// 系统那一档。ActualTheme 也不行：窗口刚建好、内容还没上树时它读不到生效值。
+bool MainWindow::IsDarkTheme() {
+    const ElementTheme theme = RootLayout().RequestedTheme();
+    return theme == ElementTheme::Dark ||
+        (theme == ElementTheme::Default && SystemUsesDarkApps());
 }
 
 // 非客户区不在 XAML 的管辖内：窗框那一像素和标题栏按钮的明暗由 DWM 决定，RequestedTheme
 // 传不过去。跟随系统时还要跟着系统改，所以这一条也挂在每秒的刷新上。
 void MainWindow::SyncFrameTheme() {
-    const ElementTheme theme = RootLayout().RequestedTheme();
-    const bool dark = theme == ElementTheme::Dark ||
-        (theme == ElementTheme::Default && SystemUsesDarkApps());
+    const bool dark = IsDarkTheme();
     if (m_frameDarkApplied == static_cast<int>(dark)) return;
     m_frameDarkApplied = static_cast<int>(dark);
     const BOOL value = dark ? TRUE : FALSE;
