@@ -1280,6 +1280,8 @@
                             <Border Style="{StaticResource SettingsCardCompactStyle}">
                                 <!-- 链接嵌在句子里而不是一行一个：一行一个会在右边留下大片
                                      空白，而这些项目之间并无主次，本来就该并列成一句话。 -->
+                                <!-- 致谢与声明取同一档字号，比页面上其余描述性文字大一号：
+                                     这两段是给人读的句子，不是控件下面的一行注解。 -->
                                 <RichTextBlock
                                     FontSize="14"
                                     LineHeight="22"
@@ -1290,7 +1292,8 @@
                                             NavigateUri="https://github.com/matebook-e-go/goodies">goodies</Hyperlink><Run Text="、" /><Hyperlink
                                             NavigateUri="https://github.com/LanZhan-Harmony/HuaweiThpService">HuaweiThpService</Hyperlink><Run Text="、" /><Hyperlink
                                             NavigateUri="https://github.com/eiyooooo/MateBook-E-Pen">MateBook-E-Pen</Hyperlink><Run Text="、" /><Hyperlink
-                                            NavigateUri="https://github.com/SaKongA/EgoTools">EgoTools</Hyperlink><Run Text="。" />
+                                            NavigateUri="https://github.com/SaKongA/EgoTools">EgoTools</Hyperlink><Run Text="、" /><Hyperlink
+                                            NavigateUri="https://github.com/qwqVictor/HuaweiPenEraserService">HuaweiPenEraserService</Hyperlink><Run Text="。" />
                                     </Paragraph>
                                 </RichTextBlock>
                             </Border>
@@ -1299,14 +1302,17 @@
                         <StackPanel Spacing="4">
                             <TextBlock Text="声明" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardCompactStyle}">
+                                <!-- 字号与上面的致谢取齐，见那里的说明。 -->
                                 <StackPanel Spacing="2">
                                     <TextBlock
                                         Text="与 HUAWEI、Himax 及其商标持有者无关联。"
-                                        LineHeight="18"
+                                        FontSize="14"
+                                        LineHeight="22"
                                         Style="{StaticResource SettingsDescriptionStyle}" />
                                     <TextBlock
                                         Text="设备产品图在运行时读取自本机的 PC Manager，不随本程序分发。"
-                                        LineHeight="18"
+                                        FontSize="14"
+                                        LineHeight="22"
                                         Style="{StaticResource SettingsDescriptionStyle}" />
                                 </StackPanel>
                             </Border>

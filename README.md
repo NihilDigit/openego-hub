@@ -158,11 +158,12 @@ Release` 产出。`scripts\pack_release_version.bat` 把构建和打包一次做
 
 本项目 fork 自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT，© Detach2233）。Himax 帧采集、笔的 MCU 传输、VHF 注入与服务骨架都源自该项目；触控算法原先也是，后来换成厂商后端并移除。其许可声明保留在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
-另有三个更早在这台设备上做过工作的项目，本项目参考过它们：
+另有几个更早在这台设备上做过工作的项目，本项目参考过它们：
 
 - **[MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)**，作者 eiyooooo
 - **[goodies](https://github.com/matebook-e-go/goodies)**，作者 dantmnf
 - **[EgoTools](https://github.com/SaKongA/EgoTools)**，作者 SaKongA
+- **[HuaweiPenEraserService](https://github.com/qwqVictor/HuaweiPenEraserService)**，作者 qwqVictor
 
 ---
 

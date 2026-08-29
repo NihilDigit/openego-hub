@@ -202,11 +202,12 @@ runtime all come from there. So did the touch algorithm, until it was replaced b
 vendor backend and removed. That notice is preserved in
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Three earlier projects on this device were also consulted:
+Earlier projects on this device were also consulted:
 
 - **[MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)** by eiyooooo
 - **[goodies](https://github.com/matebook-e-go/goodies)** by dantmnf
 - **[EgoTools](https://github.com/SaKongA/EgoTools)** by SaKongA
+- **[HuaweiPenEraserService](https://github.com/qwqVictor/HuaweiPenEraserService)** by qwqVictor
 
 ---
 
