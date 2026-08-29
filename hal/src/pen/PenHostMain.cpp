@@ -126,10 +126,75 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
     return 0;
 }
 
+// 一次性发一条笔/橡皮切换命令。诊断用：常驻宿主还没有下行通道，而这条命令是否真的
+// 让应用看到橡皮，只能在真机上试出来——评论区已有 CSP/SAI 收不到的反例，判据必须是
+// 目标应用本身。初始化后停留几秒是为了收下 MCU 的回显事件，那是命令到达的唯一证据。
+int RunSetCurrentFunc(int32_t func) {
+    Service service;
+    if (!service.Start()) {
+        wprintf(L"failed to start PenService (err=%lu)\n", GetLastError());
+        return 1;
+    }
+    if (!service.HasCurrentFuncCommand()) {
+        wprintf(L"this PenService.dll does not export CommandSendPenCurrentFunc;\n"
+                L"pen/eraser switching is unavailable on this installation.\n");
+        return 3;
+    }
+
+    wprintf(L"sending PenCurrentFunc(%d) -- %ls\n", func, func ? L"eraser" : L"pen");
+    service.SetCurrentFunc(func);
+
+    // 命令是异步的，原厂也不等回应。停留 3 秒把回显和随后的快照打出来。
+    for (int i = 0; i < 12; ++i) {
+        Sleep(250);
+        Event event{};
+        while (service.PopEvent(event)) {
+            wprintf(L"  event kind=%u value=%d\n", event.kind, event.value);
+        }
+    }
+    const Snapshot after = service.GetSnapshot();
+    wprintf(L"keyFunc now %u\n", after.keyFunc);
+    return 0;
+}
+
+// 侧键绑定的功能，取值见 docs/ACCESSORY_CENTER.md 的 PenKeyFunc 表
+// （0 截屏 / 1 语音 / 2 白板 / 3 关闭 / 4 橡皮擦 / 5 全局批注）。这个设置存在笔里，
+// 掉电也不丢，所以误改之后必须显式改回去。
+int RunSetKeyFunc(int32_t func, int watchSeconds) {
+    Service service;
+    if (!service.Start()) {
+        wprintf(L"failed to start PenService (err=%lu)\n", GetLastError());
+        return 1;
+    }
+    wprintf(L"sending SetPenKeyFunc(%d)\n", func);
+    service.SetKeyFunc(func);
+
+    // 原厂在守护进程启动时、以及每一次笔连接事件里都补发这条 0x26，我们从来不发。
+    // 若 MCU 要在侧键功能被显式设置过之后才对双击产生 0x2F，那这就是缺的一步；发完
+    // 之后独占监听，双击能否引出 0x2F 一次就能定死。
+    const int ticks = watchSeconds > 0 ? watchSeconds * 4 : 12;
+    if (watchSeconds > 0) {
+        wprintf(L"watching for %d s -- double-click the pen side button now\n", watchSeconds);
+    }
+    for (int i = 0; i < ticks; ++i) {
+        Sleep(250);
+        Event event{};
+        while (service.PopEvent(event)) {
+            wprintf(L"  event kind=%u value=%d\n", event.kind, event.value);
+        }
+    }
+    service.RequestRefresh();
+    Sleep(500);
+    wprintf(L"keyFunc now %u\n", service.GetSnapshot().keyFunc);
+    return 0;
+}
+
 void PrintUsage() {
     wprintf(L"gaokun-penhost -- pen state and events from the vendor MCU channel\n\n"
             L"  --hosted --parent <pid> --stop-event <name>   run under a supervisor\n"
-            L"  --console [seconds]                           run standalone and print updates\n");
+            L"  --console [seconds]                           run standalone and print updates\n"
+            L"  --set-current-func <0|1>                      switch the pen to pen(0)/eraser(1)\n"
+            L"  --set-key-func <n> [seconds]                  rebind the side button, then watch\n");
 }
 
 } // namespace
@@ -169,6 +234,14 @@ int wmain(int argc, wchar_t **argv) {
             return RunHosted(0, name, 5, true);
         }
         return RunHosted(0, nullptr, 5, true);
+    }
+
+    if (argc > 2 && _wcsicmp(argv[1], L"--set-current-func") == 0) {
+        return RunSetCurrentFunc(_wtoi(argv[2]));
+    }
+
+    if (argc > 2 && _wcsicmp(argv[1], L"--set-key-func") == 0) {
+        return RunSetKeyFunc(_wtoi(argv[2]), argc > 3 ? _wtoi(argv[3]) : 0);
     }
 
     if (argc > 1 && _wcsicmp(argv[1], L"--hosted") == 0) {

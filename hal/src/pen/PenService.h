@@ -35,6 +35,12 @@ public:
     // 设置侧键功能。原厂同样不等回应，写入是否生效要靠随后的 KeyFuncChanged 事件确认。
     void SetKeyFunc(int32_t func) noexcept;
 
+    // 切换笔的输入模式：1 橡皮，0 笔。这条命令发往 MCU，不经任何 Windows 层接口。
+    // 原厂在插件里调它，OneNote 白名单也在插件里；本宿主不加载插件，因此不受限制。
+    // 这个导出并非所有版本的 PenService.dll 都有，调用前先问 HasCurrentFuncCommand。
+    [[nodiscard]] bool HasCurrentFuncCommand() const noexcept;
+    void SetCurrentFunc(int32_t func) noexcept;
+
 private:
     void *m_module = nullptr;
     void *m_procThread = nullptr;

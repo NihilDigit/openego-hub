@@ -40,6 +40,11 @@ cd hal; .\scripts\build.ps1 -Config Debug            # then build the main tree
 Debug and Release each need their own HAL build — the static library carries the CRT
 choice, and a mismatch surfaces as LNK4098 at the service link step.
 
+`hal/vendor/qdcmlib.dll` is a committed vendor binary, not something the build produces.
+`hal/scripts/build.ps1` copies it into the output directory because `GaokunDisplay.exe`
+loads it from its own directory; the installer packs it from there. Its licence status is
+recorded in `THIRD-PARTY-NOTICES.md`.
+
 `cl.exe`, not clang. The settings window is built by MSBuild from a `.vcxproj` behind an
 `if(WIN32 AND MSVC)` gate, so a clang configuration silently produces no
 `OpenEGoHubSettings.exe` and packaging then fails on a missing file. Never add
@@ -138,6 +143,14 @@ service, starts the host, re-confirms Huawei stayed stopped, then publishes `EGo
 Dropping the lease reverses it, and `TouchProviderCoordinator` restarts the OpenEGo
 provider if restoring Huawei fails — never leave zero providers.
 
+The same 250 ms tick that expires the lease also checks that the host is still alive,
+through the `egoAlive` operation. A host that dies while the lease is held is restarted
+in place — three times per 60-second window, because restarting the host interrupts touch
+for far less time than standing the Huawei service back up. Past that budget touch goes
+back to Huawei and OpenEGo enters a 30-second cooldown during which takeover is refused:
+the tray does not know the host has been crashing and keeps renewing once a second, and
+without the cooldown every renewal would replay the same crash loop.
+
 Nothing else in this tree touches frames. There used to be a second path — the in-tree
 solvers, then `DeviceRuntime` reading Himax frames into `OemTsaBackend` and emitting our
 own HID reports through `VhfReporter` — and it is gone: the solvers, `Device/himax`,
@@ -186,23 +199,27 @@ Debug build stayed green. Build Release before pushing anything that touches
 ## Known gaps
 
 These are real, verified against the code, and none of them are visible from a passing
-build. Fix the packaging one before shipping anything.
+build.
 
-- **The MSI does not contain the HAL.** `scripts\EGoTouchSetup.wxs` lists
-  `OpenEGoHubService.exe`, `OpenEGoHubSettings.exe` and `OpenEGoHubTray.exe` and nothing
-  else. No `GaokunThpHost.exe`, no `GaokunPenHost.exe`, no `GaokunKeyboardHost.exe`, no
-  `GaokunDisplay.exe`, no `qdcmlib`. `scripts\deploy.ps1` copies them, which is why
-  development machines work; an installed build has no touch provider to start.
-- **Host death is not noticed.** `HostController::Start` waits 1500 ms to catch a host
-  that exits immediately, and that is the only liveness check. `IsRunning()` exists but
-  nothing calls it on lease renewal, so a host that crashes later leaves touch dead with
-  no fallback to Huawei.
 - **OneNote input suppression does nothing.** `SetInputSuppressed` now only publishes a
   state bit, which the tray blocks on; there is no gate behind it any more, and live pen
   input comes out of the vendor VHF inside `GaokunThpHost`. Suppressing it means reaching
   into the vendor chain, and there may be no clean way to do that.
 - **`ApplyServicePolicy` still takes `stylusVhfEnabled`** and has nowhere to apply it.
   The log line says `(no effect)`. The setting is still in the config schema.
+- **The eraser never reaches the HID report.** The vendor VHF's pen collection declares
+  `Invert(0x3C)` and `Eraser(0x45)` in its descriptor, but both bits are always 0 —
+  `penFlags` never leaves `NONE`, `PEN_FLAG_BARREL` included. `CommandSendPenCurrentFunc(1)`
+  does reach the pen (it stops reporting pressure) and `THP_Service` does log the resulting
+  `ERASER_TOGGLE`, but nothing turns that into a report bit. Desktop OneNote would consume
+  it — it reads `StylusInfo.bIsInvertedCursor`, which comes from the same `Invert` bit — so
+  the UIA workaround in the tray is not the only possible route. The reasoning is in
+  `docs/onenote_ink_eraser.md`, `docs/pen_eraser_flow.md` and `docs/penservice_events.md`.
+- **Side-button events depend on a handshake nothing else performs.** `PenEventBridge` is
+  what makes the MCU report at all (`0x7101` + two `0x7701` + `0x7B` InitParam, plus an ACK
+  per frame). The vendor's `PenService.dll` does not do it, so loading that DLL and
+  registering `RegisterCallbackPenCurrentFunc` yields a callback that never fires. Removing
+  the bridge's instantiation once already cost every side-button binding, silently.
 
 ## Where the reasoning is written down
 

@@ -33,6 +33,10 @@ struct Api {
     VoidFn getKeySupport = nullptr;
     VoidFn getKeyFunc = nullptr;
     SetIntFn setKeyFunc = nullptr;
+    // 下行的笔/橡皮切换。与 RegisterCallbackPenCurrentFunc 同名而方向相反：那个是状态变更
+    // 的回显，这个才是发起切换的命令。原厂由 AcAppDaemon 的按型号插件（CD54RPenApp.dll 等）
+    // 在侧键双击时调用，OneNote 白名单也在那一层——我们不加载插件，因此不受白名单约束。
+    SetIntFn setCurrentFunc = nullptr;
 
     GetTextFn textFirmware = nullptr;
     GetTextFn textHardware = nullptr;
@@ -290,6 +294,10 @@ bool Service::Start() noexcept {
     ResolveOptional(dll, "CommandSendGetPenKeySupport", g_api.getKeySupport);
     ResolveOptional(dll, "CommandSendGetPenKeyFunc", g_api.getKeyFunc);
     ResolveOptional(dll, "CommandSendSetPenKeyFunc", g_api.setKeyFunc);
+    // 可选：随 HuaweiPenApp 分发的那份 PenService.dll 据报没有这个导出，缺它时橡皮切换
+    // 不可用，但其余功能照常。调用方用 HasCurrentFuncCommand 区分「没这个能力」和
+    // 「发了没反应」——两者的排查方向完全不同。
+    ResolveOptional(dll, "CommandSendPenCurrentFunc", g_api.setCurrentFunc);
 
     ResolveOptional(dll, "GetPenFirmwareVersion", g_api.textFirmware);
     ResolveOptional(dll, "GetPenHardwareVersion", g_api.textHardware);
@@ -350,6 +358,12 @@ bool Service::PopEvent(Event &out) noexcept {
 
 void Service::SetKeyFunc(int32_t func) noexcept {
     if (g_api.setKeyFunc) g_api.setKeyFunc(func);
+}
+
+bool Service::HasCurrentFuncCommand() const noexcept { return g_api.setCurrentFunc != nullptr; }
+
+void Service::SetCurrentFunc(int32_t func) noexcept {
+    if (g_api.setCurrentFunc) g_api.setCurrentFunc(func);
 }
 
 } // namespace Gaokun::Pen

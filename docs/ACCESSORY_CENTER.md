@@ -424,14 +424,33 @@ internal static extern void CommandSendGetPenBattery();
 | `CommandSendOskPrevensionMode` | `0x0a160` | `0x2D` | 1 |
 | `CommandSendTpRotateAngle` | `0x0a1e0` | `0x67` | 1 |
 | `CommandSendSysLang` | `0x0aaa0` | `0x68` | 1 |
-| `CommandSendPenCurrentFunc` | `0x0a9b0` | `0x80` | 4 |
-| `CommandSendTouchChr` | `0x0a9f0` | `0x81` | 4 |
-| `CommandSendGlobalPreventionChr` | `0x0aa20` | `0x82` / `0x81` | 0 / 4 |
+| `CommandSendPenCurrentFunc` | `0x0a9b0` | `0x2F` | 1 |
+| `CommandSendTouchChr` | `0x0a9f0` | `0x80` | 4 |
+| `CommandSendGlobalPreventionChr` | `0x0aa20` | `0x81` | 4 |
 | `CommandSendDoubleFuncChr` | `0x0aa50` | `0x82` | 0 |
 
 前七条与 `KeyboardService.dll` 的码值一一相同（`0x00` 模组、`0x01` SN、`0x02` 硬件版本、
 `0x03` 固件版本、`0x08` 电量、`0x09` 充电、`0x12` 连接），只是子系统 ID 不同。这再次印证
 两份 DLL 同源。
+
+每条命令的帧头、payload 长度和参数处理见 `docs/penservice_events.md` 第 1 节，那里按导出
+逐条列出，并标出哪几条的参数会被布尔化。
+
+**自校验：请求的 `byte[5]` 与应答事件码同值。** 上表二十条命令里，`0x00`、`0x01`、`0x02`、
+`0x03`、`0x08`、`0x09`、`0x12`、`0x15`、`0x24`、`0x25`、`0x26`、`0x27`、`0x29`、`0x2D`、
+`0x2F`、`0x67`、`0x68` 都能在下面的分发表里找到同码事件。剩下的 `0x80` / `0x81` / `0x82`
+三条 Chr 命令不在分发表里，是只发不收的下行命令。往后再往这张表里加行，先用这条规律核一遍。
+
+### 4.2.1 最后四行曾经整体错位一格
+
+这四行原先记为 `CommandSendPenCurrentFunc = 0x80 / payload 4`、`CommandSendTouchChr = 0x81`、
+`CommandSendGlobalPreventionChr = 0x82 或 0x81`、`CommandSendDoubleFuncChr = 0x82`，即整体向
+后挪了一格，同时 payload 长度也跟着错。重新逐字节反汇编后订正如上。
+
+错位是靠上面那条自校验规律发现的：`CommandSendPenCurrentFunc` 记成 `0x80` 时，分发表里没有
+`0x80`，而 `0x2F` 这个事件却找不到对应的发送命令，两头都对不上。订正后 `0x2F` 发出、`0x2F`
+收回，缺口消失。`CommandSendGlobalPreventionChr` 那一格「`0x82` / `0x81`，0 / 4」的两可写法
+也是错位留下的痕迹——真值只有一个，`0x81` 配 4 字节 payload。
 
 **MCU → Host 分发表**（`.data` RVA `0x14130`，21 条，每条 16 字节）：
 

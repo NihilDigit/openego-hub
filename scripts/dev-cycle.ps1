@@ -7,25 +7,25 @@
     exe is locked while it runs and a rebuild would fail to link. This script enforces the
     stop -> build -> start order and handles the things that bite in practice:
 
-      * Release/Debug mutual exclusion. Both services drive the same Himax device, create
-        the same VHF virtual HID, and read the same BT-MCU HID reports. Running both at
-        once produces undefined behaviour, so the Release service is suspended for the
-        duration and restored on -RestoreRelease.
+      * Release/Debug mutual exclusion. Both services start a THP host against the same
+        Himax device and read the same BT-MCU HID reports. Running both at once produces
+        undefined behaviour, so the Release service is suspended for the duration and
+        restored on -RestoreRelease.
 
       * Build environment. cmake --preset resolves CMakePresets.json against the current
         directory, and the arm64-* presets take cl.exe from PATH. Running this script from
         scripts\ used to fail on both counts, so it pins the repo root and imports the
         ARM64 developer environment itself.
 
-      * Touch downtime. Switching services tears down and rebuilds the VHF device, so
-        touch and pen stop responding for a few seconds. Keep a keyboard/mouse attached.
+      * Touch downtime. Switching services stops and restarts the THP host that owns the
+        controller, so touch and pen stop responding for a few seconds. Keep a
+        keyboard/mouse attached.
 
       * Integrity levels. This script has to be elevated to control services, but the tray
         and the settings window must not inherit that: UIPI blocks window messages from a
         medium-integrity process to a high-integrity one, and every setting the user
         changes travels that way. Both are launched through explorer.exe so they end up
-        with the ordinary user token they have in a real deployment. The diagnostics
-        workbench is the exception and stays elevated on purpose.
+        with the ordinary user token they have in a real deployment.
 
       * Stale incremental state. Ninja has been observed losing a header dependency after
         an interrupted build, then reporting "no work to do" while linking an object
@@ -52,7 +52,7 @@
 
 .PARAMETER Settings
     Launch the WinUI settings window after the service is up. It is not relaunched by
-    default: Stop-Workbench closes it because its exe is a build output, but unlike the
+    default: Stop-UiProcesses closes it because its exe is a build output, but unlike the
     tray it is a window the user opens on demand rather than a resident component.
 
 .PARAMETER RestoreRelease
@@ -173,9 +173,8 @@ function Test-ServiceBinaryStale {
         Get-Item -LiteralPath (Join-Path $RepoRoot 'CMakeLists.txt'),
                      (Join-Path $RepoRoot 'CMakePresets.json') -ErrorAction SilentlyContinue
     )
-    # EGoTouchService links the shared Common/IPCCore, Device, Solvers and Host
-    # targets as well.  Include those source roots, but not test fixtures or the
-    # private .bak snapshots kept beside the untracked TSA research files.
+    # EGoTouchService links Common and the Device/Host sources as well.  Include those
+    # source roots, but not test fixtures or the private .bak snapshots.
     foreach ($root in @('EGoTouchService', 'Common')) {
         $rootPath = Join-Path $RepoRoot $root
         $inputs += @(Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue |
@@ -212,7 +211,7 @@ function Stop-Svc {
     return $true
 }
 
-function Stop-Workbench {
+function Stop-UiProcesses {
     # These exes are build outputs, so a running instance blocks the link with LNK1168
     # exactly the way a running service does.
     $procs = @(Get-Process -Name 'OpenEGoHubTray', 'OpenEGoHubSettings' -ErrorAction SilentlyContinue)
@@ -270,7 +269,7 @@ Suspend-ReleaseService
 Stop-Svc $DebugSvc | Out-Null
 
 if (-not $SkipBuild) {
-    Stop-Workbench
+    Stop-UiProcesses
     Import-VsDevEnv
     $forceClean = $Clean
     if (-not $forceClean -and (Test-ServiceBinaryStale)) {
