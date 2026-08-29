@@ -8,38 +8,40 @@
                 Spacing="7"
                 VerticalAlignment="Center"
                 Visibility="Collapsed">
-        <!-- PC Manager 在本机可用时显示同一组电量图；下面的 XAML 图形始终留作自有兜底。 -->
+        <!-- 电量图自己画。PC Manager 的那组 PNG 曾经优先于它，但位图的配色是定死的亮绿，
+             在深色主题下既刺眼又和周围的文字对不上，而 PNG 改不了颜色。画出来的图形吃
+             ThemeResource，深浅两色各自成立。 -->
         <Grid Width="27" Height="16" VerticalAlignment="Center">
-            <Grid x:Name="BatteryFallback" Width="27" Height="16">
-                <Border Width="23" Height="13"
-                        HorizontalAlignment="Left"
-                        VerticalAlignment="Center"
-                        BorderThickness="1.25"
-                        BorderBrush="{ThemeResource TextFillColorPrimaryBrush}"
-                        CornerRadius="3">
-                    <Grid Margin="2">
-                        <Border x:Name="BatteryFill"
-                                HorizontalAlignment="Left"
-                                Background="{ThemeResource AccentFillColorDefaultBrush}"
-                                CornerRadius="1" />
-                    </Grid>
-                </Border>
-                <Border Width="2" Height="7"
-                        Margin="0,0,1,0"
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Center"
-                        Background="{ThemeResource TextFillColorPrimaryBrush}"
-                        CornerRadius="0,1,1,0" />
-                <FontIcon x:Name="ChargingGlyph"
-                          Glyph="&#xE945;"
-                          FontSize="9"
-                          Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
-                          HorizontalAlignment="Center"
-                          VerticalAlignment="Center"
-                          Visibility="Collapsed" />
-            </Grid>
-            <Image x:Name="BatteryImage" Stretch="Uniform" Visibility="Collapsed" />
+            <Border Width="23" Height="13"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center"
+                    BorderThickness="1.25"
+                    BorderBrush="{ThemeResource TextFillColorSecondaryBrush}"
+                    CornerRadius="3">
+                <Grid Margin="2">
+                    <Border x:Name="BatteryFill"
+                            HorizontalAlignment="Left"
+                            Background="{ThemeResource TextFillColorPrimaryBrush}"
+                            CornerRadius="1" />
+                </Grid>
+            </Border>
+            <Border Width="2" Height="7"
+                    Margin="0,0,1,0"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource TextFillColorSecondaryBrush}"
+                    CornerRadius="0,1,1,0" />
         </Grid>
+
+        <!-- 闪电放在电池外面。压在电池里要么盖住填充、要么在电量低时落到空白上，而填充是
+             随主题翻转的黑白两色，没有一种闪电颜色能同时压得住两者；放在卡片底色上，一个
+             绿色在深浅两色里都读得出来。 -->
+        <FontIcon x:Name="ChargingGlyph"
+                  Glyph="&#xE945;"
+                  FontSize="12"
+                  Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                  VerticalAlignment="Center"
+                  Visibility="Collapsed" />
 
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
             <TextBlock x:Name="BatteryValue"
