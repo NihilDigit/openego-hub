@@ -12,11 +12,14 @@ struct NotificationWindow : NotificationWindowT<NotificationWindow> {
     void ShowKeyboardConnected(const PenStatus::State& state);
     void UpdateState(const PenStatus::State& state);
     void ShowDeviation();
+    void ShowToolChanged(bool eraser);
+    void ApplyTheme(Microsoft::UI::Xaml::ElementTheme theme);
     void HideNotification();
 
 private:
     HWND WindowHandle();
     void ConfigureWindow();
+    void SelectView(Microsoft::UI::Xaml::UIElement const& view);
     void PositionAndShow(int widthDip, int heightDip);
     void StartOpacityAnimation(double from, double to, int milliseconds, bool hideWhenDone);
     void RestartDwellTimer();

@@ -144,6 +144,8 @@ struct App {
     bool prevChargingValid = false;
     uint32_t prevNotificationSequence = 0;
     bool prevNotificationValid = false;
+    bool prevEraserActive = false;
+    bool prevEraserValid = false;
     ULONGLONG lastConnectionNotificationTick = 0;
     ULONGLONG lastDeviationNotificationTick = 0;
     ULONGLONG lastKeyboardConnectionNotificationTick = 0;
@@ -1259,7 +1261,7 @@ void GestureWatcherThread() {
 
 // ── channel ──────────────────────────────────────────────────────────────────
 
-void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification);
+void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload = 0);
 
 void PollChannel() {
     const ULONGLONG now = GetTickCount64();
@@ -1323,6 +1325,21 @@ void PollChannel() {
             ShowWinUiNotification(EGoTouchTrayIpc::Notification::PenConnected);
             g_app.lastConnectionNotificationTick = now;
         }
+    }
+
+    // 工具切换在状态里是一个可重复读的位，不是边沿，所以这里自己求边沿。放在轮询里而不是
+    // 手势线程里：笔身自带的切换不发双击事件，只有这一位会动，两种来源在这里合成一条提示。
+    if (fresh.hasEraserActive) {
+        const bool eraserNow = fresh.eraserActive;
+        if (g_app.prevEraserValid && eraserNow != g_app.prevEraserActive) {
+            ShowWinUiNotification(EGoTouchTrayIpc::Notification::PenToolChanged, eraserNow);
+        }
+        g_app.prevEraserActive = eraserNow;
+        g_app.prevEraserValid = true;
+    } else {
+        // 服务不再发布这一位（换了侧键模式，或笔断开）。基线作废，恢复发布时的第一份快照
+        // 只用来重建基线——否则切回 ToggleEraser 就会凭空弹一次提示。
+        g_app.prevEraserValid = false;
     }
 
     g_app.prevCharging = nowCharging;
@@ -1729,7 +1746,12 @@ void ShowSettingsPanel() {
     (void)LaunchSettingsProcess(false, true);
 }
 
-void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification) {
+void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload) {
+    // 工具切换不归「设备接入提醒」管：那个开关说的是配件接入，而这一条是用户刚按下侧键的
+    // 反馈，关掉前者的人要的是少一条吸附提示，不是切了橡皮擦却没有回应。
+    const bool deviceNotification =
+        notification != EGoTouchTrayIpc::Notification::PenToolChanged;
+
     // 关掉之后在这里就返回，不去找、更不去拉起设置进程：弹窗的宿主是 WinUI 那个进程，
     // 一次都不弹却把它拉起来，等于关了开关反而多跑一个进程。
     //
@@ -1738,7 +1760,7 @@ void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification) {
     // 托盘看到序号变化就弹。**服务凭什么判定「未正确吸附」尚未取证**——是 MCU 上报的某个
     // 状态位，还是我们自己按吸附/充电状态推的，要从 PenStatus 的生产侧往回查。
     // 查清之前不把它单列成一个开关：给不出「什么时候会弹」，这个开关就没法解释。
-    if (!g_app.deviceNotifications) return;
+    if (deviceNotification && !g_app.deviceNotifications) return;
 
     HWND bridge = FindSettingsBridge();
     if (!bridge) {
@@ -1752,7 +1774,7 @@ void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification) {
     }
     if (bridge) {
         PostMessageW(bridge, EGoTouchTrayIpc::kNotificationMessage,
-                     static_cast<WPARAM>(notification), 0);
+                     static_cast<WPARAM>(notification), payload);
     }
 }
 

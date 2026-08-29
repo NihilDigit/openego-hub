@@ -25,6 +25,9 @@ enum class Notification : uint32_t {
     PenDeviation,
     // 只追加，不能插入：托盘和 Settings 可能短时间运行不同版本。
     KeyboardConnected,
+    // 笔尖与橡皮擦之间的切换。lParam 非零表示切到了橡皮擦。工具由谁切换不影响这条消息：
+    // 侧键双击和笔身自带的切换都只表现为状态通道里 eraserActive 的一次跳变。
+    PenToolChanged,
 };
 
 enum class Command : uint32_t {

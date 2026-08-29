@@ -12,6 +12,7 @@
 #include "PenControlChannel.h"
 
 #include <cmath>
+#include <dwmapi.h>
 
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
@@ -31,6 +32,41 @@ constexpr wchar_t kSettingsRegistryKey[] = L"Software\\OpenEGoHub";
 // 640，宽度取它加上左右各 24 的内边距。
 constexpr int32_t kWindowWidth = 688;
 constexpr int32_t kWindowHeight = 760;
+
+// DWMWA_USE_IMMERSIVE_DARK_MODE。SDK 里到 Windows 11 才有这个名字，自带一份省得跟着
+// WINDOWS_SDK_VERSION 走。
+constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
+
+// 存在注册表里的外观取值。0 是跟随系统，也是没设过时的取值。
+constexpr wchar_t kThemeSettingName[] = L"AppTheme";
+
+ElementTheme ThemeFromSetting(DWORD value) {
+    switch (value) {
+    case 1: return ElementTheme::Light;
+    case 2: return ElementTheme::Dark;
+    default: return ElementTheme::Default;
+    }
+}
+
+DWORD SettingFromTheme(ElementTheme theme) {
+    switch (theme) {
+    case ElementTheme::Light: return 1;
+    case ElementTheme::Dark: return 2;
+    default: return 0;
+    }
+}
+
+// 应用的深浅，不是任务栏的——那是 SystemUsesLightTheme，两者可以各走各的。
+bool SystemUsesDarkApps() {
+    DWORD value = 1, size = sizeof(value), type = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER,
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, &type, &value, &size)
+        != ERROR_SUCCESS) {
+        return false;
+    }
+    return value == 0;
+}
 
 // 设备页取不到的项显示一个破折号，不留空。这些值要么固件里就有、要么永远不会有，没有
 // 「还在加载」这个中间状态，而空白看起来正是还没加载完。
@@ -277,20 +313,28 @@ LRESULT CALLBACK MainWindow::BridgeWndProc(
         self->ActivateWindow();
         return 0;
     } else if (message == EGoTouchTrayIpc::kNotificationMessage && self) {
-        self->ShowNotification(static_cast<EGoTouchTrayIpc::Notification>(wParam));
+        self->ShowNotification(static_cast<EGoTouchTrayIpc::Notification>(wParam), lParam);
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-void MainWindow::ShowNotification(EGoTouchTrayIpc::Notification notification) {
-    if (!m_notificationWindow) {
+void MainWindow::ShowNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload) {
+    const bool created = m_notificationWindow == nullptr;
+    if (created) {
         m_notificationWindow = make<winrt::EGoTouchSettings::implementation::NotificationWindow>();
     }
     auto implementation = get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
         m_notificationWindow);
+    // 弹窗是另一个 Window，主题不会从主窗口继承下来；它又是按需创建的，创建时机在用户选主题
+    // 之后，只能在这里补上。
+    if (created) implementation->ApplyTheme(RootLayout().RequestedTheme());
     if (notification == EGoTouchTrayIpc::Notification::PenDeviation) {
         implementation->ShowDeviation();
+        return;
+    }
+    if (notification == EGoTouchTrayIpc::Notification::PenToolChanged) {
+        implementation->ShowToolChanged(payload != 0);
         return;
     }
 
@@ -343,6 +387,7 @@ void MainWindow::LoadStoredSettings() {
         ReadUserSetting(L"OneNoteCompatibility", 1) != 0);
     AutoStartToggle().IsOn(ReadUserSetting(L"AutoStart", 1) != 0);
     DeviceNotificationsToggle().IsOn(ReadUserSetting(L"DeviceNotifications", 1) != 0);
+    ApplyTheme(ThemeFromSetting(ReadUserSetting(kThemeSettingName, 0)));
 
     // 充电阈值这里只放一个占位值，真实值随后由状态通道送来（见 RefreshControls）——读它
     // 需要管理员权限，本进程读不到，只有服务读得到。服务没连上时宁可显示上次设定的值，
@@ -693,6 +738,50 @@ void MainWindow::NavSelectionChanged(
     AboutPage().Visibility(tag == L"about" ? Visibility::Visible : Visibility::Collapsed);
 }
 
+void MainWindow::NavItemInvoked(
+        Microsoft::UI::Xaml::Controls::NavigationView const&,
+        Microsoft::UI::Xaml::Controls::NavigationViewItemInvokedEventArgs const& args) {
+    const auto container = args.InvokedItemContainer();
+    if (!container || unbox_value_or<hstring>(container.Tag(), L"") != L"theme") return;
+    Controls::Primitives::FlyoutBase::ShowAttachedFlyout(NavTheme());
+}
+
+void MainWindow::ThemeSelected(IInspectable const& sender, RoutedEventArgs const&) {
+    const auto item = sender.try_as<Controls::MenuFlyoutItem>();
+    if (!item) return;
+    const auto tag = unbox_value_or<hstring>(item.Tag(), L"");
+    const ElementTheme theme = tag == L"light"  ? ElementTheme::Light
+                             : tag == L"dark"   ? ElementTheme::Dark
+                                                : ElementTheme::Default;
+    ApplyTheme(theme);
+    WriteUserSetting(kThemeSettingName, SettingFromTheme(theme));
+}
+
+void MainWindow::ApplyTheme(ElementTheme theme) {
+    RootLayout().RequestedTheme(theme);
+    ThemeSystemItem().IsChecked(theme == ElementTheme::Default);
+    ThemeLightItem().IsChecked(theme == ElementTheme::Light);
+    ThemeDarkItem().IsChecked(theme == ElementTheme::Dark);
+    SyncFrameTheme();
+    if (m_notificationWindow) {
+        get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
+            m_notificationWindow)->ApplyTheme(theme);
+    }
+}
+
+// 非客户区不在 XAML 的管辖内：窗框那一像素和标题栏按钮的明暗由 DWM 决定，RequestedTheme
+// 传不过去。跟随系统时还要跟着系统改，所以这一条也挂在每秒的刷新上。
+void MainWindow::SyncFrameTheme() {
+    const ElementTheme theme = RootLayout().RequestedTheme();
+    const bool dark = theme == ElementTheme::Dark ||
+        (theme == ElementTheme::Default && SystemUsesDarkApps());
+    if (m_frameDarkApplied == static_cast<int>(dark)) return;
+    m_frameDarkApplied = static_cast<int>(dark);
+    const BOOL value = dark ? TRUE : FALSE;
+    (void)DwmSetWindowAttribute(
+        WindowHandle(), kDwmwaUseImmersiveDarkMode, &value, sizeof(value));
+}
+
 void MainWindow::DeviceCardsSizeChanged(IInspectable const&,
                                         SizeChangedEventArgs const& args) {
     // 两张设备卡片在够宽时并排。阈值按「一张卡片本身需要的宽度」定：低于它并排只会把两边
@@ -942,6 +1031,7 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
 }
 
 void MainWindow::RefreshState() {
+    SyncFrameTheme();
     m_trayConnected = FindTrayWindow() != nullptr;
     if (m_exitPending && !m_trayConnected) {
         Close();
@@ -1464,6 +1554,8 @@ winrt::fire_and_forget MainWindow::ConfirmExit() {
 
     ContentDialog dialog;
     dialog.XamlRoot(RootLayout().XamlRoot());
+    // 对话框挂在 XamlRoot 上，不在 RootLayout 的子树里，主题得单独给。
+    dialog.RequestedTheme(RootLayout().RequestedTheme());
     dialog.Title(box_value(hstring{L"退出 OpenEGo Hub？"}));
     dialog.Content(box_value(hstring{
         L"触控将交还 HuaweiTHP 驱动，笔侧键与键盘分离设置随之失效。重新启动 OpenEGo Hub 即可恢复。"}));

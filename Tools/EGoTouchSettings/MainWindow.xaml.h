@@ -39,6 +39,10 @@ struct MainWindow : MainWindowT<MainWindow> {
     void NavSelectionChanged(
         Microsoft::UI::Xaml::Controls::NavigationView const&,
         Microsoft::UI::Xaml::Controls::NavigationViewSelectionChangedEventArgs const&);
+    void NavItemInvoked(
+        Microsoft::UI::Xaml::Controls::NavigationView const&,
+        Microsoft::UI::Xaml::Controls::NavigationViewItemInvokedEventArgs const&);
+    void ThemeSelected(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void DeviceCardsSizeChanged(
         IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
     void ColorReferenceSizeChanged(
@@ -52,7 +56,9 @@ private:
     void CreateBridgeWindow();
     void DestroyBridgeWindow();
     void ActivateWindow();
-    void ShowNotification(EGoTouchTrayIpc::Notification notification);
+    void ShowNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload);
+    void ApplyTheme(Microsoft::UI::Xaml::ElementTheme theme);
+    void SyncFrameTheme();
     void ConfigureWindow();
     static void ApplyWindowIcon(HWND hwnd, UINT dpi);
     void LoadStoredSettings();
@@ -130,6 +136,9 @@ private:
     // 顶部那条「华为服务仍在运行」的提醒是否已被关掉。持久化，关一次就不再出现。
     bool m_vendorHintDismissed = false;
     HWND m_bridgeWindow = nullptr;
+    // 已经推给 DWM 的窗框明暗。跟随系统时系统主题变了 XAML 会自己换肤，窗框不会——那是
+    // 一个只写属性，得由我们复查后重设，所以记下当前值以免每秒都设一遍。
+    int m_frameDarkApplied = -1;
     bool m_updatingControls = false;
     // 服务当前生效的侧键模式，跟着状态通道走。提交前与它比对，避免把刚读回来的值再发一遍——
     // 详见 RefreshControls 里的说明。0xFF 表示还没读到过。

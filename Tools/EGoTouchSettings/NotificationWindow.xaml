@@ -78,6 +78,35 @@
                 </StackPanel>
             </Grid>
 
+            <!-- 这一条只有一行字，居中排：连接提示那两张要留出电量和整支笔的位置，靠左才
+                 对得齐，这里靠左只会在右边空出半张卡片。 -->
+            <StackPanel x:Name="ToolView"
+                        Orientation="Horizontal"
+                        Spacing="12"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed">
+                <!-- 两个字形各摆一个，代码只切可见性：字形写在这里是十六进制实体，
+                     写进 .cpp 就成了源码里看不出含义的私有区字符。 -->
+                <Grid VerticalAlignment="Center">
+                    <FontIcon x:Name="ToolPenIcon"
+                              Glyph="&#xE70F;"
+                              FontSize="20"
+                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                    <FontIcon x:Name="ToolEraserIcon"
+                              Glyph="&#xE75C;"
+                              FontSize="20"
+                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                              Visibility="Collapsed" />
+                </Grid>
+                <TextBlock x:Name="ToolText"
+                           Text="橡皮擦"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center" />
+            </StackPanel>
+
             <Grid x:Name="DeviationView" ColumnSpacing="12" Visibility="Collapsed">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />

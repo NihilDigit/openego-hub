@@ -21,6 +21,8 @@ constexpr int kConnectionWidthDip = 336;
 constexpr int kConnectionHeightDip = 102;
 constexpr int kDeviationWidthDip = 336;
 constexpr int kDeviationHeightDip = 58;
+constexpr int kToolWidthDip = 200;
+constexpr int kToolHeightDip = 58;
 constexpr double kPenImageMaxWidthDip = 304.0;
 constexpr double kPenImageMaxHeightDip = 28.0;
 constexpr double kKeyboardImageMaxWidthDip = 96.0;
@@ -74,6 +76,14 @@ void NotificationWindow::ConfigureWindow() {
     // XAML 那边用 OverlayCornerRadius，与这里的 ROUND 是同一档。
     const int corner = kDwmCornerRound;
     (void)DwmSetWindowAttribute(hwnd, kDwmwaWindowCornerPreference, &corner, sizeof(corner));
+}
+
+void NotificationWindow::SelectView(UIElement const& view) {
+    for (const UIElement candidate :
+         {ConnectionView().as<UIElement>(), KeyboardConnectionView().as<UIElement>(),
+          ToolView().as<UIElement>(), DeviationView().as<UIElement>()}) {
+        candidate.Visibility(candidate == view ? Visibility::Visible : Visibility::Collapsed);
+    }
 }
 
 fire_and_forget NotificationWindow::LoadPenImage(uint32_t modelId) {
@@ -208,9 +218,7 @@ void NotificationWindow::RestartDwellTimer() {
 }
 
 void NotificationWindow::ShowConnected(const PenStatus::State& state) {
-    ConnectionView().Visibility(Visibility::Visible);
-    KeyboardConnectionView().Visibility(Visibility::Collapsed);
-    DeviationView().Visibility(Visibility::Collapsed);
+    SelectView(ConnectionView());
     ApplyConnectedState(state);
 
     NotificationRoot().Opacity(0.0);
@@ -237,9 +245,7 @@ void NotificationWindow::ApplyConnectedState(const PenStatus::State& state) {
 }
 
 void NotificationWindow::ShowKeyboardConnected(const PenStatus::State& state) {
-    ConnectionView().Visibility(Visibility::Collapsed);
-    KeyboardConnectionView().Visibility(Visibility::Visible);
-    DeviationView().Visibility(Visibility::Collapsed);
+    SelectView(KeyboardConnectionView());
     ApplyKeyboardState(state);
 
     NotificationRoot().Opacity(0.0);
@@ -276,13 +282,28 @@ void NotificationWindow::UpdateState(const PenStatus::State& state) {
 }
 
 void NotificationWindow::ShowDeviation() {
-    ConnectionView().Visibility(Visibility::Collapsed);
-    KeyboardConnectionView().Visibility(Visibility::Collapsed);
-    DeviationView().Visibility(Visibility::Visible);
+    SelectView(DeviationView());
     NotificationRoot().Opacity(0.0);
     PositionAndShow(kDeviationWidthDip, kDeviationHeightDip);
     StartOpacityAnimation(0.0, 1.0, 150, false);
     RestartDwellTimer();
+}
+
+void NotificationWindow::ShowToolChanged(bool eraser) {
+    SelectView(ToolView());
+    // 橡皮擦与笔尖各用一个字形，文本本身已经说清楚了是哪一支，图标只是让扫一眼就能分辨。
+    ToolPenIcon().Visibility(eraser ? Visibility::Collapsed : Visibility::Visible);
+    ToolEraserIcon().Visibility(eraser ? Visibility::Visible : Visibility::Collapsed);
+    ToolText().Text(eraser ? L"已切换到橡皮擦" : L"已切换到笔尖");
+    NotificationRoot().Opacity(0.0);
+    PositionAndShow(kToolWidthDip, kToolHeightDip);
+    StartOpacityAnimation(0.0, 1.0, 150, false);
+    RestartDwellTimer();
+}
+
+// 弹窗是独立的 Window，主题不从主窗口继承，由 MainWindow 在创建和切换时推给它。
+void NotificationWindow::ApplyTheme(ElementTheme theme) {
+    NotificationRoot().RequestedTheme(theme);
 }
 
 void NotificationWindow::HideNotification() {

@@ -110,7 +110,8 @@
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             OpenPaneLength="180"
-            SelectionChanged="NavSelectionChanged">
+            SelectionChanged="NavSelectionChanged"
+            ItemInvoked="NavItemInvoked">
             <NavigationView.MenuItems>
                 <NavigationViewItem x:Name="NavDevices" Content="配件" Tag="devices" IsSelected="True">
                     <NavigationViewItem.Icon>
@@ -139,6 +140,28 @@
                 </NavigationViewItem>
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
+                <!-- 外观只有三个互斥选项，撑不起一页，也不该塞进哪一页的末尾——它管的是整个
+                     窗口，不属于配件或屏幕。放在导航栏底部、关于之上，用 flyout 就地选，
+                     SelectsOnInvoked="False" 让它不参与选页。 -->
+                <NavigationViewItem x:Name="NavTheme" Content="外观" Tag="theme"
+                                    SelectsOnInvoked="False">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE790;" />
+                    </NavigationViewItem.Icon>
+                    <FlyoutBase.AttachedFlyout>
+                        <MenuFlyout Placement="Right">
+                            <RadioMenuFlyoutItem x:Name="ThemeSystemItem" Text="跟随系统"
+                                                 GroupName="AppTheme" Tag="system"
+                                                 Click="ThemeSelected" />
+                            <RadioMenuFlyoutItem x:Name="ThemeLightItem" Text="浅色"
+                                                 GroupName="AppTheme" Tag="light"
+                                                 Click="ThemeSelected" />
+                            <RadioMenuFlyoutItem x:Name="ThemeDarkItem" Text="深色"
+                                                 GroupName="AppTheme" Tag="dark"
+                                                 Click="ThemeSelected" />
+                        </MenuFlyout>
+                    </FlyoutBase.AttachedFlyout>
+                </NavigationViewItem>
                 <NavigationViewItem x:Name="NavAbout" Content="关于" Tag="about">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE946;" />
