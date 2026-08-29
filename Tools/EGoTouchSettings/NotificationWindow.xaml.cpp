@@ -5,6 +5,8 @@
 
 #include <dwmapi.h>
 
+#include <cmath>
+
 #if __has_include("NotificationWindow.g.cpp")
 #include "NotificationWindow.g.cpp"
 #endif
@@ -23,6 +25,8 @@ constexpr int kDeviationWidthDip = 336;
 constexpr int kDeviationHeightDip = 58;
 constexpr int kToolWidthDip = 200;
 constexpr int kToolHeightDip = 58;
+// 换一条通知时淡出与收缩共用的时长。
+constexpr int kSwapMs = 130;
 constexpr double kPenImageMaxWidthDip = 304.0;
 constexpr double kPenImageMaxHeightDip = 28.0;
 constexpr double kKeyboardImageMaxWidthDip = 96.0;
@@ -51,7 +55,7 @@ NotificationWindow::NotificationWindow() {
     m_dwellTimer.Interval(Windows::Foundation::TimeSpan{30'000'000});
     m_dwellTimer.Tick([this](IInspectable const&, IInspectable const&) {
         m_dwellTimer.Stop();
-        StartOpacityAnimation(1.0, 0.0, 300, true);
+        StartOpacityAnimation(1.0, 0.0, 300, [this] { ShowWindow(WindowHandle(), SW_HIDE); });
     });
 }
 
@@ -193,9 +197,8 @@ void NotificationWindow::ApplyNoUpscaleSize(
     image.Height(std::max(1.0, nativeHeightDip * fit));
 }
 
-void NotificationWindow::PositionAndShow(int widthDip, int heightDip) {
-    const HWND hwnd = WindowHandle();
-    const UINT dpi = GetDpiForWindow(hwnd);
+RECT NotificationWindow::TargetBounds(int widthDip, int heightDip) {
+    const UINT dpi = GetDpiForWindow(WindowHandle());
     const int width = MulDiv(widthDip, dpi ? dpi : 96, 96);
     const int height = MulDiv(heightDip, dpi ? dpi : 96, 96);
 
@@ -209,12 +212,56 @@ void NotificationWindow::PositionAndShow(int widthDip, int heightDip) {
 
     const int anchorX = screen.left + (screen.right - screen.left) / 2;
     const int anchorY = screen.top + (screen.bottom - screen.top) / 10;
-    SetWindowPos(hwnd, HWND_TOPMOST, anchorX - width / 2, anchorY - height / 2,
-                 width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    const int left = anchorX - width / 2;
+    const int top = anchorY - height / 2;
+    return RECT{left, top, left + width, top + height};
+}
+
+void NotificationWindow::PositionAndShow(int widthDip, int heightDip) {
+    const RECT bounds = TargetBounds(widthDip, heightDip);
+    SetWindowPos(WindowHandle(), HWND_TOPMOST, bounds.left, bounds.top,
+                 bounds.right - bounds.left, bounds.bottom - bounds.top,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+// 窗口大小没有补间可用——SetWindowPos 是一次到位的，所以自己按帧插值。两条通知的尺寸差得
+// 不小（连接提示比工具提示宽一半），直接跳过去，卡片会在淡出的中途忽然变形。
+void NotificationWindow::AnimateBounds(int widthDip, int heightDip, int milliseconds) {
+    const RECT from = [this] {
+        RECT r{};
+        GetWindowRect(WindowHandle(), &r);
+        return r;
+    }();
+    const RECT to = TargetBounds(widthDip, heightDip);
+
+    if (m_boundsTimer) m_boundsTimer.Stop();
+    m_boundsTimer = DispatcherTimer();
+    m_boundsTimer.Interval(std::chrono::milliseconds(16));
+    const auto started = GetTickCount64();
+    m_boundsTimer.Tick([this, from, to, started, milliseconds](
+                           IInspectable const&, IInspectable const&) {
+        const auto elapsed = static_cast<double>(GetTickCount64() - started);
+        const double t = std::clamp(elapsed / std::max(1, milliseconds), 0.0, 1.0);
+        // 三次缓出：起步快、收尾慢，与同时进行的淡出是同一种手感。
+        const double eased = 1.0 - std::pow(1.0 - t, 3.0);
+        const auto lerp = [eased](LONG a, LONG b) {
+            return static_cast<int>(std::lround(a + (b - a) * eased));
+        };
+        const int left = lerp(from.left, to.left);
+        const int top = lerp(from.top, to.top);
+        SetWindowPos(WindowHandle(), HWND_TOPMOST, left, top,
+                     lerp(from.right, to.right) - left, lerp(from.bottom, to.bottom) - top,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (t >= 1.0) {
+            m_boundsTimer.Stop();
+            m_boundsTimer = nullptr;
+        }
+    });
+    m_boundsTimer.Start();
 }
 
 void NotificationWindow::StartOpacityAnimation(
-        double from, double to, int milliseconds, bool hideWhenDone) {
+        double from, double to, int milliseconds, std::function<void()> onComplete) {
     if (m_storyboard) m_storyboard.Stop();
     Storyboard storyboard;
     DoubleAnimation opacity;
@@ -225,13 +272,40 @@ void NotificationWindow::StartOpacityAnimation(
     Storyboard::SetTarget(opacity, NotificationRoot());
     Storyboard::SetTargetProperty(opacity, L"Opacity");
     storyboard.Children().Append(opacity);
-    if (hideWhenDone) {
-        storyboard.Completed([this](IInspectable const&, IInspectable const&) {
-            ShowWindow(WindowHandle(), SW_HIDE);
-        });
+    if (onComplete) {
+        storyboard.Completed(
+            [action = std::move(onComplete)](IInspectable const&, IInspectable const&) {
+                action();
+            });
     }
     m_storyboard = storyboard;
     storyboard.Begin();
+}
+
+// 换一条通知时先把当前这张淡出，等看不见了再换内容、改窗口大小，然后淡入。窗口尺寸是一次
+// SetWindowPos，本来就没法补间；趁不可见时改，跳变就看不出来了。窗口没在显示时不必淡出，
+// 直接走淡入那一半。
+void NotificationWindow::PresentView(
+        UIElement const& view, int widthDip, int heightDip, std::function<void()> apply) {
+    auto lifetime = get_strong();
+    const auto swap = [this, lifetime, view, widthDip, heightDip,
+                       apply = std::move(apply)]() {
+        if (apply) apply();
+        SelectView(view);
+        NotificationRoot().Opacity(0.0);
+        PositionAndShow(widthDip, heightDip);
+        StartOpacityAnimation(0.0, 1.0, 150, nullptr);
+        RestartDwellTimer();
+    };
+
+    if (!IsWindowVisible(WindowHandle())) {
+        swap();
+        return;
+    }
+    // 已经在显示：一边淡出旧的一边把窗口收到新尺寸，淡完再换内容。停留计时也推迟到那时。
+    if (m_dwellTimer) m_dwellTimer.Stop();
+    AnimateBounds(widthDip, heightDip, kSwapMs);
+    StartOpacityAnimation(NotificationRoot().Opacity(), 0.0, kSwapMs, swap);
 }
 
 void NotificationWindow::RestartDwellTimer() {
@@ -240,18 +314,14 @@ void NotificationWindow::RestartDwellTimer() {
 }
 
 void NotificationWindow::ShowConnected(const PenStatus::State& state) {
-    SelectView(ConnectionView());
-    ApplyConnectedState(state);
-
-    NotificationRoot().Opacity(0.0);
-    PositionAndShow(kConnectionWidthDip, kConnectionHeightDip);
-    if (m_penImageSource) {
-        ApplyNoUpscaleSize(
-            PenImage(), m_penImagePixelSize,
-            kPenImageMaxWidthDip, kPenImageMaxHeightDip);
-    }
-    StartOpacityAnimation(0.0, 1.0, 150, false);
-    RestartDwellTimer();
+    PresentView(ConnectionView(), kConnectionWidthDip, kConnectionHeightDip, [this, state] {
+        ApplyConnectedState(state);
+        if (m_penImageSource) {
+            ApplyNoUpscaleSize(
+                PenImage(), m_penImagePixelSize,
+                kPenImageMaxWidthDip, kPenImageMaxHeightDip);
+        }
+    });
 }
 
 void NotificationWindow::ApplyConnectedState(const PenStatus::State& state) {
@@ -267,18 +337,15 @@ void NotificationWindow::ApplyConnectedState(const PenStatus::State& state) {
 }
 
 void NotificationWindow::ShowKeyboardConnected(const PenStatus::State& state) {
-    SelectView(KeyboardConnectionView());
-    ApplyKeyboardState(state);
-
-    NotificationRoot().Opacity(0.0);
-    PositionAndShow(kConnectionWidthDip, kConnectionHeightDip);
-    if (m_keyboardImageSource) {
-        ApplyNoUpscaleSize(
-            KeyboardImage(), m_keyboardImagePixelSize,
-            kKeyboardImageMaxWidthDip, kKeyboardImageMaxHeightDip);
-    }
-    StartOpacityAnimation(0.0, 1.0, 150, false);
-    RestartDwellTimer();
+    PresentView(
+        KeyboardConnectionView(), kConnectionWidthDip, kConnectionHeightDip, [this, state] {
+            ApplyKeyboardState(state);
+            if (m_keyboardImageSource) {
+                ApplyNoUpscaleSize(
+                    KeyboardImage(), m_keyboardImagePixelSize,
+                    kKeyboardImageMaxWidthDip, kKeyboardImageMaxHeightDip);
+            }
+        });
 }
 
 void NotificationWindow::ApplyKeyboardState(const PenStatus::State& state) {
@@ -304,23 +371,16 @@ void NotificationWindow::UpdateState(const PenStatus::State& state) {
 }
 
 void NotificationWindow::ShowDeviation() {
-    SelectView(DeviationView());
-    NotificationRoot().Opacity(0.0);
-    PositionAndShow(kDeviationWidthDip, kDeviationHeightDip);
-    StartOpacityAnimation(0.0, 1.0, 150, false);
-    RestartDwellTimer();
+    PresentView(DeviationView(), kDeviationWidthDip, kDeviationHeightDip, nullptr);
 }
 
 void NotificationWindow::ShowToolChanged(bool eraser) {
-    SelectView(ToolView());
-    // 橡皮擦与笔尖各用一个字形，文本本身已经说清楚了是哪一支，图标只是让扫一眼就能分辨。
-    ToolPenIcon().Visibility(eraser ? Visibility::Collapsed : Visibility::Visible);
-    ToolEraserIcon().Visibility(eraser ? Visibility::Visible : Visibility::Collapsed);
-    ToolText().Text(eraser ? L"已切换到橡皮擦" : L"已切换到笔尖");
-    NotificationRoot().Opacity(0.0);
-    PositionAndShow(kToolWidthDip, kToolHeightDip);
-    StartOpacityAnimation(0.0, 1.0, 150, false);
-    RestartDwellTimer();
+    PresentView(ToolView(), kToolWidthDip, kToolHeightDip, [this, eraser] {
+        // 橡皮擦与笔尖各用一个字形，文本本身已经说清楚了是哪一支，图标只是让扫一眼就能分辨。
+        ToolPenIcon().Visibility(eraser ? Visibility::Collapsed : Visibility::Visible);
+        ToolEraserIcon().Visibility(eraser ? Visibility::Visible : Visibility::Collapsed);
+        ToolText().Text(eraser ? L"已切换到橡皮擦" : L"已切换到笔尖");
+    });
 }
 
 // 弹窗是独立的 Window，主题不从主窗口继承，由 MainWindow 在每次弹出前推给它。深浅也一并

@@ -2,6 +2,8 @@
 
 #include "NotificationWindow.g.h"
 
+#include <functional>
+
 namespace winrt::EGoTouchSettings::implementation {
 
 struct NotificationWindow : NotificationWindowT<NotificationWindow> {
@@ -21,8 +23,13 @@ private:
     void ConfigureWindow();
     void SelectView(Microsoft::UI::Xaml::UIElement const& view);
     void SyncFrameTheme();
+    RECT TargetBounds(int widthDip, int heightDip);
     void PositionAndShow(int widthDip, int heightDip);
-    void StartOpacityAnimation(double from, double to, int milliseconds, bool hideWhenDone);
+    void AnimateBounds(int widthDip, int heightDip, int milliseconds);
+    void PresentView(Microsoft::UI::Xaml::UIElement const& view, int widthDip, int heightDip,
+                     std::function<void()> apply);
+    void StartOpacityAnimation(
+        double from, double to, int milliseconds, std::function<void()> onComplete);
     void RestartDwellTimer();
     void ApplyConnectedState(const PenStatus::State& state);
     void ApplyKeyboardState(const PenStatus::State& state);
@@ -35,6 +42,8 @@ private:
     winrt::fire_and_forget LoadKeyboardImage();
 
     Microsoft::UI::Xaml::DispatcherTimer m_dwellTimer{nullptr};
+    // 窗口尺寸补间的节拍，非空表示正在收缩或展开。
+    Microsoft::UI::Xaml::DispatcherTimer m_boundsTimer{nullptr};
     Microsoft::UI::Xaml::Media::Animation::Storyboard m_storyboard{nullptr};
     uint32_t m_penModelId = 0;
     uint64_t m_penImageGeneration = 0;
