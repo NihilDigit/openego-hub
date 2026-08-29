@@ -802,43 +802,12 @@
                                 </Grid>
                             </Border>
 
-                            <!--
-                                TODO 自然色彩暂时形同虚设，本机的环境光传感器读不出持续数据。
-                                tcs3701 在驱动初始化时上报一帧，之后不再采样：遮光无反应，冷启动
-                                无用，WinRT 与 COM 两条栈拿到的都是同一份陈旧缓存。已排除订阅方式、
-                                上报间隔、传感器选择、隐私权限、厂商服务与厂商用户态进程，问题在
-                                高通传感器驱动一侧，够不着。诊断入口是 GaokunDisplay 的 sensor-probe 命令。
-                                当初「实测 10143K」不足为凭——那个色温相当于晴天蓝天，不像室内读数，
-                                多半也是初始化的那一帧；当时看到的颜色变化只证明 PCC 下发通道是通的。
-                            -->
-                            <Border Style="{StaticResource SettingsCardStyle}">
-                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <!-- E706 是 Brightness 的实心变体，这里用 EC46（Sunny）表示环境光。 -->
-                                    <FontIcon Glyph="&#xE706;" Style="{StaticResource SettingsRowIconStyle}" />
-                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                        <TextBlock Text="自然色彩显示" TextWrapping="Wrap" />
-                                        <TextBlock
-                                            x:Name="NaturalColorStatusText"
-                                            Text="根据环境光自动调整屏幕色调。"
-                                            Style="{StaticResource SettingsDescriptionStyle}" />
-                                    </StackPanel>
-                                    <ToggleSwitch
-                                        x:Name="NaturalColorToggle"
-                                        Grid.Column="2"
-                                        MinWidth="0"
-                                        OnContent=""
-                                        OffContent=""
-                                        Margin="0,0,-12,0"
-                                        HorizontalAlignment="Right"
-                                        VerticalAlignment="Center"
-                                        Toggled="NaturalColorToggled" />
-                                </Grid>
-                            </Border>
+                            <!-- 自然色彩这一项不在界面上出现：本机的环境光传感器读不出持续
+                                 数据，开关打开也不会有任何变化。tcs3701 在驱动初始化时上报一帧，
+                                 之后不再采样，WinRT 与 COM 两条栈拿到的都是同一份陈旧缓存，问题
+                                 在高通传感器驱动一侧，够不着。实现留在 hal/src/display/
+                                 NaturalColor.* 与 LightSensor.*，换机器或驱动修好之后接回来即可，
+                                 诊断入口是 GaokunDisplay 的 sensor-probe 命令。 -->
                         </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
@@ -1286,9 +1255,9 @@
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}">
                                     <Paragraph>
                                         <Run Text="本项目的实现参考了这些优秀的开源项目：" />
-                                        <Hyperlink NavigateUri="https://github.com/matebook-e-go/goodies">goodies</Hyperlink><Run Text="、" /><Hyperlink
+                                        <Hyperlink NavigateUri="https://github.com/awarson2233/EGoTouchRev">EGoTouchRev</Hyperlink><Run Text="、" /><Hyperlink
+                                            NavigateUri="https://github.com/matebook-e-go/goodies">goodies</Hyperlink><Run Text="、" /><Hyperlink
                                             NavigateUri="https://github.com/LanZhan-Harmony/HuaweiThpService">HuaweiThpService</Hyperlink><Run Text="、" /><Hyperlink
-                                            NavigateUri="https://github.com/awarson2233/EGoTouchRev">EGoTouchRev</Hyperlink><Run Text="、" /><Hyperlink
                                             NavigateUri="https://github.com/eiyooooo/MateBook-E-Pen">MateBook-E-Pen</Hyperlink><Run Text="、" /><Hyperlink
                                             NavigateUri="https://github.com/SaKongA/EgoTools">EgoTools</Hyperlink><Run Text="。" />
                                     </Paragraph>

@@ -91,6 +91,14 @@ IAsyncOperation<Media::Imaging::BitmapImage> DecodeImageAsync(std::span<const ui
     co_return image;
 }
 
+// 充电上限那行说明文字。RefreshControls 与 SmartChargeToggled 都要设它——后者不能等服务
+// 回显，否则开关已经动了、说明还写着另一种模式。两处各写一份字面量的话，改文案漏掉一处
+// 就会出现这种不一致，所以只在这里写一次。
+winrt::hstring ChargeLimitStatusFor(bool smart) {
+    return smart ? L"由智能充电决定。"
+                 : L"长期插电时限制充电上限可以减缓电池老化。";
+}
+
 // SMBIOS 的日期是 MM/DD/YYYY。它紧挨着 BIOS 版本号显示，原样留着容易被当成另一个版本号。
 std::wstring FormatBiosDate(std::wstring const& raw) {
     if (raw.size() != 10 || raw[2] != L'/' || raw[5] != L'/') return raw;
@@ -362,7 +370,6 @@ void MainWindow::LoadStoredSettings() {
         temperatureOn ? winrt::to_hstring(static_cast<int>(kelvin)) + L"K"
                       : winrt::hstring{L"关闭"});
     EyeComfortToggle().IsOn(ReadUserSetting(L"EyeComfort", 0) != 0);
-    NaturalColorToggle().IsOn(ReadUserSetting(L"NaturalColor", 0) != 0);
 
     m_vendorHintDismissed = ReadUserSetting(L"VendorHintDismissed", 0) != 0;
 
@@ -713,6 +720,17 @@ void MainWindow::RequestPenImage(uint32_t modelId) {
         return;
     }
 
+    // 画面上还是占位图标时不去抖，直接加载。去抖防的是「替换已有的图」那一下闪烁，此时
+    // 没有图可闪；等满这一秒正是键盘图一开机就在、笔图却慢一拍的由来——键盘图那边根本
+    // 没有这道计时。中途型号解出的通常是通用笔图，那也比图标接近事实，型号稳定之后会被
+    // 原地换成正确的那张。
+    if (!m_penImageSource) {
+        if (m_penImageTimer) m_penImageTimer.Stop();
+        m_pendingPenModelId = modelId;
+        LoadPenImage(modelId);
+        return;
+    }
+
     // 已经在等同一个型号就别重启计时。状态刷新是 100 ms 一次，每次刷新都重启的话计时器
     // 永远等不到触发，图一直加载不出来。只有型号真的变了才重新计时。
     if (m_penImageTimer && m_penImageTimer.IsEnabled() && modelId == m_pendingPenModelId) {
@@ -741,30 +759,41 @@ fire_and_forget MainWindow::LoadPenImage(uint32_t modelId) {
     if (!modelChanged && m_penImageSource) co_return;
     if (!modelChanged && now < m_penImageRetryAt) co_return;
 
-    if (modelChanged) {
-        m_penImageModelId = modelId;
+    // 型号变了只是先记下来，画面不动。旧图要留到新图解码完成的那一刻再原地换掉：先清空
+    // 再解码的话，中间那几十毫秒会露出占位图标，换一支笔就闪一下。
+    m_penImageModelId = modelId;
+    m_penImageRetryAt = now + 5000;
+    const uint64_t generation = ++m_penImageGeneration;
+
+    Media::Imaging::SoftwareBitmapSource decoded{nullptr};
+    try {
+        if (auto asset = AccessoryImages::ResolvePen(modelId)) {
+            Media::Imaging::SoftwareBitmapSource source;
+            const auto pixelSize = co_await AccessoryImages::DecodeCroppedAsync(
+                std::move(asset.encoded), source);
+            if (pixelSize.Width > 0) decoded = source;
+        }
+    } catch (...) {
+        // PC Manager 更新资源时可能短暂拿到不完整文件；当前画面留着，5 秒后重试。
+    }
+
+    // 解码期间又换了型号，这一张已经过期，交给后来那次。
+    if (generation != m_penImageGeneration || modelId != m_penImageModelId) co_return;
+
+    if (decoded) {
+        m_penImageSource = decoded;
+        PenImage().Source(decoded);
+        PenImage().Visibility(Visibility::Visible);
+        PenImageFallback().Visibility(Visibility::Collapsed);
+        co_return;
+    }
+
+    // 新型号一张图都解不出来。旧图不能继续挂着——那画的是另一支笔。
+    if (modelChanged && m_penImageSource) {
         m_penImageSource = nullptr;
         PenImage().Source(nullptr);
         PenImage().Visibility(Visibility::Collapsed);
         PenImageFallback().Visibility(Visibility::Visible);
-    }
-    m_penImageRetryAt = now + 5000;
-    const uint64_t generation = ++m_penImageGeneration;
-
-    try {
-        auto asset = AccessoryImages::ResolvePen(modelId);
-        if (!asset) co_return;
-        Media::Imaging::SoftwareBitmapSource source;
-        const auto pixelSize = co_await AccessoryImages::DecodeCroppedAsync(
-            std::move(asset.encoded), source);
-        if (pixelSize.Width <= 0 || generation != m_penImageGeneration ||
-            modelId != m_penImageModelId) co_return;
-        m_penImageSource = source;
-        PenImage().Source(source);
-        PenImage().Visibility(Visibility::Visible);
-        PenImageFallback().Visibility(Visibility::Collapsed);
-    } catch (...) {
-        // PC Manager 更新资源时可能短暂拿到不完整文件；保留图标并在 5 秒后重试。
     }
 }
 
@@ -1021,7 +1050,23 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
         m_chargeStopPercent = state->chargeLimit;
     }
 
-    const bool chargeLimitPending = m_chargeLimitTimer && m_chargeLimitTimer.IsEnabled();
+    // 控件在两个阶段里不跟随状态通道，否则用户看到的值会来回跳一次：
+    // 拖动期间提交是防抖的，服务发布的还是旧值；提交之后到硬件生效之间还有几百毫秒
+    // （托盘要拉起一个进程去写 WMI，服务再轮询回来），这段时间里回传的同样是旧值。
+    // 先前只挡住了前一个阶段，于是防抖计时器一停、新值还没生效的那几轮刷新就把滑块拽回
+    // 旧值，随后服务发布新值又拽回去——用户看到的正是「到位、闪一下旧值、再到位」。
+    // 这里让本地意图在回显之前是唯一的显示来源：请求值与发布值一致即认为服务已确认。
+    if (m_chargeLimitAwaitingEcho) {
+        const bool echoed = state && state->hasChargeLimit &&
+                            (state->chargeLimitManual ? state->chargeLimit : 0) ==
+                                m_chargeLimitRequested;
+        if (echoed || GetTickCount64() >= m_chargeLimitEchoDeadline) {
+            m_chargeLimitAwaitingEcho = false;
+        }
+    }
+
+    const bool chargeLimitPending =
+        (m_chargeLimitTimer && m_chargeLimitTimer.IsEnabled()) || m_chargeLimitAwaitingEcho;
     if (state && state->hasChargeLimit && !chargeLimitPending) {
         const bool smart = !state->chargeLimitManual;
 
@@ -1034,8 +1079,7 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
         // 智能模式下那个百分比是系统当前的取值，不是用户的设定，也不硬性生效（实测阈值
         // 写着 70 而电池充到了 100%）。滑块置灰，免得它看起来像一个已经生效的设定。
         ChargeLimitSlider().IsEnabled(!smart && m_trayConnected && !m_exitPending);
-        ChargeLimitStatusText().Text(smart ? L"由智能充电决定。"
-                                           : L"长期插电时限制充电上限可以减缓电池老化。");
+        ChargeLimitStatusText().Text(ChargeLimitStatusFor(smart));
     }
 
     if (state && state->hasTouchProvider) {
@@ -1092,6 +1136,14 @@ void MainWindow::UpdateOneNoteRow(bool eraserMode) {
             : L"仅在双击行为设为“切换书写与橡皮擦”时生效。");
 }
 
+// 兜底期限取 2 秒：命令要经托盘写共享内存、服务拉起一个进程调 WMI、再等下一轮 250 ms 的
+// 轮询回来，实测在几百毫秒量级。留够余量，同时短到用户察觉不出「界面卡在旧意图上」。
+void MainWindow::BeginChargeLimitEcho(uint8_t requested) {
+    m_chargeLimitRequested = requested;
+    m_chargeLimitAwaitingEcho = true;
+    m_chargeLimitEchoDeadline = GetTickCount64() + 2000;
+}
+
 void MainWindow::SetInteractiveEnabled(bool enabled) {
     PenModeSelector().IsEnabled(enabled);
     ColorModeCombo().IsEnabled(enabled);
@@ -1101,7 +1153,6 @@ void MainWindow::SetInteractiveEnabled(bool enabled) {
     ColorTemperatureSlider().IsEnabled(enabled && ColorTemperatureToggle().IsOn());
     ColorTemperatureResetButton().IsEnabled(enabled && ColorTemperatureToggle().IsOn());
     EyeComfortToggle().IsEnabled(enabled);
-    NaturalColorToggle().IsEnabled(enabled);
     // 智能模式下上限由系统决定，滑块另外还要置灰。这一条不能只写在 RefreshControls 里：
     // 托盘断开又恢复时会走到这里，无条件放开就会让滑块在智能模式下重新变成可拖。
     ChargeLimitSlider().IsEnabled(enabled && !SmartChargeToggle().IsOn());
@@ -1260,8 +1311,12 @@ void MainWindow::ChargeLimitChanged(
         m_chargeLimitTimer.Interval(std::chrono::milliseconds(600));
         m_chargeLimitTimer.Tick([this](IInspectable const&, IInspectable const&) {
             m_chargeLimitTimer.Stop();
-            if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetChargeLimit,
-                                 static_cast<LPARAM>(m_pendingChargeLimit))) {
+            if (SendTrayCommand(EGoTouchTrayIpc::Command::SetChargeLimit,
+                                static_cast<LPARAM>(m_pendingChargeLimit))) {
+                BeginChargeLimitEcho(m_pendingChargeLimit);
+            } else {
+                // 发不出去就不进等回显：让状态通道立刻把滑块拉回硬件里的真实值，
+                // 免得一个没生效的设定留在界面上。
                 ShowError(L"无法设置充电上限", L"托盘没有响应，设置没有生效。");
             }
         });
@@ -1299,9 +1354,13 @@ void MainWindow::SmartChargeToggled(IInspectable const&, RoutedEventArgs const&)
         ShowError(L"无法切换充电模式", L"托盘没有响应，设置没有生效。");
         return;
     }
+    // 开关与滑块是同一个硬件字段的两种取值，回显也得一起等：只挡滑块的话，开关会被
+    // 中间那几轮还带着旧 chargeLimitManual 的状态弹回去。
+    BeginChargeLimitEcho(percent);
     // 立刻反映到滑块的可用性上，不等服务把新状态发回来——那要等下一轮发布，中间这段时间
     // 开关已经动了而滑块还是旧的可用性，看起来像没生效。
     ChargeLimitSlider().IsEnabled(!smart && m_trayConnected && !m_exitPending);
+    ChargeLimitStatusText().Text(ChargeLimitStatusFor(smart));
 }
 
 // 色温的开关。滑条本身没有「关闭」这个位置：最左端 2000K 是一个很暖的值，不是关掉。
@@ -1346,17 +1405,6 @@ void MainWindow::EyeComfortToggled(IInspectable const&, RoutedEventArgs const&) 
         EyeComfortToggle().IsOn(!enabled);
         m_updatingControls = false;
         ShowError(L"无法切换护眼模式", L"托盘没有响应，设置没有生效。");
-    }
-}
-
-void MainWindow::NaturalColorToggled(IInspectable const&, RoutedEventArgs const&) {
-    if (!m_uiReady || m_updatingControls) return;
-    const bool enabled = NaturalColorToggle().IsOn();
-    if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetNaturalColor, enabled)) {
-        m_updatingControls = true;
-        NaturalColorToggle().IsOn(!enabled);
-        m_updatingControls = false;
-        ShowError(L"无法切换自然色彩显示", L"托盘没有响应，设置没有生效。");
     }
 }
 
