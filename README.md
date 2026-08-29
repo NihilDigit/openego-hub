@@ -13,7 +13,7 @@
 
 <p align="center">中文 | <a href="README.en.md">English</a></p>
 
-HUAWEI MateBook E Go 的触控、手写笔与磁吸键盘驱动，替代华为触控服务与 PC Manager。
+HUAWEI MateBook E Go 的控制中心，替代华为电脑管家：手写笔、磁吸键盘、电池、屏幕与触控服务。
 
 ---
 

@@ -13,8 +13,8 @@
 
 <p align="center"><a href="README.md">中文</a> | English</p>
 
-A driver stack for the HUAWEI MateBook E Go, covering touch, pen and the detachable
-keyboard. It replaces the vendor touch service and PC Manager.
+A control centre for the HUAWEI MateBook E Go, in place of Huawei PC Manager: the pen,
+the detachable keyboard, battery, display and the touch service.
 
 ---
 
