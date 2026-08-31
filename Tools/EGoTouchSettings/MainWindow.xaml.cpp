@@ -4,6 +4,7 @@
 #include "AccessoryImageLoader.h"
 #include "AppIconResource.h"
 #include "DeviceInfo.h"
+#include "LogExport.h"
 // gaokun-hal 的电池读取。电量、容量、健康度、循环次数都不需要提权，本进程直接读；
 // 只有充电阈值要管理员权限，那一项由服务读了经状态通道送回来。
 #include "GaokunPower.h"
@@ -13,6 +14,7 @@
 
 #include <cmath>
 #include <dwmapi.h>
+#include <optional>
 
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
@@ -137,6 +139,36 @@ winrt::hstring ChargeLimitStatusFor(bool smart) {
 std::wstring FormatBiosDate(std::wstring const& raw) {
     if (raw.size() != 10 || raw[2] != L'/' || raw[5] != L'/') return raw;
     return raw.substr(6, 4) + L"-" + raw.substr(0, 2) + L"-" + raw.substr(3, 2);
+}
+
+// 保存位置的选择器。
+//
+// 用 IFileSaveDialog 而不是 WinRT 的 FileSavePicker：这个 exe 不打包（WindowsPackageType
+// 为 None），FileSavePicker 在这种进程里还得先 IInitializeWithWindow 关联 HWND，绕一圈拿到
+// 的又是 StorageFile，而后面交给 tar 的只是一个路径。同一个 shell 对话框，这条路少一层。
+std::optional<std::wstring> PickSaveLocation(HWND owner, std::wstring const& suggested) {
+    winrt::com_ptr<IFileSaveDialog> dialog;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(dialog.put())))) {
+        return std::nullopt;
+    }
+
+    const COMDLG_FILTERSPEC filter[]{{L"ZIP 压缩文件", L"*.zip"}};
+    dialog->SetFileTypes(static_cast<UINT>(std::size(filter)), filter);
+    dialog->SetDefaultExtension(L"zip");
+    dialog->SetFileName(suggested.c_str());
+
+    // 取消时返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)，与真正的失败一样走这条分支：调用方
+    // 对两者的处理相同，都是什么都不做。
+    if (FAILED(dialog->Show(owner))) return std::nullopt;
+
+    winrt::com_ptr<IShellItem> item;
+    if (FAILED(dialog->GetResult(item.put()))) return std::nullopt;
+    PWSTR raw = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw))) return std::nullopt;
+    std::wstring path{raw};
+    CoTaskMemFree(raw);
+    return path;
 }
 
 } // namespace
@@ -1579,6 +1611,70 @@ winrt::fire_and_forget MainWindow::ConfirmExit() {
     }
     m_exitPending = true;
     RefreshState();
+}
+
+void MainWindow::ExportLogsClicked(IInspectable const&, RoutedEventArgs const&) {
+    ExportLogsAsync();
+}
+
+winrt::fire_and_forget MainWindow::ExportLogsAsync() {
+    if (m_exportInProgress) co_return;
+    const auto lifetime = get_strong();
+
+    // 先看有没有东西可导，再弹选择器。反过来的话用户挑完位置才被告知无事可做。
+    if (!LogExport::HasLogs()) {
+        ShowExportResult(InfoBarSeverity::Warning, L"未找到日志文件",
+                         L"C:\\ProgramData\\OpenEGoHub\\logs 下没有可导出的内容。", false);
+        co_return;
+    }
+
+    const auto destination = PickSaveLocation(WindowHandle(), LogExport::SuggestedFileName());
+    if (!destination) co_return;
+
+    m_exportInProgress = true;
+    ExportLogsButton().IsEnabled(false);
+    ShowExportResult(InfoBarSeverity::Informational, L"正在导出日志", L"正在打包，请稍候。",
+                     false);
+
+    const auto ui = winrt::apartment_context();
+    co_await winrt::resume_background();
+    const auto result = LogExport::WriteArchive(*destination);
+    co_await ui;
+
+    m_exportInProgress = false;
+    ExportLogsButton().IsEnabled(true);
+
+    switch (result.status) {
+    case LogExport::Status::Success:
+        m_lastExportPath = *destination;
+        ShowExportResult(InfoBarSeverity::Success, L"日志已导出", hstring{*destination}, true);
+        break;
+    case LogExport::Status::NoLogs:
+        ShowExportResult(InfoBarSeverity::Warning, L"未找到日志文件",
+                         L"C:\\ProgramData\\OpenEGoHub\\logs 下没有可导出的内容。", false);
+        break;
+    default:
+        ShowExportResult(InfoBarSeverity::Error, L"导出失败", hstring{result.detail}, false);
+        break;
+    }
+}
+
+void MainWindow::ShowExportResult(InfoBarSeverity severity, hstring const& title,
+                                  hstring const& message, bool revealable) {
+    ExportLogsBar().IsOpen(false);
+    ExportLogsBar().Severity(severity);
+    ExportLogsBar().Title(title);
+    ExportLogsBar().Message(message);
+    ExportLogsRevealButton().Visibility(revealable ? Visibility::Visible
+                                                   : Visibility::Collapsed);
+    ExportLogsBar().IsOpen(true);
+}
+
+void MainWindow::ExportLogsRevealClicked(IInspectable const&, RoutedEventArgs const&) {
+    if (m_lastExportPath.empty()) return;
+    // /select 让文件在资源管理器里被选中，而不是只打开所在目录——刚导出的这一个才是他要找的。
+    const std::wstring arguments = L"/select,\"" + m_lastExportPath + L"\"";
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL);
 }
 
 } // namespace winrt::EGoTouchSettings::implementation

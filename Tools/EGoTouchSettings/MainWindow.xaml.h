@@ -36,6 +36,8 @@ struct MainWindow : MainWindowT<MainWindow> {
         IInspectable const&,
         Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const&);
     void ExitClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void ExportLogsClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void ExportLogsRevealClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void NavSelectionChanged(
         Microsoft::UI::Xaml::Controls::NavigationView const&,
         Microsoft::UI::Xaml::Controls::NavigationViewSelectionChangedEventArgs const&);
@@ -94,6 +96,12 @@ private:
     void HideStatus();
     void ShowError(winrt::hstring const& title, winrt::hstring const& message);
     winrt::fire_and_forget ConfirmExit();
+    winrt::fire_and_forget ExportLogsAsync();
+    void ShowExportResult(
+        Microsoft::UI::Xaml::Controls::InfoBarSeverity severity,
+        winrt::hstring const& title,
+        winrt::hstring const& message,
+        bool revealable);
     static DWORD ReadUserSetting(const wchar_t* name, DWORD fallback);
     static void WriteUserSetting(const wchar_t* name, DWORD value);
     static winrt::hstring ProviderErrorText(uint8_t error);
@@ -143,6 +151,9 @@ private:
     bool m_exitPending = false;
     bool m_trayConnected = false;
     bool m_exitDialogOpen = false;
+    bool m_exportInProgress = false;
+    // 上一次导出成功写出的 zip，供「打开所在文件夹」定位。
+    std::wstring m_lastExportPath;
     winrt::hstring m_statusTitle;
     winrt::hstring m_statusMessage;
     uint32_t m_penImageModelId = 0;

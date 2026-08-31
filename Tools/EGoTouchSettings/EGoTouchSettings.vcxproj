@@ -83,7 +83,7 @@
       <!-- GaokunHal.lib 用于直接读电池。电量、容量、健康度、循环次数都不需要提权，本进程
            自己读比经服务转一道更简单；唯独充电阈值要管理员权限，那一项仍走状态通道。
            hal 的构建目录按配置分开，两侧的 CRT 必须一致，否则 LNK2038。 -->
-      <AdditionalDependencies>advapi32.lib;dwmapi.lib;user32.lib;shell32.lib;version.lib;$(MSBuildThisFileDirectory)..\..\hal\build\$(Configuration)\GaokunHal.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>advapi32.lib;dwmapi.lib;user32.lib;shell32.lib;ole32.lib;version.lib;$(MSBuildThisFileDirectory)..\..\hal\build\$(Configuration)\GaokunHal.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <!-- 资源编译器不共用 ClCompile 的搜索路径，App.rc 要包含 Common\include 下的
          AppIconResource.h，这里得单独给一份。 -->
@@ -125,6 +125,7 @@
     </ClInclude>
     <ClInclude Include="AccessoryImageLoader.h" />
     <ClInclude Include="DeviceInfo.h" />
+    <ClInclude Include="LogExport.h" />
     <ClInclude Include="MainWindow.xaml.h">
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </ClInclude>
@@ -160,6 +161,7 @@
     </ClCompile>
     <ClCompile Include="AccessoryImageLoader.cpp" />
     <ClCompile Include="DeviceInfo.cpp" />
+    <ClCompile Include="LogExport.cpp" />
     <ClCompile Include="MainWindow.xaml.cpp">
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </ClCompile>

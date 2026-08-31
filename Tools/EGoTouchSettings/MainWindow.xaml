@@ -1219,6 +1219,49 @@
                             </StackPanel>
                         </StackPanel>
 
+                        <!-- 诊断排在项目、许可之前：关于页其余各组都是读的，只有这一组
+                             是用户要动手做的事，出问题时找它不该先滚一屏。 -->
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="诊断" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE896;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="运行日志" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            Text="打包服务与各硬件宿主的日志，随问题反馈一并提交。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <Button
+                                        x:Name="ExportLogsButton"
+                                        Grid.Column="2"
+                                        VerticalAlignment="Center"
+                                        Content="导出日志"
+                                        Click="ExportLogsClicked" />
+                                </Grid>
+                            </Border>
+                            <!-- 结果不走顶部那条 StatusInfoBar：那一条播报的是托盘连接状态，
+                                 每次刷新都会重写，导出的结果会被下一个 tick 抹掉。 -->
+                            <InfoBar
+                                x:Name="ExportLogsBar"
+                                IsOpen="False"
+                                IsClosable="True"
+                                Severity="Informational">
+                                <InfoBar.ActionButton>
+                                    <Button
+                                        x:Name="ExportLogsRevealButton"
+                                        Content="打开所在文件夹"
+                                        Visibility="Collapsed"
+                                        Click="ExportLogsRevealClicked" />
+                                </InfoBar.ActionButton>
+                            </InfoBar>
+                        </StackPanel>
+
                         <StackPanel Spacing="4">
                             <TextBlock Text="项目" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardStyle}">

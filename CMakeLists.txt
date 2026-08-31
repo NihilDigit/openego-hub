@@ -391,6 +391,8 @@ if(WIN32 AND MSVC)
         Tools/EGoTouchSettings/BatteryIndicator.xaml
         Tools/EGoTouchSettings/BatteryIndicator.xaml.cpp
         Tools/EGoTouchSettings/BatteryIndicator.xaml.h
+        Tools/EGoTouchSettings/LogExport.cpp
+        Tools/EGoTouchSettings/LogExport.h
         Tools/EGoTouchSettings/MainWindow.xaml
         Tools/EGoTouchSettings/MainWindow.xaml.cpp
         Tools/EGoTouchSettings/MainWindow.xaml.h
