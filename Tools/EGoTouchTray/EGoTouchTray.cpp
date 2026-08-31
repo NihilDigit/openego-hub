@@ -112,6 +112,9 @@ constexpr UINT kFadeOutMs      = 300;
 constexpr UINT kLeaseIntervalMs = 1000;
 constexpr ULONGLONG kSafeExitTimeoutMs = 20000;
 constexpr ULONGLONG kReaderReconnectMs = 5000;
+// 键盘开关等待回读确认的上限。服务下发命令后由宿主读回 MCU 再经快照回来，实测一秒以内；
+// 三秒是留给一次重试的余量，过了就当它没生效。
+constexpr ULONGLONG kKbdDetachPendingMs = 3000;
 
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT kTrayMenuExit = 100;
@@ -149,6 +152,13 @@ struct App {
     ULONGLONG lastConnectionNotificationTick = 0;
     ULONGLONG lastDeviationNotificationTick = 0;
     ULONGLONG lastKeyboardConnectionNotificationTick = 0;
+
+    // 「分离后保持无线连接」的在途请求。这个开关的真值在键盘固件里，一次点击要经服务、
+    // 命令管道、MCU 才回到快照，中间大约一秒。这段时间里菜单显示用户刚选的那个值：不这样
+    // 的话再打开菜单会看到对勾还在原处，看起来像是没点上。
+    bool kbdDetachPending = false;
+    bool kbdDetachPendingValue = false;
+    ULONGLONG kbdDetachPendingDeadline = 0;
 
     bool providerDesired = true;
     bool autoStart = true;
@@ -1262,6 +1272,17 @@ void GestureWatcherThread() {
 // ── channel ──────────────────────────────────────────────────────────────────
 
 void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload = 0);
+// 失败提示走托盘自己的气泡，不经 WinUI 那条通知链：那条链只有设置窗在跑时才有宿主，而
+// 「设置没生效」正是用户最可能只在托盘菜单里操作的一刻。
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* text);
+
+// 键盘开关没落地时的说明。分成两条是因为用户能做的事不同。
+void ReportKbdDetachFailure(bool unsupported) {
+    g_app.kbdDetachPending = false;
+    ShowTrayBalloon(L"键盘设置未生效",
+                    unsupported ? L"当前键盘固件不支持分离后保持无线连接。"
+                                : L"键盘组件无响应，设置未能写入。");
+}
 
 void PollChannel() {
     const ULONGLONG now = GetTickCount64();
@@ -1319,6 +1340,12 @@ void PollChannel() {
                 ShowWinUiNotification(EGoTouchTrayIpc::Notification::KeyboardConnected);
                 g_app.lastKeyboardConnectionNotificationTick = now;
             }
+        } else if (fresh.notificationKind ==
+                       PenStatus::NotificationKind::KbdDetachSupportFailed ||
+                   fresh.notificationKind ==
+                       PenStatus::NotificationKind::KbdDetachSupportUnsupported) {
+            ReportKbdDetachFailure(fresh.notificationKind ==
+                                   PenStatus::NotificationKind::KbdDetachSupportUnsupported);
         }
     } else if (hadBaseline && !wasCharging && nowCharging) {
         if (now - g_app.lastConnectionNotificationTick >= 1000) {
@@ -1340,6 +1367,17 @@ void PollChannel() {
         // 服务不再发布这一位（换了侧键模式，或笔断开）。基线作废，恢复发布时的第一份快照
         // 只用来重建基线——否则切回 ToggleEraser 就会凭空弹一次提示。
         g_app.prevEraserValid = false;
+    }
+
+    // 在途的键盘开关：等快照翻转到用户选的那个值才算落地。超时才回弹，回弹时说明原因——
+    // 悄悄弹回去正是这个开关此前看起来「点了没反应」的样子。
+    if (g_app.kbdDetachPending) {
+        if (fresh.hasKbdDetachSupport &&
+            fresh.kbdDetachSupport == g_app.kbdDetachPendingValue) {
+            g_app.kbdDetachPending = false;
+        } else if (now >= g_app.kbdDetachPendingDeadline) {
+            ReportKbdDetachFailure(false);
+        }
     }
 
     g_app.prevCharging = nowCharging;
@@ -1527,6 +1565,22 @@ void AddTrayIcon() {
     g_app.trayIconAdded = Shell_NotifyIconW(NIM_ADD, &g_app.trayIcon) != FALSE;
 }
 
+// 气泡另填一份 NOTIFYICONDATA，不复用 g_app.trayIcon：那一份还带着 NIF_ICON 与 NIF_TIP，
+// 每次换图标都要拿它去 NIM_MODIFY，把 NIF_INFO 留在里面会让同一条提示随后再弹一次。
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* text) {
+    if (!g_app.trayIconAdded) return;
+
+    NOTIFYICONDATAW balloon{};
+    balloon.cbSize = sizeof(balloon);
+    balloon.hWnd = g_app.trayIcon.hWnd;
+    balloon.uID = g_app.trayIcon.uID;
+    balloon.uFlags = NIF_INFO;
+    balloon.dwInfoFlags = NIIF_WARNING;
+    wcsncpy_s(balloon.szInfoTitle, title, _TRUNCATE);
+    wcsncpy_s(balloon.szInfo, text, _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &balloon);
+}
+
 void ReleaseTrayIcon() {
     if (g_app.trayIconAdded) {
         Shell_NotifyIconW(NIM_DELETE, &g_app.trayIcon);
@@ -1579,6 +1633,19 @@ bool SubmitKbdDetachSupportCommand(bool enabled) {
         g_app.control.Close();
         return false;
     }
+    return true;
+}
+
+// 键盘开关的唯一入口：托盘菜单和设置窗转发过来的命令都走这里，pending 态才只有一处维护。
+bool RequestKbdDetachSupport(bool enabled) {
+    if (!SubmitKbdDetachSupportCommand(enabled)) {
+        g_app.kbdDetachPending = false;
+        ShowTrayBalloon(L"键盘设置未生效", L"服务未响应，设置未能送达。");
+        return false;
+    }
+    g_app.kbdDetachPending = true;
+    g_app.kbdDetachPendingValue = enabled;
+    g_app.kbdDetachPendingDeadline = GetTickCount64() + kKbdDetachPendingMs;
     return true;
 }
 
@@ -1853,14 +1920,23 @@ void ShowTrayMenu() {
     // 键盘在不在，用 MCU 回报的在位状态判断；开关值是否已知另算。只看后者的话，键盘拔掉
     // 之后这一项仍然可点——那个标志只说明收到过一次应答，不会因为键盘离开而复位。
     {
+        // 读键盘的那个 hal 宿主还在不在。服务发布这一位之前（旧服务、或 touch_only）
+        // 读不到，此时按「在」处理，否则这一项会凭空变灰。
+        const bool hostAlive = !g_app.state.hasHostHealth || g_app.state.kbdHostHealthy;
         const bool kbdKnown =
-            connected && g_app.hasState &&
+            connected && g_app.hasState && hostAlive &&
             g_app.state.hasKbdPresent && g_app.state.kbdPresent &&
             g_app.state.hasKbdDetachSupport;
         UINT flags = MF_STRING;
-        if (!kbdKnown) flags |= MF_GRAYED;
-        if (kbdKnown && g_app.state.kbdDetachSupport) flags |= MF_CHECKED;
-        AppendMenuW(menu, flags, kTrayMenuKbdDetach, L"键盘分离后保持无线连接");
+        if (!kbdKnown && !g_app.kbdDetachPending) flags |= MF_GRAYED;
+        // 在途请求期间显示用户刚选的那个值，等快照回来再交还给真值。
+        const bool checked = g_app.kbdDetachPending
+            ? g_app.kbdDetachPendingValue
+            : (kbdKnown && g_app.state.kbdDetachSupport);
+        if (checked) flags |= MF_CHECKED;
+        AppendMenuW(menu, flags, kTrayMenuKbdDetach,
+                    hostAlive ? L"键盘分离后保持无线连接"
+                              : L"键盘分离后保持无线连接（键盘组件无响应）");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     // 与控制面板上那一项同名。两处指向同一个动作，叫法不同会让人以为是两件事。
@@ -1986,7 +2062,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case EGoTouchTrayIpc::Command::SetKeyboardWirelessOnDetach:
-            return SubmitKbdDetachSupportCommand(lParam != 0) ? 1 : 0;
+            return RequestKbdDetachSupport(lParam != 0) ? 1 : 0;
 
         case EGoTouchTrayIpc::Command::SetVendorServicesDisabled:
             return SubmitVendorServicesCommand(lParam != 0) ? 1 : 0;
@@ -2084,8 +2160,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ? PenControl::ProviderLeaseCommand::AcquireOrRenew
                     : PenControl::ProviderLeaseCommand::Release);
         } else if (id == kTrayMenuKbdDetach) {
-            // 提交完不动对勾，与双击行为同理：生效与否由服务和 MCU 决定，下一次轮询读回。
-            (void)SubmitKbdDetachSupportCommand(!g_app.state.kbdDetachSupport);
+            // 与双击行为不同，这一项要先显示成用户选的那个值：它的真值在键盘固件里，回读要
+            // 走服务、命令管道和 MCU，不显示在途态就会看到对勾原地不动。
+            const bool current = g_app.kbdDetachPending ? g_app.kbdDetachPendingValue
+                                                        : g_app.state.kbdDetachSupport;
+            (void)RequestKbdDetachSupport(!current);
         } else if (id == kTrayMenuEyeComfort) {
             // 与设置窗那条走同一个入口：色彩状态存在 HKCU，必须在用户会话里落地，服务的
             // hive 不是这一份。菜单每次现建，对勾下次打开时自然就对了。

@@ -43,6 +43,10 @@ public:
     static constexpr std::chrono::seconds kRestartWindow{60};
     static constexpr int kMaxRestartsPerWindow = 3;
     static constexpr std::chrono::seconds kRestartCooldown{30};
+    // 接管失败之后的冷却。托盘每秒续租一次，而一次失败的接管要停原厂服务、起宿主、再把
+    // 原厂请回来，全程可能十几秒；不冷却的话下一次续租又会从头来一遍，原厂服务被反复
+    // 起停，触控在这段时间里时有时无。比崩溃冷却短得多：失败常常是暂时的。
+    static constexpr std::chrono::seconds kAcquireFailureCooldown{10};
 
     TouchProviderCoordinator(TouchProviderOperations operations,
                              StateChanged stateChanged,

@@ -2,6 +2,7 @@
 
 #include "ServiceLifecycleCoordinator.h"
 #include "ConfigRuntime.h"
+#include "HostSupervisor.h"
 #include "SystemStateMonitor.h"
 #include "runtime/DeviceRuntime.h"
 #include "penevt/PenEventBridge.h"
@@ -35,11 +36,13 @@
 #include <cwchar>
 #include <exception>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace Service {
@@ -64,6 +67,12 @@ struct ServiceHost::Impl {
     std::atomic<uint32_t> m_notificationSequence{0};
     std::atomic<PenStatus::NotificationKind> m_notificationKind{
         PenStatus::NotificationKind::None};
+    // 一次瞬时通知。kind 先落定再递增序号：托盘只在序号变化时才去读 kind，反过来写会让它
+    // 读到上一条的类型。
+    void RaiseNotification(PenStatus::NotificationKind kind) {
+        m_notificationKind.store(kind, std::memory_order_release);
+        m_notificationSequence.fetch_add(1, std::memory_order_acq_rel);
+    }
     // 键盘「分离后无线连接」的镜像。真值在 MCU 侧，服务只缓存最近一次应答：写入方是
     // PenEventBridge 的读线程，读取方是 DeviceRuntime 回调线程上的状态发布。
     // 未收到过应答时 known 为 false，此时状态通道不置 has 位，托盘据此把该项显示为不可用。
@@ -94,6 +103,17 @@ struct ServiceHost::Impl {
         if (threshold.IsManual()) packed |= kChargeLimitManual;
         m_chargeLimitCache.store(packed, std::memory_order_relaxed);
     }
+    // 两个 hal 宿主各自的「应当在运行」意图与重启预算。只由 AccessoryLoop 这一个线程读写，
+    // 结论经下面两个原子发布给别的线程。
+    HostSupervisor m_penSupervisor{"pen"};
+    HostSupervisor m_kbdSupervisor{"keyboard"};
+    // 宿主此刻可不可信。写入方是 AccessoryLoop，读取方是状态发布和控制线程。
+    //
+    // 宿主死掉时它的快照并不消失：seqlock 停在最后一帧，读者拿到的是一份自洽的旧状态，
+    // 于是托盘继续显示键盘的电量和开关，用户点开关也毫无反应。宁可发布「未知」。
+    std::atomic<bool> m_penHostHealthy{false};
+    std::atomic<bool> m_kbdHostHealthy{false};
+
     // 键盘状态镜像。含字符串，用不了原子，改由互斥保护：写入方是 MCU 读线程，
     // 读取方是 DeviceRuntime 回调线程上的状态发布。
     std::mutex m_kbdStateMutex;
@@ -103,6 +123,10 @@ struct ServiceHost::Impl {
     std::chrono::steady_clock::time_point m_inputSuppressionDeadline{};
     // 侧键模式有 IPC 配置重载和托盘控制通道两个写入方，串行化它们对 m_configState 的读改写。
     std::mutex m_penButtonApplyMutex;
+    // 六条 hal 通道的指针本身。只有 AccessoryLoop 改它们（宿主重启后整体换掉），而状态发布
+    // 在 DeviceRuntime 回调线程上读快照、控制线程写命令，指针必须串行化。锁内的动作都是
+    // 一次 memcpy 或一次非阻塞管道写，不会把持有者拖住。
+    std::mutex m_accessoryChannelMutex;
     std::unique_ptr<Host::SystemStateMonitor> m_sysMonitor;
     // Serializes startup-time IPC access with Pen object publication.
     std::mutex m_penSubsystemMutex;
@@ -365,6 +389,12 @@ template <size_t N>
 std::string_view CStrArrayView(const char (&value)[N]) {
     const auto* end = std::find(value, value + N, '\0');
     return std::string_view(value, static_cast<size_t>(end - value));
+}
+
+// 宿主被 CREATE_NO_WINDOW 拉起，没有控制台，日志只能落盘，级别跟随服务。首次启动与巡检
+// 里的重启必须传同一份参数，否则重启之后宿主的日志级别会悄悄变回默认值。
+std::wstring HostLogArgs() {
+    return std::wstring(L"--log-level ") + Common::Logger::MinLevelName();
 }
 
 RuntimePolicyEvent TranslateSystemStateEvent(const Host::SystemStateEvent& event) {
@@ -639,71 +669,69 @@ bool ServiceHost::StartPenSubsystem() {
         // PenService.dll 与 KeyboardService.dll。型号识别、按键语义、固件串格式因此都留在
         // 厂商实现里，本仓库不再维护一份自己的协议解析——那份解析曾把 modelId 282 认成
         // CD52，而它其实是 M-Pen 2。
+        //
+        // 这一段的每条失败路径都只降级，不再让 Start 返回 false。缺一个 KeyboardService.dll
+        // 就整个服务回滚的话，用户丢的是触控、笔手势和托盘，而不只是键盘那一项。
         const std::wstring penHostPath = ResolveHostPath(L"GaokunPenHost.exe");
         const std::wstring kbdHostPath = ResolveHostPath(L"GaokunKeyboardHost.exe");
         if (penHostPath.empty() || kbdHostPath.empty()) {
             LOG_ERROR("Service", __func__, "MCU",
-                      "gaokun-hal accessory hosts not found next to the service.");
-            return false;
+                      "gaokun-hal accessory hosts not found next to the service "
+                      "(pen={}, keyboard={}); accessory state will be unavailable.",
+                      !penHostPath.empty(), !kbdHostPath.empty());
         }
 
-        // 宿主被 CREATE_NO_WINDOW 拉起，它自己的输出没有去处，只能落到
-        // ProgramData\OpenEGoHub\logs。级别跟随服务，免得两边各调一次。
-        const std::wstring hostLogArgs =
-            std::wstring(L"--log-level ") + Common::Logger::MinLevelName();
+        const std::wstring hostLogArgs = HostLogArgs();
+        const auto now = HostSupervisor::Clock::now();
 
-        const auto penStart = m_penHost.Start(penHostPath, hostLogArgs);
-        if (penStart != Gaokun::Pen::StartResult::Started &&
-            penStart != Gaokun::Pen::StartResult::AlreadyRunning) {
-            // 立刻退出几乎总是因为 PC Manager 的 Plugins 目录被删过，宿主会自己说明。
-            LOG_ERROR("Service", __func__, "MCU",
-                      "Pen host failed to start (result={}, exit={}).",
-                      static_cast<int>(penStart), m_penHost.ExitCode());
-            return false;
+        if (!penHostPath.empty()) {
+            const auto penStart = m_penHost.Start(penHostPath, hostLogArgs);
+            if (penStart != Gaokun::Pen::StartResult::Started &&
+                penStart != Gaokun::Pen::StartResult::AlreadyRunning) {
+                // 立刻退出几乎总是因为 PC Manager 的 Plugins 目录被删过，宿主会自己说明。
+                LOG_ERROR("Service", __func__, "MCU",
+                          "Pen host failed to start (result={}, exit={}); the supervisor "
+                          "will retry it.",
+                          static_cast<int>(penStart), m_penHost.ExitCode());
+            }
+            // 意图与「这一次起没起来」无关：起不来的宿主同样归巡检管，预算内它会被重试。
+            m_impl->m_penSupervisor.SetDesiredRunning(true, now);
         }
 
-        const auto kbdStart = m_kbdHost.Start(kbdHostPath, hostLogArgs);
-        if (kbdStart != Gaokun::Keyboard::StartResult::Started &&
-            kbdStart != Gaokun::Keyboard::StartResult::AlreadyRunning) {
-            LOG_ERROR("Service", __func__, "MCU",
-                      "Keyboard host failed to start (result={}, exit={}).",
-                      static_cast<int>(kbdStart), m_kbdHost.ExitCode());
-            return false;
+        if (!kbdHostPath.empty()) {
+            const auto kbdStart = m_kbdHost.Start(kbdHostPath, hostLogArgs);
+            if (kbdStart != Gaokun::Keyboard::StartResult::Started &&
+                kbdStart != Gaokun::Keyboard::StartResult::AlreadyRunning) {
+                LOG_ERROR("Service", __func__, "MCU",
+                          "Keyboard host failed to start (result={}, exit={}); the supervisor "
+                          "will retry it.",
+                          static_cast<int>(kbdStart), m_kbdHost.ExitCode());
+            }
+            m_impl->m_kbdSupervisor.SetDesiredRunning(true, now);
         }
 
-        // 宿主刚拉起来，映射与管道未必已经建好，所以这五条通道此刻打不开是常态。
-        // 这里只试一次：五条各退让 25 次 200 毫秒，最坏能把启动路径占住 25 秒，而
-        // ServiceMain 要在这之前报 RUNNING。真正的重试交给 AccessoryLoop 的懒打开。
+        // 宿主刚拉起来，映射与管道未必已经建好，所以这六条通道此刻打不开是常态。这里只试
+        // 一次，退让留给 AccessoryLoop 每轮的补开：在启动路径上逐条重试会把 ServiceMain
+        // 报 RUNNING 的时刻推后几十秒，安装程序于是停在「正在启动服务」。
         //
         // 打不开不算致命：快照读不到时上层显示「未知」，比让整个服务起不来要好。
-        const bool penSnapshotsOpen = m_penSnapshots.Open();
-        const bool penEventsOpen = m_penEvents.Open();
-        const bool penCommandsOpen = m_penCommands.Open();
-        const bool kbdSnapshotsOpen = m_kbdSnapshots.Open();
-        const bool kbdEventsOpen = m_kbdEvents.Open();
-        if (!penSnapshotsOpen || !penEventsOpen || !penCommandsOpen ||
-            !kbdSnapshotsOpen || !kbdEventsOpen) {
-            LOG_WARN("Service", __func__, "MCU",
-                     "Accessory channels not ready yet (penSnapshots={}, penEvents={}, "
-                     "penCommands={}, kbdSnapshots={}, kbdEvents={}).",
-                     penSnapshotsOpen, penEventsOpen, penCommandsOpen,
-                     kbdSnapshotsOpen, kbdEventsOpen);
-        }
+        OpenAccessoryChannels();
 
-        if (penCommandsOpen) {
-            m_deviceRuntime->SetPenCurrentFuncCommandCallback(
-                [this](bool eraser) { return m_penCommands.SetCurrentFunc(eraser); });
-        } else {
-            LOG_WARN("Service", __func__, "MCU",
-                     "Pen host command channel unavailable; native eraser state will not change.");
-        }
+        m_deviceRuntime->SetPenCurrentFuncCommandCallback([this](bool eraser) {
+            // 通道可能刚被补开、也可能刚随宿主重启换掉，所以每次调用现取。
+            std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+            return m_penCommands && m_penCommands->SetCurrentFunc(eraser);
+        });
 
         m_accessoryStop.store(false, std::memory_order_release);
         m_accessoryThread = std::thread([this] { AccessoryLoop(); });
 
         StartPenEventBridge();
 
-        LOG_INFO("Service", __func__, "MCU", "gaokun-hal pen and keyboard hosts started.");
+        LOG_INFO("Service", __func__, "MCU",
+                 "Accessory subsystem started (penHost={}, kbdHost={}); the supervisor now "
+                 "owns both.",
+                 m_penHost.IsRunning(), m_kbdHost.IsRunning());
         return true;
     } catch (...) {
         LOG_ERROR("Service", __func__, "MCU", "Pen subsystem startup threw an exception.");
@@ -723,6 +751,13 @@ bool ServiceHost::Start() {
             m_runtimeMode = m_configState.mode;
             LOG_INFO("Service", "Start", "Boot", "Service mode: {}, AutoMode: {}",
                      ServiceModeToConfig(m_configState.mode), m_configState.autoMode);
+
+            // 厂商服务的现状记一条。「上次禁用过、这次重启后被谁恢复了」和「本来就没禁用」
+            // 在日志里长得一样，事后只能靠这条基线区分。
+            const auto vendor = VendorServices::Query();
+            LOG_INFO("Service", "Start", "Vendor",
+                     "Vendor services: {} present, {} disabled, {} running.",
+                     vendor.total, vendor.disabled, vendor.running);
 
             if (!ServiceLifecycleCoordinator::Start(*this)) {
                 return false;
@@ -769,18 +804,18 @@ void ServiceHost::AccessoryLoop() {
             chargeLimitRead = true;
         }
 
+        SuperviseAccessoryHosts();
+        OpenAccessoryChannels();
+
+        // 通道指针只有本线程改，读它们不必上锁；别的线程用同一批指针时会去拿那把互斥。
         Gaokun::Pen::Event penEvent{};
-        while (m_penEvents.Poll(penEvent)) {
+        while (m_penEvents && m_penEvents->Poll(penEvent)) {
             using K = Gaokun::Pen::EventKind;
             const auto kind = static_cast<K>(penEvent.kind);
             if (kind == K::BatteryReminder) {
-                m_impl->m_notificationKind.store(PenStatus::NotificationKind::PenConnected,
-                                                 std::memory_order_release);
-                m_impl->m_notificationSequence.fetch_add(1, std::memory_order_acq_rel);
+                m_impl->RaiseNotification(PenStatus::NotificationKind::PenConnected);
             } else if (kind == K::DeviationReminder) {
-                m_impl->m_notificationKind.store(PenStatus::NotificationKind::PenDeviation,
-                                                 std::memory_order_release);
-                m_impl->m_notificationSequence.fetch_add(1, std::memory_order_acq_rel);
+                m_impl->RaiseNotification(PenStatus::NotificationKind::PenDeviation);
             } else if (kind == K::CurrentFunc) {
                 // 这是 CommandSendPenCurrentFunc 的 MCU 回显，不是物理双击。物理手势只由
                 // PenEventBridge 分派；把回显再送给托盘会让一次双击产生两个 UI 边沿。
@@ -790,18 +825,137 @@ void ServiceHost::AccessoryLoop() {
         }
 
         Gaokun::Keyboard::Event kbdEvent{};
-        while (m_kbdEvents.Poll(kbdEvent)) {
+        while (m_kbdEvents && m_kbdEvents->Poll(kbdEvent)) {
             using K = Gaokun::Keyboard::EventKind;
-            if (static_cast<K>(kbdEvent.kind) == K::ConnectResult) {
-                m_impl->m_notificationKind.store(PenStatus::NotificationKind::KeyboardConnected,
-                                                 std::memory_order_release);
-                m_impl->m_notificationSequence.fetch_add(1, std::memory_order_acq_rel);
+            const auto kind = static_cast<K>(kbdEvent.kind);
+            if (kind == K::ConnectResult) {
+                m_impl->RaiseNotification(PenStatus::NotificationKind::KeyboardConnected);
+            } else if (kind == K::DetachSupportResult) {
+                // 命令有没有落地只有这条事件说得准。DetachSupportChanged 是厂商回调的回显，
+                // 分不出「谁改的」和「改成了没有」。
+                if (kbdEvent.value >= 0) {
+                    LOG_INFO("Service", __func__, "MCU",
+                             "Keyboard detach support is now {}.",
+                             kbdEvent.value != 0 ? "enabled" : "disabled");
+                } else {
+                    LOG_WARN("Service", __func__, "MCU",
+                             "Keyboard detach support command failed (result={}).",
+                             kbdEvent.value);
+                    m_impl->RaiseNotification(
+                        kbdEvent.value == -1
+                            ? PenStatus::NotificationKind::KbdDetachSupportUnsupported
+                            : PenStatus::NotificationKind::KbdDetachSupportFailed);
+                }
             }
         }
 
         PublishStatusSnapshot();
         Sleep(250);
     }
+}
+
+// 巡检两个 hal 宿主。判死的证据有两条：进程没了，或者心跳停了——宿主进程还在而它内部的
+// MCU 循环已经停住时，快照的 seqlock 停在最后一帧，只有心跳分辨得出来。
+void ServiceHost::SuperviseAccessoryHosts() {
+    const auto now = HostSupervisor::Clock::now();
+
+    std::optional<uint32_t> penHeartbeat;
+    std::optional<uint32_t> kbdHeartbeat;
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+        Gaokun::Pen::Snapshot pen{};
+        if (m_penSnapshots && m_penSnapshots->Read(pen)) penHeartbeat = pen.heartbeat;
+        Gaokun::Keyboard::Snapshot kbd{};
+        if (m_kbdSnapshots && m_kbdSnapshots->Read(kbd)) kbdHeartbeat = kbd.heartbeat;
+    }
+
+    const auto penAction =
+        m_impl->m_penSupervisor.Tick(now, m_penHost.IsRunning(), penHeartbeat);
+    m_impl->m_penHostHealthy.store(m_impl->m_penSupervisor.Healthy(),
+                                  std::memory_order_release);
+    if (penAction == HostAction::EnterCooldown) {
+        LOG_ERROR("Service", __func__, "MCU",
+                  "Pen host restarted too often; leaving it down for {} s.",
+                  HostSupervisor::kRestartCooldown.count());
+    } else if (penAction == HostAction::Restart) {
+        LOG_ERROR("Service", __func__, "MCU",
+                  "Pen host is not responding (running={}, exit={}); restarting it.",
+                  m_penHost.IsRunning(), m_penHost.ExitCode());
+        const std::wstring path = ResolveHostPath(L"GaokunPenHost.exe");
+        bool started = false;
+        if (path.empty()) {
+            LOG_ERROR("Service", __func__, "MCU", "GaokunPenHost.exe is no longer where it was.");
+        } else {
+            // 僵住但没退出的宿主必须先停掉，否则 Start 只会回一句 AlreadyRunning。
+            (void)m_penHost.Stop();
+            const auto result = m_penHost.Start(path, HostLogArgs());
+            started = result == Gaokun::Pen::StartResult::Started ||
+                      result == Gaokun::Pen::StartResult::AlreadyRunning;
+        }
+        // 旧句柄对着上一条命的宿主：映射和管道的名字虽然相同，句柄却仍指向已经消失的那份
+        // 内核对象，读永远读不到新数据。整体丢掉，下一轮补开。
+        if (started) ClosePenChannels();
+        m_impl->m_penSupervisor.NoteRestartResult(started, now);
+    }
+
+    const auto kbdAction =
+        m_impl->m_kbdSupervisor.Tick(now, m_kbdHost.IsRunning(), kbdHeartbeat);
+    m_impl->m_kbdHostHealthy.store(m_impl->m_kbdSupervisor.Healthy(),
+                                  std::memory_order_release);
+    if (kbdAction == HostAction::EnterCooldown) {
+        LOG_ERROR("Service", __func__, "MCU",
+                  "Keyboard host restarted too often; leaving it down for {} s.",
+                  HostSupervisor::kRestartCooldown.count());
+    } else if (kbdAction == HostAction::Restart) {
+        LOG_ERROR("Service", __func__, "MCU",
+                  "Keyboard host is not responding (running={}, exit={}); restarting it.",
+                  m_kbdHost.IsRunning(), m_kbdHost.ExitCode());
+        const std::wstring path = ResolveHostPath(L"GaokunKeyboardHost.exe");
+        bool started = false;
+        if (path.empty()) {
+            LOG_ERROR("Service", __func__, "MCU",
+                      "GaokunKeyboardHost.exe is no longer where it was.");
+        } else {
+            (void)m_kbdHost.Stop();
+            const auto result = m_kbdHost.Start(path, HostLogArgs());
+            started = result == Gaokun::Keyboard::StartResult::Started ||
+                      result == Gaokun::Keyboard::StartResult::AlreadyRunning;
+        }
+        if (started) CloseKeyboardChannels();
+        m_impl->m_kbdSupervisor.NoteRestartResult(started, now);
+    }
+}
+
+void ServiceHost::OpenAccessoryChannels() {
+    std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+    const auto tryOpen = [](auto& channel, const char* name) {
+        if (channel) return;
+        using Channel = typename std::remove_reference_t<decltype(channel)>::element_type;
+        auto fresh = std::make_unique<Channel>();
+        if (!fresh->Open()) return;
+        channel = std::move(fresh);
+        LOG_INFO("Service", "OpenAccessoryChannels", "MCU", "Accessory channel {} opened.", name);
+    };
+    tryOpen(m_penSnapshots, "penSnapshots");
+    tryOpen(m_penEvents, "penEvents");
+    tryOpen(m_penCommands, "penCommands");
+    tryOpen(m_kbdSnapshots, "kbdSnapshots");
+    tryOpen(m_kbdEvents, "kbdEvents");
+    tryOpen(m_kbdCommands, "kbdCommands");
+}
+
+void ServiceHost::ClosePenChannels() {
+    std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+    m_penSnapshots.reset();
+    m_penEvents.reset();
+    m_penCommands.reset();
+}
+
+void ServiceHost::CloseKeyboardChannels() {
+    std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+    m_kbdSnapshots.reset();
+    m_kbdEvents.reset();
+    m_kbdCommands.reset();
 }
 
 // 侧键双击的事件源。厂商的 PenService.dll 提供不了它：那边的 0x2F 回调只是
@@ -844,6 +998,14 @@ void ServiceHost::StopPenSubsystem() {
         m_accessoryStop.store(true, std::memory_order_release);
         m_accessoryThread.join();
     }
+    // 意图先撤，否则这一轮停机会被巡检当成宿主意外死亡。巡检线程此刻已经退出，写它是安全的。
+    const auto now = HostSupervisor::Clock::now();
+    m_impl->m_penSupervisor.SetDesiredRunning(false, now);
+    m_impl->m_kbdSupervisor.SetDesiredRunning(false, now);
+    m_impl->m_penHostHealthy.store(false, std::memory_order_release);
+    m_impl->m_kbdHostHealthy.store(false, std::memory_order_release);
+    ClosePenChannels();
+    CloseKeyboardChannels();
     (void)m_penHost.Stop();
     (void)m_kbdHost.Stop();
     LOG_INFO("Service", __func__, "MCU", "gaokun-hal accessory hosts stopped.");
@@ -933,8 +1095,23 @@ namespace {
 void ServiceHost::PublishStatusSnapshot() {
     PenStatus::State out{};
 
+    // 宿主死了它的快照并不会消失：seqlock 停在最后一帧，读者拿到的是一份自洽的旧状态。
+    // 转发它等于告诉托盘键盘还在、电量还是那么多、开关还是那个值，而实际上没有人在读 MCU。
+    // 巡检判定宿主不健康时这一整段就不填，has 位保持为假，托盘据此显示为未知。
+    const bool penHealthy = m_impl->m_penHostHealthy.load(std::memory_order_acquire);
+    const bool kbdHealthy = m_impl->m_kbdHostHealthy.load(std::memory_order_acquire);
+
     Gaokun::Pen::Snapshot pen{};
-    if (m_penSnapshots.Read(pen)) {
+    Gaokun::Keyboard::Snapshot kbd{};
+    bool penRead = false;
+    bool kbdRead = false;
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+        penRead = penHealthy && m_penSnapshots && m_penSnapshots->Read(pen);
+        kbdRead = kbdHealthy && m_kbdSnapshots && m_kbdSnapshots->Read(kbd);
+    }
+
+    if (penRead) {
         using F = Gaokun::Pen::Flag;
         const auto has = [&](F f) { return (pen.flags & static_cast<uint32_t>(f)) != 0; };
         out.hasBatteryLevel = has(F::HasBattery);
@@ -958,8 +1135,7 @@ void ServiceHost::PublishStatusSnapshot() {
         CopyCString(out.modelName, sizeof(out.modelName), pen.modelName);
     }
 
-    Gaokun::Keyboard::Snapshot kbd{};
-    if (m_kbdSnapshots.Read(kbd)) {
+    if (kbdRead) {
         using F = Gaokun::Keyboard::Flag;
         const auto has = [&](F f) { return (kbd.flags & static_cast<uint32_t>(f)) != 0; };
         out.hasKbdPresent = has(F::HasConnected);
@@ -991,6 +1167,13 @@ void ServiceHost::PublishStatusSnapshot() {
     out.providerError = static_cast<uint8_t>(providerError);
     out.hasInputSuppressed = true;
     out.inputSuppressed = m_impl->m_inputSuppressed.load(std::memory_order_acquire);
+
+    // 宿主健康与否本身也发布出去。托盘要区分「键盘不在」和「读键盘的那个进程没了」：前者
+    // 该把开关显示成不可用，后者还要连带说明为什么点了没反应。touch_only 不启动这两个宿主，
+    // 也就没有可发布的判定。
+    out.hasHostHealth = m_runtimeMode == ServiceMode::Full;
+    out.penHostHealthy = penHealthy;
+    out.kbdHostHealthy = kbdHealthy;
 
     // 橡皮态只有 DeviceRuntime 知道：它由 MCU 的 0x7F EraserToggle 和 ToggleEraser 模式下的
     // 双击共同维护，而厂商的 PenService.dll 根本不暴露 EraserToggle。这里一度改用
@@ -1224,18 +1407,30 @@ void ServiceHost::HandlePenControlCommand(const PenControl::Command& command) {
                      "Rejecting unknown keyboard detach support command {}.",
                      static_cast<unsigned>(command.kbdDetachSupport));
         } else {
-            // 交给 gaokun-hal 的键盘组件落地。它内部会读回确认，实际值随后经快照回到通道。
-            const std::wstring host = ResolveHostPath(L"GaokunKeyboardHost.exe");
-            if (host.empty()) {
-                LOG_WARN("Service", __func__, "PenControl",
-                         "Dropping keyboard detach support command: hal keyboard host not found.");
-            } else if (!Gaokun::Keyboard::SetDetachSupport(host, enable)) {
-                LOG_WARN("Service", __func__, "PenControl",
-                         "Keyboard detach support set to {} failed.",
-                         enable ? "enabled" : "disabled");
+            // 常驻宿主的命令管道，写一次就返回。这里不能等：本线程同时在给触控租约打点，
+            // 阻塞十秒会让租约被判过期，触控当场交还原厂。
+            //
+            // 一次性宿主那条退路也因此不再走。它要另起一个进程、最长等十秒，而那个第二实例
+            // 还会和常驻宿主抢同一个 MCU 端点。宿主起不来时改这个开关本来就不会成功，
+            // 不如当场告诉用户。
+            bool sent = false;
+            if (m_impl->m_kbdHostHealthy.load(std::memory_order_acquire)) {
+                std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+                sent = m_kbdCommands && m_kbdCommands->SetDetachSupport(enable);
             }
-            // 这里不补发 Get：hal 的组件内部已经读回确认，实际值经快照回流到状态通道。
-            // 本次调用返回时状态通道还是旧值，这不是漏更新。
+            if (sent) {
+                // 这里不补发 Get：宿主内部会读回确认，实际值经快照回流到状态通道，落地结果
+                // 另经 DetachSupportResult 事件回来。本次调用返回时通道还是旧值，不是漏更新。
+                LOG_INFO("Service", __func__, "PenControl",
+                         "Keyboard detach support command sent ({}).",
+                         enable ? "enable" : "disable");
+            } else {
+                LOG_WARN("Service", __func__, "PenControl",
+                         "Dropping keyboard detach support command: the keyboard host is not "
+                         "available.");
+                m_impl->RaiseNotification(PenStatus::NotificationKind::KbdDetachSupportFailed);
+                RepublishPenStatus();
+            }
         }
     }
 

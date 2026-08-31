@@ -4,6 +4,7 @@
 
 #include "ServiceEntry.h"
 #include "ServiceShell.h"
+#include "VendorServices.h"
 #include "Logger.h"
 #if EGOTOUCH_SERVICE_ENABLE_IPC
 #include "GuiLogSink.h"
@@ -108,6 +109,14 @@ static bool UninstallService() {
     BOOL ok = DeleteService(svc);
     CloseServiceHandle(svc);
     CloseServiceHandle(scm);
+
+    // 卸载要把华为的后台服务一并还回去。禁用状态记在注册表里，本服务删掉之后没有任何人
+    // 会再去恢复它们，用户拿到的是一台既没有 OpenEGo Hub 也没有原厂后台的机器。
+    if (!Service::VendorServices::RestoreAll()) {
+        wprintf(L"[WARN] Some vendor services could not be restored.\n");
+    } else {
+        wprintf(L"[OK] Vendor services restored.\n");
+    }
 
     if (ok) {
         wprintf(L"[OK] Service uninstalled.\n");

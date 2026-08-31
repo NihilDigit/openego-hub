@@ -98,13 +98,19 @@ private:
 
     // 笔与键盘的 MCU 通道同样来自 gaokun-hal：那边直接驱动厂商的 PenService.dll 与
     // KeyboardService.dll，型号识别与按键语义都留在厂商实现里，不必在本仓库重新推导一遍。
+    //
+    // 六条通道都用 unique_ptr 持有：宿主重启之后旧句柄指着已经死掉的那个进程，读永远读不到
+    // 新数据，必须整体丢掉重开。这些通道类没有 Close()，析构才关句柄，直接再 Open 一次会
+    // 把旧句柄漏掉。空指针即「未打开」，AccessoryLoop 每轮据此补开一次。
     Gaokun::Pen::HostController m_penHost;
-    Gaokun::Pen::SnapshotReader m_penSnapshots;
-    Gaokun::Pen::EventReader m_penEvents;
-    Gaokun::Pen::CommandWriter m_penCommands;
+    std::unique_ptr<Gaokun::Pen::SnapshotReader> m_penSnapshots;
+    std::unique_ptr<Gaokun::Pen::EventReader> m_penEvents;
+    std::unique_ptr<Gaokun::Pen::CommandWriter> m_penCommands;
     Gaokun::Keyboard::HostController m_kbdHost;
-    Gaokun::Keyboard::SnapshotReader m_kbdSnapshots;
-    Gaokun::Keyboard::EventReader m_kbdEvents;
+    std::unique_ptr<Gaokun::Keyboard::SnapshotReader> m_kbdSnapshots;
+    std::unique_ptr<Gaokun::Keyboard::EventReader> m_kbdEvents;
+    // 常驻键盘宿主的命令管道。分离开关经它下发，不再另起一个一次性实例去抢同一个 MCU 端点。
+    std::unique_ptr<Gaokun::Keyboard::CommandWriter> m_kbdCommands;
 
     // 轮询两条通道并转发到 PenStatusChannel。共享内存快照本身就是可重复读的，所以这里
     // 用轮询而不是等通知：错过一轮没有代价，而少一个跨进程的唤醒路径就少一处可能卡住的地方。
@@ -116,6 +122,12 @@ private:
     [[nodiscard]] static std::wstring ResolveThpHostPath();
 
     void AccessoryLoop();
+    // 巡检一个 hal 宿主：判死、按预算重启、重启后重开它的通道。
+    void SuperviseAccessoryHosts();
+    // 未打开的通道补开一次。宿主刚拉起时映射和管道还没建好，打不开是常态。
+    void OpenAccessoryChannels();
+    void CloseKeyboardChannels();
+    void ClosePenChannels();
     // 状态快照的唯一构造点，见实现处的说明。
     void PublishStatusSnapshot();
 

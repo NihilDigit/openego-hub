@@ -347,6 +347,11 @@ bool Writer::Publish(const State& state) {
     staged.kbdBatteryLevel = state.kbdBatteryLevel;
     staged.chargeLimit = state.chargeLimit;
     staged.notificationKind = static_cast<uint8_t>(state.notificationKind);
+    if (state.hasHostHealth) {
+        staged.hostHealth = kHostHealthValid;
+        if (state.penHostHealthy) staged.hostHealth |= kHostHealthPen;
+        if (state.kbdHostHealthy) staged.hostHealth |= kHostHealthKbd;
+    }
     staged.updatedAtUnixMs = NowUnixMs();
     std::strncpy(staged.modelName, state.modelName, sizeof(staged.modelName) - 1);
     std::strncpy(staged.penFirmware, state.penFirmware, sizeof(staged.penFirmware) - 1);
@@ -464,6 +469,9 @@ bool Reader::Read(State& out) const {
             candidate.providerError = copy.providerError;
             candidate.kbdBatteryLevel = copy.kbdBatteryLevel;
             candidate.chargeLimit = copy.chargeLimit;
+            candidate.hasHostHealth = (copy.hostHealth & kHostHealthValid) != 0;
+            candidate.penHostHealthy = (copy.hostHealth & kHostHealthPen) != 0;
+            candidate.kbdHostHealthy = (copy.hostHealth & kHostHealthKbd) != 0;
             candidate.modelId = copy.modelId;
             candidate.notificationSequence = copy.notificationSequence;
             candidate.notificationKind = static_cast<NotificationKind>(copy.notificationKind);

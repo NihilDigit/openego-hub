@@ -35,6 +35,7 @@ bool TouchProviderCoordinator::AcquireOrRenew(Clock::time_point now) {
     }
     if (SwitchToEGo()) return true;
     m_hasLease = false;
+    m_egoCooldownUntil = now + kAcquireFailureCooldown;
     return false;
 }
 

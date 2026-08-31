@@ -221,6 +221,27 @@ void TestReleaseClearsTheCooldown() {
             "an explicit release clears the cooldown");
 }
 
+// 接管失败之后托盘并不知情，它每秒照常续租一次。冷却挡住的是「停原厂、起宿主、再把原厂
+// 请回来」这一整套动作被每秒重演一遍——那段时间里触控时有时无。
+void TestAcquireFailureCoolsDown() {
+    Fixture f;
+    f.startEGo = false;
+    auto coordinator = f.Make();
+    auto now = TouchProviderCoordinator::Clock::time_point{} + std::chrono::hours(1);
+
+    Require(!coordinator.AcquireOrRenew(now), "precondition: the acquire fails");
+    const auto callsAfterFailure = f.calls.size();
+
+    now += std::chrono::seconds(1);
+    Require(!coordinator.AcquireOrRenew(now), "renewals stay refused during the cooldown");
+    Require(f.calls.size() == callsAfterFailure,
+            "no second switch attempt is made while cooling down");
+
+    now += TouchProviderCoordinator::kAcquireFailureCooldown;
+    f.startEGo = true;
+    Require(coordinator.AcquireOrRenew(now), "the cooldown expires and takeover is retried");
+}
+
 } // namespace
 
 int main() {
@@ -235,6 +256,7 @@ int main() {
         TestRepeatedDeathFallsBackToHuaweiAndCoolsDown();
         TestRestartBudgetIsPerWindow();
         TestReleaseClearsTheCooldown();
+        TestAcquireFailureCoolsDown();
         std::cout << "[TEST] Touch provider coordinator tests passed.\n";
         return 0;
     } catch (const std::exception& error) {

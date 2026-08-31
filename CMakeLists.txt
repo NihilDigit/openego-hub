@@ -546,6 +546,20 @@ if (EGO_BUILD_TESTS)
         TIMEOUT 10
     )
 
+    # 纯头文件的逻辑类，测试只编自己那一个 cpp。
+    add_executable(HostSupervisorTest
+        EGoTouchService/tests/unit/HostSupervisorTest.cpp
+    )
+    target_include_directories(HostSupervisorTest PRIVATE
+        "${SERVICE_ROOT}/include"
+        "${COMMON_ROOT}/include"
+    )
+    add_test(NAME HostSupervisorTest COMMAND HostSupervisorTest)
+    set_tests_properties(HostSupervisorTest PROPERTIES
+        LABELS "service;unit;device-free"
+        TIMEOUT 10
+    )
+
     add_executable(HostSystemStateMonitorTest
         EGoTouchService/Host/tests/SystemStateMonitorNamedEventTest.cpp
     )

@@ -52,7 +52,21 @@ enum class NotificationKind : uint8_t {
     PenConnected,
     PenDeviation,
     KeyboardConnected,
+    // 键盘「分离后无线连接」没能落地。分成两条是因为用户能做的事不同：固件不支持这个开关
+    // 时再点多少次都一样，键盘没有应答则再试一次就可能成功。只追加，不插入。
+    KbdDetachSupportFailed,
+    KbdDetachSupportUnsupported,
 };
+
+// hostHealth 的取值。gaokun-hal 的宿主死掉时它的快照并不消失，seqlock 停在最后一帧，读者
+// 拿到的是一份自洽的旧状态。服务据心跳判定宿主是否还在工作，把结论一并发布，读者才能把
+// 「键盘拔了」和「读键盘的那个进程没了」区分开。
+//
+// 这三位占的是 Payload 原有的填充字节，共享内存布局与 ABI 版本因此不变；旧读者读到 0，
+// 表现为「未发布这一项」，与本来就没有这个字段时一致。
+inline constexpr uint8_t kHostHealthValid = 1u << 0;
+inline constexpr uint8_t kHostHealthPen   = 1u << 1;
+inline constexpr uint8_t kHostHealthKbd   = 1u << 2;
 
 inline constexpr uint32_t kFlagHasBatteryLevel   = 1u << 0;
 inline constexpr uint32_t kFlagHasChargingState  = 1u << 1;
@@ -145,7 +159,8 @@ struct Payload {
     uint8_t  kbdBatteryLevel = 0;   // percent, valid with kFlagHasKbdBattery
     uint8_t  notificationKind = 0;  // NotificationKind
     uint8_t  chargeLimit = 0;       // 停充百分比，valid with kFlagHasChargeLimit
-    uint8_t  _pad[5]{};             // 显式补齐，避免下一个字段的偏移随编译器的填充规则漂移
+    uint8_t  hostHealth = 0;        // kHostHealth* 的位组合
+    uint8_t  _pad[4]{};             // 显式补齐，避免下一个字段的偏移随编译器的填充规则漂移
     uint64_t updatedAtUnixMs = 0;
     char     modelName[kModelNameCapacity]{};   // UTF-8, NUL-terminated
     char     penFirmware[kVersionCapacity]{};   // valid with kFlagHasPenFirmware
@@ -211,6 +226,10 @@ struct State {
     bool inputSuppressed = false;
     bool hasKbdDetachSupport = false;
     bool kbdDetachSupport = false;
+    // hal 宿主是否还在工作，见 kHostHealthValid。未发布时三项都为假，读者按「未知」处理。
+    bool hasHostHealth = false;
+    bool penHostHealthy = false;
+    bool kbdHostHealthy = false;
     bool hasVendorServices = false;
     bool vendorServicesDisabled = false;
     bool vendorServicesRunning = false;
