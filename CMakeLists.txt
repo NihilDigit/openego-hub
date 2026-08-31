@@ -502,6 +502,27 @@ if(TARGET EGoTouchSettings)
     )
 endif()
 
+# --- OpenEGoHubCleanup (安装前的残留清理) ---
+# 不受 EGO_BUILD_TOOLS 约束:它随安装包走,不是诊断工具。也不进 install()——安装包用
+# Binary 表携带它,装机时释放到临时目录运行,不落到安装目录里。
+# 不链 Common:这个 exe 在安装期运行,依赖越少,上层的改动越不会把安装带崩。
+set(CLEANUP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Tools/EGoTouchCleanup")
+add_executable(EGoTouchCleanup
+    "${CLEANUP_ROOT}/Main.cpp"
+    "${CLEANUP_ROOT}/CleanupPlan.cpp"
+    "${CLEANUP_ROOT}/CleanupActions.cpp"
+    "${CLEANUP_ROOT}/CleanupLog.cpp"
+)
+target_include_directories(EGoTouchCleanup PRIVATE "${CLEANUP_ROOT}")
+target_link_libraries(EGoTouchCleanup PRIVATE advapi32 shell32 ole32)
+set_target_properties(EGoTouchCleanup PROPERTIES OUTPUT_NAME OpenEGoHubCleanup)
+# 与服务同理:wmain 需要控制台子系统,--dry-run 的输出才有去处。
+if(MSVC)
+    set_target_properties(EGoTouchCleanup PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
+elseif(WIN32)
+    target_link_options(EGoTouchCleanup PRIVATE -municode)
+endif()
+
 # --- PointerCancelProbe (one-shot VHF confidence-bit experiment) ---
 if (EGO_BUILD_TOOLS)
     add_executable(PointerCancelProbe Tools/PointerCancelProbe/PointerCancelProbe.cpp)
@@ -557,6 +578,19 @@ if (EGO_BUILD_TESTS)
     add_test(NAME HostSupervisorTest COMMAND HostSupervisorTest)
     set_tests_properties(HostSupervisorTest PROPERTIES
         LABELS "service;unit;device-free"
+        TIMEOUT 10
+    )
+
+    # 清理工具里不碰系统的那一半。只编 CleanupPlan.cpp:它不 include windows.h,在没有那些
+    # 服务、目录和权限的机器上也能跑完。
+    add_executable(CleanupPlanTest
+        "${CLEANUP_ROOT}/tests/CleanupPlanTest.cpp"
+        "${CLEANUP_ROOT}/CleanupPlan.cpp"
+    )
+    target_include_directories(CleanupPlanTest PRIVATE "${CLEANUP_ROOT}")
+    add_test(NAME CleanupPlanTest COMMAND CleanupPlanTest)
+    set_tests_properties(CleanupPlanTest PROPERTIES
+        LABELS "unit;device-free"
         TIMEOUT 10
     )
 
