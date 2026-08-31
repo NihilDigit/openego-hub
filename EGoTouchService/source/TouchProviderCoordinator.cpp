@@ -1,5 +1,6 @@
 #include "TouchProviderCoordinator.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace Service {
@@ -27,6 +28,11 @@ bool TouchProviderCoordinator::AcquireOrRenew(Clock::time_point now) {
         m_error == TouchProviderError::None) {
         return true;
     }
+    // 挂起期间照常续租，但不把宿主拉起来。息屏并不冻结托盘，它每秒一次的续租会立刻重起
+    // 刚刚停下的宿主，代管也就等于没做过。重启的时机由 OnResume 决定。
+    if (m_state == PenStatus::TouchProviderState::EGoSuspended) {
+        return true;
+    }
     // 冷却期内不再接管。托盘并不知道宿主刚刚连续崩过，它只会照常每秒续租一次；这里不挡住
     // 的话每一次续租都会重演一遍停原厂、起宿主、宿主又崩的循环。
     if (now < m_egoCooldownUntil) {
@@ -45,11 +51,50 @@ bool TouchProviderCoordinator::Release() {
     m_restartsInWindow = 0;
     m_restartWindowStart = {};
     m_egoCooldownUntil = {};
+    m_leaseRemainingOnSuspend = std::chrono::milliseconds{0};
     return SwitchToHuawei();
+}
+
+void TouchProviderCoordinator::OnSuspend(Clock::time_point now) {
+    if (!m_hasLease || m_state != PenStatus::TouchProviderState::EGoTouch) return;
+
+    m_leaseRemainingOnSuspend =
+        now < m_leaseDeadline
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(m_leaseDeadline - now)
+            : std::chrono::milliseconds{0};
+
+    // 只停自己，不把原厂请回来。机器正在睡，此刻起原厂服务只是让它跟着一起睡，醒来还要
+    // 再停一次；而宿主留着不动的话，面板断电之后它内部已经死了，唤醒也活不过来。
+    const bool stopped = m_operations.stopEGo && m_operations.stopEGo();
+    Publish(PenStatus::TouchProviderState::EGoSuspended,
+            stopped ? TouchProviderError::None : TouchProviderError::StopEGoFailed);
+}
+
+void TouchProviderCoordinator::OnResume(Clock::time_point now) {
+    if (!m_hasLease) return;
+
+    m_leaseDeadline = now + std::max<std::chrono::milliseconds>(m_leaseRemainingOnSuspend,
+                                                               kResumeLeaseGrace);
+    m_leaseRemainingOnSuspend = std::chrono::milliseconds{0};
+
+    // 宿主没被停过就只是续了一次租约。息屏与唤醒之间隔得极短时会走到这里。
+    if (m_state != PenStatus::TouchProviderState::EGoSuspended) return;
+
+    if (m_operations.startEGo && m_operations.startEGo()) {
+        Publish(PenStatus::TouchProviderState::EGoTouch);
+        return;
+    }
+
+    // 唤醒后起不来，和宿主跑着跑着崩掉是同一件事，用同一套重启预算和冷却，免得每次唤醒
+    // 都在同一个地方重来一遍。
+    HandleEGoHostDeath(now);
 }
 
 void TouchProviderCoordinator::Tick(Clock::time_point now) {
     if (!m_hasLease) return;
+
+    // 挂起期间租约不计时，也不查存活：宿主是我们自己停的。唤醒由 OnResume 收尾。
+    if (m_state == PenStatus::TouchProviderState::EGoSuspended) return;
 
     if (now >= m_leaseDeadline) {
         m_hasLease = false;
@@ -81,7 +126,10 @@ void TouchProviderCoordinator::HandleEGoHostDeath(Clock::time_point now) {
     if (m_restartsInWindow <= kMaxRestartsPerWindow && SwitchToEGo()) return;
 
     // 重启不管用：窗口内崩太多次，或这一次连起都起不来。交还原厂并进入冷却。
-    if (m_state == PenStatus::TouchProviderState::EGoTouch) {
+    // EGoSuspended 一并算进来：预算用尽时 SwitchToEGo 根本没被调用过，状态还停在挂起，
+    // 漏掉它就是宿主停着、原厂也停着，机器一个提供方都不剩。
+    if (m_state == PenStatus::TouchProviderState::EGoTouch ||
+        m_state == PenStatus::TouchProviderState::EGoSuspended) {
         (void)SwitchToHuawei();
     }
     m_hasLease = false;

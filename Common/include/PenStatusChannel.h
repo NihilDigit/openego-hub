@@ -135,6 +135,9 @@ enum class TouchProviderState : uint8_t {
     EGoTouch,
     SwitchingToHuawei,
     Error,
+    // 系统挂起期间由服务主动停掉宿主，租约仍在托盘手里。托盘和面板按「触控归 EGo」显示：
+    // 用户没有交还过任何东西，唤醒后也会自动恢复。
+    EGoSuspended,
 };
 
 inline constexpr int kModelNameCapacity = 32;

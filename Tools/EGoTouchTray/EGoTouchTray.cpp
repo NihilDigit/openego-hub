@@ -1998,6 +1998,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
 
+    // 唤醒后立刻续一次租，不等下一拍心跳。服务在唤醒时给的宽限期是有限的，而心跳是每秒
+    // 一次的 WM_TIMER，恢复得比这条消息晚；早一秒续上，触控就早一秒回来。
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMRESUMEAUTOMATIC) {
+            MaintainProviderLease();
+        }
+        return TRUE;
+
     case WM_MOUSEMOVE:
         if (!g_app.hovered) {
             g_app.hovered = true;

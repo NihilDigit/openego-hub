@@ -142,6 +142,7 @@ private:
     void StartPenControlChannel();
     void StopPenControlChannel();
     void PenControlThreadMain();
+    void DispatchPendingPowerEvent();
     void HandlePenControlCommand(const PenControl::Command& command);
     void ApplyPenButtonMode(PenButtonMode mode, const char* source, bool persist);
     bool StartEGoTouchProvider();

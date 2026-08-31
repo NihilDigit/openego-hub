@@ -47,6 +47,15 @@
 
 namespace Service {
 
+// 电源事件从监视线程投递到控制线程时的取值。息屏与挂起归为同一件事：现代待机下面板断电
+// 未必伴随 PBT_APMSUSPEND，而对宿主来说两者的后果一样。
+constexpr int kPowerEventNone = 0;
+constexpr int kPowerEventSuspend = 1;
+constexpr int kPowerEventResume = 2;
+// 息屏之后等这么久再停宿主。息屏和唤醒之间常常只隔一瞬——一条通知、一次误触都够了——
+// 停一次再起一次反倒是一段实打实的触控中断。这段时间里来的唤醒把这次息屏一并抵消。
+constexpr auto kPowerSuspendDebounce = std::chrono::seconds(2);
+
 struct ServiceHost::Impl {
     ServiceLifecycleStateMachine m_lifecycle;
     // Read-only pen state broadcast for the tray companion. Present in every build:
@@ -63,6 +72,11 @@ struct ServiceHost::Impl {
         PenStatus::TouchProviderState::Unknown};
     std::atomic<TouchProviderError> m_touchProviderError{TouchProviderError::None};
     std::unique_ptr<TouchProviderCoordinator> m_touchProviderCoordinator;
+    // 待处理的电源事件，见 kPowerEvent*。监视线程写、控制线程取走，后写覆盖先写：只有
+    // 最后那个状态是真的，中间的翻转没有意义。coordinator 只能在控制线程上被碰。
+    std::atomic<int> m_pendingPowerEvent{kPowerEventNone};
+    // 息屏之后推迟动手的时刻。只有控制线程读写，不需要同步。
+    std::chrono::steady_clock::time_point m_powerSuspendDueAt{};
     std::atomic<bool> m_inputSuppressed{false};
     std::atomic<uint32_t> m_notificationSequence{0};
     std::atomic<PenStatus::NotificationKind> m_notificationKind{
@@ -220,6 +234,20 @@ bool StopHuaweiThpService() {
 //
 // 只停不禁的代价是重启后有一小段时间由原厂提供触控，直到本服务起来把它换掉。那是个可见
 // 但无害的交接，比丢掉触控好得多。
+// 只问一次状态，不等待、不发停止命令。
+bool IsHuaweiThpServiceStopped() {
+    return WithHuaweiService(SERVICE_QUERY_STATUS,
+        [](SC_HANDLE service) {
+            SERVICE_STATUS_PROCESS status{};
+            DWORD needed = 0;
+            if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                      reinterpret_cast<BYTE*>(&status), sizeof(status), &needed)) {
+                return false;
+            }
+            return status.dwCurrentState == SERVICE_STOPPED;
+        });
+}
+
 bool EnsureHuaweiThpAutoStart() {
     return WithHuaweiService(SERVICE_CHANGE_CONFIG,
         [](SC_HANDLE service) {
@@ -548,7 +576,12 @@ bool ServiceHost::StartRuntimeAndPipeline() {
     providerOps.disableHuawei = [] {
         // 名字叫 disable，实际只保证它不在运行、同时留着自动启动。原因见
         // EnsureHuaweiThpAutoStart 的注释：真禁用会在本服务缺席时连带丢掉触控。
-        const bool ok = EnsureHuaweiThpAutoStart() && StopHuaweiThpService();
+        //
+        // 常路只查一次状态。这一步的调用点前面刚刚等到过 SERVICE_STOPPED，再走一遍完整的
+        // 停止流程最坏要在控制线程上白等 15 秒，而租约到期、托盘的命令和宿主的存活检查都
+        // 排在这个线程后面。确实还在跑时才真去停它——回滚路径上原厂可能起了一半。
+        const bool ok = EnsureHuaweiThpAutoStart() &&
+                        (IsHuaweiThpServiceStopped() || StopHuaweiThpService());
         if (!ok) {
             LOG_ERROR("Service", "DisableHuawei", "Provider",
                       "Failed to stand HuaweiThpService down (err={}).", GetLastError());
@@ -616,6 +649,21 @@ bool ServiceHost::StartSystemStateMonitor() {
             }
             if (m_deviceRuntime) {
                 m_deviceRuntime->IngestPolicyEvent(TranslateSystemStateEvent(ev));
+            }
+
+            // 触控提供方要跟着睡和醒，但 coordinator 只能在控制线程上被碰，这里只留个记号。
+            // 盖子事件不接：合盖本身不断面板电，接了只会多出一次没必要的宿主起停。
+            switch (ev.type) {
+            case Host::SystemStateEventType::Suspend:
+            case Host::SystemStateEventType::DisplayOff:
+                m_impl->m_pendingPowerEvent.store(kPowerEventSuspend, std::memory_order_release);
+                break;
+            case Host::SystemStateEventType::ResumeAutomatic:
+            case Host::SystemStateEventType::DisplayOn:
+                m_impl->m_pendingPowerEvent.store(kPowerEventResume, std::memory_order_release);
+                break;
+            default:
+                break;
             }
 
             if (!Host::IsPenStatusWakeEvent(ev.type) ||
@@ -1525,12 +1573,40 @@ namespace {
 constexpr DWORD kPenControlWaitSliceMs = 250;
 } // namespace
 
+// 把监视线程记下的电源事件交给 coordinator。只在控制线程上调用。
+void ServiceHost::DispatchPendingPowerEvent() {
+    if (!m_impl->m_touchProviderCoordinator) return;
+
+    const auto now = TouchProviderCoordinator::Clock::now();
+    const int event = m_impl->m_pendingPowerEvent.exchange(kPowerEventNone,
+                                                           std::memory_order_acq_rel);
+    if (event == kPowerEventSuspend) {
+        if (m_impl->m_powerSuspendDueAt == std::chrono::steady_clock::time_point{}) {
+            m_impl->m_powerSuspendDueAt = now + kPowerSuspendDebounce;
+        }
+    } else if (event == kPowerEventResume) {
+        // 还没动手就醒了，这次息屏当没发生过。OnResume 照常调用：宿主没停时它只延租约，
+        // 而唤醒后本来就该给托盘的心跳留出宽限。
+        m_impl->m_powerSuspendDueAt = {};
+        m_impl->m_touchProviderCoordinator->OnResume(now);
+        return;
+    }
+
+    if (m_impl->m_powerSuspendDueAt != std::chrono::steady_clock::time_point{} &&
+        now >= m_impl->m_powerSuspendDueAt) {
+        m_impl->m_powerSuspendDueAt = {};
+        m_impl->m_touchProviderCoordinator->OnSuspend(now);
+    }
+}
+
 void ServiceHost::PenControlThreadMain() {
     while (!m_impl->m_penControlStop.load(std::memory_order_acquire)) {
         (void)m_impl->m_penControlHost.WaitForSubmit(kPenControlWaitSliceMs);
         if (m_impl->m_penControlStop.load(std::memory_order_acquire)) {
             break;
         }
+
+        DispatchPendingPowerEvent();
 
         PenControl::Command command{};
         if (m_impl->m_penControlHost.PollCommand(command)) {

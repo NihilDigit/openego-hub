@@ -47,6 +47,10 @@ public:
     // 原厂请回来，全程可能十几秒；不冷却的话下一次续租又会从头来一遍，原厂服务被反复
     // 起停，触控在这段时间里时有时无。比崩溃冷却短得多：失败常常是暂时的。
     static constexpr std::chrono::seconds kAcquireFailureCooldown{10};
+    // 唤醒后至少给出这么长的租约，与冻结时剩下的时长取大者。托盘的心跳是每秒一次的
+    // WM_TIMER，而用户会话恢复得比服务晚；只按剩下的那点时间计时的话，第一拍心跳还没到
+    // 租约就过期了，触控白白交还原厂再抢回来一次。
+    static constexpr std::chrono::seconds kResumeLeaseGrace{10};
 
     TouchProviderCoordinator(TouchProviderOperations operations,
                              StateChanged stateChanged,
@@ -55,6 +59,11 @@ public:
     bool AcquireOrRenew(Clock::time_point now);
     bool Release();
     void Tick(Clock::time_point now);
+    // 系统挂起与唤醒。宿主里的 THP_Service 自己注册了电源通知，但托管进程没有窗口也没有
+    // 消息泵，那些通知一条都收不到：面板断电之后宿主内部已经死了而进程还在，egoAlive 看
+    // 不出来。于是由服务代管——挂起时主动干净停掉，唤醒时重启。
+    void OnSuspend(Clock::time_point now);
+    void OnResume(Clock::time_point now);
     void Shutdown();
 
     [[nodiscard]] PenStatus::TouchProviderState State() const noexcept { return m_state; }
@@ -74,6 +83,9 @@ private:
     Clock::time_point m_leaseDeadline{};
     Clock::time_point m_restartWindowStart{};
     Clock::time_point m_egoCooldownUntil{};
+    // 挂起时租约还剩多久。存时长而不是 deadline：睡眠期间 steady_clock 走不走由平台决定，
+    // 按绝对时刻恢复的话唤醒的一瞬间租约可能已经过期，触控被交还一次谁也没要求的原厂。
+    std::chrono::milliseconds m_leaseRemainingOnSuspend{0};
     int m_restartsInWindow = 0;
     PenStatus::TouchProviderState m_state = PenStatus::TouchProviderState::Unknown;
     TouchProviderError m_error = TouchProviderError::None;
