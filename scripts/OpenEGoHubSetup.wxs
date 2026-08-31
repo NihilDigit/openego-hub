@@ -72,6 +72,40 @@
     <!-- 必须指定 WixUI_InstallDir 绑定的安装目录属性，否则运行时会报 Error 2819 -->
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
 
+    <!--
+      完成页勾选「启动 OpenEGo Hub」，默认勾上。托盘的登录自启只写 HKCU Run 键，要到下次
+      登录才生效；没有这一步，首装之后什么都不出现，升级之后旧托盘被 Restart Manager 关掉
+      也没人拉回来（托盘 0.2.1 起自己注册 RegisterApplicationRestart，但从更老版本升上来时
+      被关掉的是没注册过的旧托盘）。
+
+      WixShellExec 跑在 UI 序列的客户端进程里。标准的双击安装流程中客户端不提权，托盘因此
+      以普通完整性启动，符合它必须无提权运行的约束；从已提权的终端里 msiexec 装包则客户端
+      本身就是提权的，托盘会跟着提权——那是开发场景，装完手动重启托盘即可。静默安装没有
+      UI 序列，此路径不生效，维持原有行为。
+
+      托盘已在运行时再启动一次不会出第二个实例：新进程发现互斥量已存在，向主实例投递激活
+      消息打开设置窗后退出。
+    -->
+    <!--
+      在执行序列里直接关托盘,不依赖 Restart Manager:basic UI 的卸载(设置里点卸载就是)
+      没有 FilesInUse 对话框,没人替 RM 点「同意关闭」,托盘会被原样留下,变成镜像文件已
+      删的孤儿进程。WM_CLOSE 对托盘是干净退出路径(DefWindowProc → DestroyWindow),实测
+      验证过。升级时它排在 RemoveExistingProducts 之后,旧包卸载阶段帮不上忙,全 UI 升级
+      仍靠 RM 的交互式关闭;它兜底的是卸载和静默场景。
+    -->
+    <util:CloseApplication Id="CloseTrayApp" Target="OpenEGoHubTray.exe"
+                           CloseMessage="yes" RebootPrompt="no" />
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="!(loc.LaunchTrayCheckbox)" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#EGoTouchTrayEXE]" />
+    <CustomAction Id="LaunchTray" DllEntry="WixShellExec" Impersonate="yes"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTray"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
     <!-- 让 Windows Installer 自动写 %TEMP%\MSI*.LOG。服务自己的日志覆盖不到安装器这半：
          装到哪一步、StartServices 等了多久，只有 MSI 日志里有。voicewarmup 是除 x（调试
          额外输出）外的全部开关。 -->

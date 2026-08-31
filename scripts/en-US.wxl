@@ -84,4 +84,6 @@
   <String Id="VerifyReadyDlgRemoveTitle" Value="{\WixUI_Font_Title}Ready to Remove [ProductName]" />
   <String Id="VerifyReadyDlgRemoveText" Value="Setup is ready to remove [ProductName] from your computer.&#xA;&#xA;Uninstalling will stop and remove the system service, but will not delete user data or log files.&#xA;&#xA;Click Remove to begin uninstallation." />
 
+  <String Id="LaunchTrayCheckbox" Value="Launch OpenEGo Hub" />
+
 </WixLocalization>

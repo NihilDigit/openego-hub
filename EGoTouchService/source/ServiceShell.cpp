@@ -16,8 +16,13 @@ struct ServiceShell::Impl {
     HANDLE stopEvent = nullptr;
     ServiceHost host;
 
-    // 初始化跑在后台，SvcMain 只等停止信号。声明在无条件区：Release 同样要编。
-    std::thread initThread;
+    // 初始化跑在后台。SvcMain 停止时等 initDone 而不是 join 那个后台线程：句柄追踪
+    // 抓到过一次死锁——std::thread 的线程句柄值在初始化早期被进程内某处 CloseHandle
+    // 关掉，随后被 SystemStateMonitor 的 CreateEvent 复用成一个自动重置事件，std::thread
+    // 对象仍缓存旧值，join 于是 WaitForSingleObject 到那个服务运行期永不触发的事件上，
+    // 永久卡死，安装升级停不掉旧服务。initDone 是我们独占、绝不外泄的手动重置事件，
+    // 后台线程创建后立即 detach，谁也不再 join 那个会被复用的句柄。
+    HANDLE initDone = nullptr;
     std::atomic<bool> startFailed{false};
 
     // PBT power setting notification handles
@@ -60,27 +65,37 @@ void WINAPI ServiceShell::SvcMain(DWORD argc, LPWSTR* argv) {
     // 而本服务自己还是 START_PENDING，等于在 SCM 里嵌套一次服务操作，有死锁窗口。
     s->ReportStatus(SERVICE_RUNNING);
 
-    s->m_impl->initThread = std::thread([s] {
+    // 手动重置：一旦初始化线程置位就保持，SvcMain 无论何时来等都读得到。
+    s->m_impl->initDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+    std::thread([s] {
         LOG_INFO("Service", "SvcMain", "Boot", "Starting modules...");
         if (!s->m_impl->host.Start()) {
             LOG_ERROR("Service", "SvcMain", "Boot", "ServiceHost::Start() failed; stopping.");
             s->m_impl->startFailed.store(true, std::memory_order_release);
             s->SignalShutdownTransportAndStop();
-            return;
+        } else {
+            s->RegisterPowerNotifications();
+            LOG_INFO("Service", "SvcMain", "Running", "All modules started.");
         }
-        s->RegisterPowerNotifications();
-        LOG_INFO("Service", "SvcMain", "Running", "All modules started.");
-    });
+        // 成败都置位：SvcMain 收尾要等初始化真正结束，才能安全地 host.Stop()。
+        if (s->m_impl->initDone) SetEvent(s->m_impl->initDone);
+    }).detach();  // 立即放弃线程句柄，此刻它还有效，detach 干净关闭；见 Impl 注释。
 
     LOG_INFO("Service", __func__, "Running", "Service is running. Waiting for stop signal...");
     s->WaitForStop();
 
-    // 停止信号可能在初始化还没跑完时到达。join 是安全的：ServiceHost::Start 与 Stop 都
-    // 经 ServiceLifecycleStateMachine 串行化，Stop 会等在飞的 Start 走完再整体回滚。
-    if (s->m_impl->initThread.joinable()) {
-        s->m_impl->initThread.join();
+    // 停止信号可能在初始化还没跑完时到达。等 initDone 而非 join：ServiceHost::Start 与
+    // Stop 经 ServiceLifecycleStateMachine 串行化，Stop 会等在飞的 Start 走完再回滚，但
+    // 这里必须先确认 Start 那条后台线程已跑到头，否则 host.Stop 与它并发拆同一批对象。
+    if (s->m_impl->initDone) {
+        WaitForSingleObject(s->m_impl->initDone, INFINITE);
     }
     s->CloseStopEvent();
+    if (s->m_impl->initDone) {
+        CloseHandle(s->m_impl->initDone);
+        s->m_impl->initDone = nullptr;
+    }
 
     s->UnregisterPowerNotifications();
     s->m_impl->host.Stop();

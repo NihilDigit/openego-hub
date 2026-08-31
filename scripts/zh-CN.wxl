@@ -58,6 +58,8 @@
   <String Id="ExitDlgTitle" Value="{\WixUI_Font_Title}[ProductName] 安装完成" />
   <String Id="ExitDlgDescription" Value="{\WixUI_Font_Normal}安装程序已将 [ProductName] 成功安装到您的设备。&#xA;&#xA;触控服务已自动启动并在后台运行。您可以通过 Windows 服务管理器查看其运行状态。&#xA;&#xA;单击&quot;完成&quot;退出安装向导。" />
 
+  <String Id="LaunchTrayCheckbox" Value="启动 OpenEGo Hub" />
+
   <!-- 安装失败/取消页 -->
   <String Id="UserExitTitle" Value="{\WixUI_Font_Title}[ProductName] 安装已取消" />
   <String Id="UserExitDescription1" Value="{\WixUI_Font_Normal}安装向导已被中断。[ProductName] 未完成安装。&#xA;&#xA;您可以稍后重新运行本安装程序。" />

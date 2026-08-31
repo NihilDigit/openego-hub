@@ -2351,6 +2351,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         return 0;
     }
 
+    // 升级安装时 Restart Manager 会关掉托盘(WM_ENDSESSION 路径),装完靠 RmRestart 把注册
+    // 过的进程拉回来;不注册,升级结束托盘就消失了。RESTART_NO_REBOOT 是因为重启后的拉起
+    // 已由 HKCU Run 键负责,两边都来会有第二个实例向主实例投递激活消息,凭空弹出设置窗。
+    RegisterApplicationRestart(nullptr, RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT);
+
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // WIC 是 COM 组件，读 PCManager 的电量图标要靠它。
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
