@@ -1,5 +1,6 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?ifndef BuildOutputDir ?>
     <?define BuildOutputDir = "build" ?>
   <?endif ?>
@@ -9,16 +10,61 @@
   <?endif ?>
   <!--
     OpenEGo Hub 核心服务安装包
-    - UpgradeCode 全局唯一，永不修改，用于覆盖更新旧版本。
     - -arch arm64 由命令行参数设定原生架构。
+
+    UpgradeCode 决定哪些已装产品算「同一条产品线」，本该一次定死。实际上它换过一次：
+    产品由 EGoTouchRev 改名为 OpenEGo Hub 时换成了下面这个 67A4C6B5，改名之前发出去的
+    包因此完全落在当前升级路径之外。历史上用过的三条谱系：
+
+      434AC770-…-DB2F9DB289AC  改名前的预发布包
+      434AC770-…-DB2F9DB289AD  同期的 Test 版
+      F7F7E243-…               v0.1.x Test 包，与正式包共用服务名和安装目录
+
+    MajorUpgrade 只看当前 UpgradeCode，这三条它一条都看不见，装新包时旧包原样留着；
+    F7F7E243 那条还会和新包抢同一个 OpenEGoHubService 和 Program Files 目录。下面三行
+    手写的 Upgrade 把它们纳入 RemoveExistingProducts 的视野，让旧包各自走自己的卸载序列。
   -->
   <Package Name="!(loc.ProductName)" Manufacturer="!(loc.Manufacturer)" Version="$(var.BuildVersion)"
            UpgradeCode="67A4C6B5-BFFB-4058-9600-1109A3B59A03"
            Scope="perMachine"
            Language="!(loc.Language)">
 
-    <!-- 支持自动覆盖升级：UpgradeCode 不变 + Version 提升 → 自动卸载旧版覆盖安装 -->
-    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" />
+    <!--
+      支持自动覆盖升级：UpgradeCode 不变 + Version 提升 → 自动卸载旧版覆盖安装。
+      AllowSameVersionUpgrades 让版本号相同的包也走升级而不是并存装两份；ProductCode 取
+      WiX 默认的 *，每次构建都是新的，前提成立。
+
+      Schedule 保持默认的 afterInstallValidate，即在装新文件之前就把旧产品整个卸干净。旧包
+      的服务由它自己的 ServiceControl 停掉和删除，这是最正规的一条路；F7F7E243 那条谱系与
+      新包同服务名同目录，先卸后装才不会出现两个包争一个服务的局面。挪到 afterInstallExecute
+      会让两份文件在盘上重叠一段时间，正是要避开的。
+    -->
+    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)"
+                  AllowSameVersionUpgrades="yes" />
+
+    <!-- 改名前的预发布包 -->
+    <Upgrade Id="434AC770-0762-431A-9ABC-DB2F9DB289AC">
+      <UpgradeVersion Property="LEGACY_PRERELEASE_DETECTED"
+                      Minimum="0.0.0" IncludeMinimum="yes"
+                      Maximum="255.255.65535" IncludeMaximum="yes"
+                      MigrateFeatures="no" OnlyDetect="no" />
+    </Upgrade>
+
+    <!-- 同期的 Test 版 -->
+    <Upgrade Id="434AC770-0762-431A-9ABC-DB2F9DB289AD">
+      <UpgradeVersion Property="LEGACY_PRERELEASE_TEST_DETECTED"
+                      Minimum="0.0.0" IncludeMinimum="yes"
+                      Maximum="255.255.65535" IncludeMaximum="yes"
+                      MigrateFeatures="no" OnlyDetect="no" />
+    </Upgrade>
+
+    <!-- v0.1.x Test 包，与正式包共用服务名和安装目录 -->
+    <Upgrade Id="F7F7E243-B91A-4B0A-9B16-FF7DD30E62A0">
+      <UpgradeVersion Property="LEGACY_TESTPKG_DETECTED"
+                      Minimum="0.0.0" IncludeMinimum="yes"
+                      Maximum="255.255.65535" IncludeMaximum="yes"
+                      MigrateFeatures="no" OnlyDetect="no" />
+    </Upgrade>
 
     <!-- 安装向导界面：WixUI_InstallDir 提供欢迎页 + 许可协议 + 安装目录 + 进度 + 完成 -->
     <ui:WixUI Id="WixUI_InstallDir" />
@@ -63,7 +109,21 @@
             Description="!(loc.ServiceDescription)"
             Start="auto"
             Account="LocalSystem"
-            ErrorControl="normal" />
+            ErrorControl="normal">
+
+          <!--
+            SCM 层的失败重启。装完之后华为 PC Manager 的自我修复会让服务状态抖上一阵，启动
+            路径在那期间判失败就整个装完却没有服务在跑，这一条是最迟 45 秒自愈的兜底下限。
+            util 扩展只能给一个统一的延迟，做不出 5/10/30 秒的分级；服务代码里的分级恢复
+            策略随后会把这份配置覆盖掉，这里保证的是「装出来就有」。
+          -->
+          <util:ServiceConfig
+              FirstFailureActionType="restart"
+              SecondFailureActionType="restart"
+              ThirdFailureActionType="restart"
+              RestartServiceDelayInSeconds="5"
+              ResetPeriodInDays="1" />
+        </ServiceInstall>
 
         <!-- 控制在安装/卸载时自动启停服务 -->
         <ServiceControl Id="StartWixService" Name="OpenEGoHubService"
@@ -160,5 +220,34 @@
       <ComponentGroupRef Id="ProductComponents" />
       <ComponentGroupRef Id="HalComponents" />
     </Feature>
+
+    <!--
+      清理工具随 MSI 走 Binary 表，不落盘也不进任何组件：它只在安装过程中跑一次，装完
+      留在 Program Files 里没有意义。
+    -->
+    <Binary Id="CleanupExe" SourceFile="$(var.BuildOutputDir)\OpenEGoHubCleanup.exe" />
+
+    <!--
+      Upgrade 表管得住的只有 MSI 自己装出来的东西。脚本装的服务、deploy.ps1 留下的
+      .backup 目录、改名前的 EGoTouchRev 目录，这些残留没有任何一个包认领，得由这个
+      工具扫掉。deferred + Impersonate="no" 才有 LocalSystem 权限动服务和 Program Files；
+      Return="ignore" 是因为清残留失败不该让安装失败。
+    -->
+    <CustomAction Id="CleanSweep" BinaryRef="CleanupExe"
+                  ExeCommand=""
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!--
+        位置卡在 RemoveExistingProducts 之后、InstallFiles 之前，两头都不能挪：早于 REP
+        会去删旧包还在用的文件，把旧包的卸载序列搅乱；晚于 InstallFiles 则整删目录会连
+        刚铺下去的新文件一起删掉。
+
+        条件 NOT Installed 让它只在首装和升级时跑。卸载和修复不跑——卸载有 ServiceControl
+        和组件删除各司其职，修复本就不该动用户环境。回滚也不做补偿：清掉的是历史残留，
+        安装失败了它们也不值得还原，这是 clean-install 的语义。
+      -->
+      <Custom Action="CleanSweep" After="RemoveExistingProducts" Condition="NOT Installed" />
+    </InstallExecuteSequence>
   </Package>
 </Wix>
