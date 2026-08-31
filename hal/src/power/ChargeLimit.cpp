@@ -4,7 +4,7 @@
 //   [0] 0x03  MFID
 //   [1] 0x15  SFID = SBCM
 //   [2] 0x01  SBCM.CHMD  充电模式
-//   [3] 0x18  SBCM.DELY
+//   [3] 0x48  SBCM.DELY  EC 开始限充所要求的连续接电小时数
 //   [4]       SBCM.STCP  开始充电的电量阈值
 //   [5]       SBCM.SOCP  停止充电的电量阈值
 //
@@ -26,7 +26,6 @@ namespace {
 constexpr uint8_t kMfid = 0x03;
 constexpr uint8_t kSfidWrite = 0x15;
 constexpr uint8_t kSfidRead = 0x16;
-constexpr uint8_t kWriteDelay = 0x18;
 
 // 读回的字节位序。out[0] 是命令状态，实测始终为 0，没有见过非零值，因此不据此判定失败。
 constexpr size_t kOffsetMode = 1;
@@ -65,29 +64,22 @@ Result SetChargeLimit(int stopPercent, bool dryRun, HRESULT &failure) noexcept {
     }
 
     const uint8_t request[]{
-        kMfid, kSfidWrite, kChargeModeManual, kWriteDelay,
+        kMfid, kSfidWrite, kChargeModeManual, kSmartChargeDelayHours,
         static_cast<uint8_t>(stopPercent - kChargeStartOffset),
         static_cast<uint8_t>(stopPercent),
     };
     return Oem::Invoke(request, sizeof(request), nullptr, 0, dryRun, failure);
 }
 
-// 交还给厂商的智能充电。CHMD 写 4 就够，阈值字段照旧带上——实测写入后读回 mode 变为 4
-// 而 start/stop 保持传入的值，随后由系统按使用习惯自行调整。
+// 切到智能充电。四个字节全部是常量，与原厂写下的一组一致。
 //
-// 这里不试图恢复「用户接管之前」的那一组阈值：智能模式下那两个数是系统自己算的，
-// 存一份旧值再写回去只会让它从一个过时的起点重新学。
+// 阈值不沿用 EC 里的当前值。智能模式下这两个数不是「用户上一次设的上限」，而是限充生效
+// 之后要维持的区间，原厂固定 65/70；沿用当前值会让同一个按钮按出不同结果——按之前手动
+// 设过 90，智能充电就变成维持 90。
 Result SetSmartCharge(bool dryRun, HRESULT &failure) noexcept {
-    ChargeThreshold current{};
-    if (ReadChargeThreshold(current, failure) != Result::Ok) {
-        // 读不到就用一组中性值。写入本身只依赖 CHMD，阈值随后会被系统覆盖。
-        current.startPercent = kMaxChargeLimit - kChargeStartOffset;
-        current.stopPercent = kMaxChargeLimit;
-    }
-
     const uint8_t request[]{
-        kMfid, kSfidWrite, kChargeModeSmart, kWriteDelay,
-        current.startPercent, current.stopPercent,
+        kMfid, kSfidWrite, kChargeModeSmart, kSmartChargeDelayHours,
+        kSmartChargeStartPercent, kSmartChargeStopPercent,
     };
     return Oem::Invoke(request, sizeof(request), nullptr, 0, dryRun, failure);
 }

@@ -130,8 +130,10 @@ IAsyncOperation<Media::Imaging::BitmapImage> DecodeImageAsync(std::span<const ui
 // 充电上限那行说明文字。RefreshControls 与 SmartChargeToggled 都要设它——后者不能等服务
 // 回显，否则开关已经动了、说明还写着另一种模式。两处各写一份字面量的话，改文案漏掉一处
 // 就会出现这种不一致，所以只在这里写一次。
+// 72 与 70 是 hal 的 kSmartChargeDelayHours 与 kSmartChargeStopPercent。设置窗不链接
+// GaokunHal.lib，只能抄一份字面量；改那两个常量时这里和 XAML 里的智能充电说明都要跟着改。
 winrt::hstring ChargeLimitStatusFor(bool smart) {
-    return smart ? L"由智能充电决定。"
+    return smart ? L"智能充电固定为 70%，连续接电满 72 小时后生效。"
                  : L"长期插电时限制充电上限可以减缓电池老化。";
 }
 
@@ -1202,8 +1204,8 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
         m_updatingControls = false;
 
         ChargeLimitValueText().Text(winrt::to_hstring(static_cast<int>(state->chargeLimit)) + L"%");
-        // 智能模式下那个百分比是系统当前的取值，不是用户的设定，也不硬性生效（实测阈值
-        // 写着 70 而电池充到了 100%）。滑块置灰，免得它看起来像一个已经生效的设定。
+        // 智能模式下的 70% 是固定的，用户改不了，所以滑块置灰。它确实会兑现，只是要等
+        // 连续接电满 72 小时，在那之前照常充满——这个条件写在说明文字里。
         ChargeLimitSlider().IsEnabled(!smart && m_trayConnected && !m_exitPending);
         ChargeLimitStatusText().Text(ChargeLimitStatusFor(smart));
     }

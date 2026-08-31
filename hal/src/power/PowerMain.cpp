@@ -38,10 +38,11 @@ void ReportFailure(const wchar_t *what, Result result, HRESULT failure) noexcept
 
     wprintf(L"charge   : start %u%%, stop %u%%\n", threshold.startPercent,
             threshold.stopPercent);
-    // 模式不是 1 时阈值并不硬性生效：智能充电下系统按使用习惯自行调整，实测阈值写着 70
-    // 而电池仍充到 100%。只印百分比会让人以为设置没生效。
-    wprintf(L"mode     : %u (%ls), delay %u\n", threshold.mode,
-            threshold.IsManual() ? L"manual" : L"smart charging, threshold not enforced",
+    // 智能模式下阈值要等连续接电满 delay 小时才生效，在那之前照常充到 100%。只印百分比
+    // 会让人以为设置没生效。
+    wprintf(L"mode     : %u (%ls), delay %u h\n", threshold.mode,
+            threshold.IsManual() ? L"manual, enforced now"
+                                 : L"smart charging, enforced after the delay on AC",
             threshold.delay);
     return 0;
 }
@@ -160,7 +161,8 @@ int SetSmart(bool dryRun) {
     if (dryRun) {
         wprintf(L"dry run: everything resolved, ExecMethod not issued\n");
     } else {
-        wprintf(L"charging handed back to the vendor's smart mode\n");
+        wprintf(L"smart charging set: %u%%/%u%% after %u h on AC\n",
+                kSmartChargeStartPercent, kSmartChargeStopPercent, kSmartChargeDelayHours);
     }
     return 0;
 }
@@ -170,13 +172,16 @@ void PrintUsage() {
             L"  --info             print everything, including the current threshold\n"
             L"  --query            print the charge threshold and its mode\n"
             L"  --limit <%d-%d>   stop charging at the given percentage\n"
-            L"  --smart            hand charging back to the vendor's smart mode\n\n"
+            L"  --smart            switch to smart charging (%d%%/%d%% after %d h on AC)\n\n"
             L"Charging resumes %d points below the limit, as the vendor tool does.\n"
-            L"Under the smart mode the vendor adjusts the threshold on its own, so the\n"
-            L"limit reported by --query is no longer a setting that will be honoured.\n"
+            L"Smart charging holds the battery at its threshold only once the machine has\n"
+            L"been on AC for %d hours without interruption; before that it charges to\n"
+            L"100%%. The EC enforces both modes on its own.\n"
             L"--query, --limit and --smart need an elevated process; --info degrades\n"
             L"without one.\n",
-            kMinChargeLimit, kMaxChargeLimit, kChargeStartOffset);
+            kMinChargeLimit, kMaxChargeLimit, kSmartChargeStartPercent,
+            kSmartChargeStopPercent, kSmartChargeDelayHours, kChargeStartOffset,
+            kSmartChargeDelayHours);
 }
 
 } // namespace

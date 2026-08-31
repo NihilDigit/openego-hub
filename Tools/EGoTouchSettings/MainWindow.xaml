@@ -503,7 +503,7 @@
                                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                                         <TextBlock Text="智能充电" TextWrapping="Wrap" />
                                         <TextBlock
-                                            Text="由系统按使用习惯自动调整充电上限。"
+                                            Text="连续接电 72 小时后，把电量维持在 70%。"
                                             Style="{StaticResource SettingsDescriptionStyle}" />
                                     </StackPanel>
                                     <ToggleSwitch

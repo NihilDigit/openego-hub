@@ -136,16 +136,25 @@ inline constexpr int kMaxChargeLimit = 100;
 // 起充固定比停充低 5，这是原厂的取值方式：两者相等会让电池在阈值附近反复小幅充放。
 inline constexpr int kChargeStartOffset = 5;
 
-// 用户设定的手动阈值。此时阈值硬性生效。
+// 用户设定的手动阈值。此时阈值立即硬性生效。
 inline constexpr uint8_t kChargeModeManual = 1;
-// 华为 PC 管家的智能充电。阈值由系统按使用习惯动态调整、并不硬性生效——实测阈值写着 70
-// 而电池充到了 100%。UI 必须把两种模式分开显示，所以读取接口连同模式一起返回，而不是
-// 只给一个百分比。
+// 智能充电。阈值同样硬性生效，但要等连续接电达到 kSmartChargeDelayHours 之后；在那之前
+// 照常充到 100%。规则由 EC 固件执行，与 PC 管家是否在运行无关。UI 必须把两种模式分开
+// 显示，所以读取接口连同模式一起返回，而不是只给一个百分比。见 docs/charge-control.md。
 inline constexpr uint8_t kChargeModeSmart = 4;
+
+// SBCM.DELY：EC 开始限充所要求的连续接电小时数，拔电清零。原厂在手动与智能两种模式下
+// 都写 72，本仓库跟随——EC 接受任意值，写小了会让智能充电提前若干天开始限充。
+inline constexpr uint8_t kSmartChargeDelayHours = 72;
+
+// 智能模式的起充与停充阈值。原厂固定这一组，不随用户此前的手动设定走。
+inline constexpr uint8_t kSmartChargeStopPercent = 70;
+inline constexpr uint8_t kSmartChargeStartPercent =
+    kSmartChargeStopPercent - kChargeStartOffset;
 
 struct ChargeThreshold {
     uint8_t mode = 0;          ///< SBCM.CHMD
-    uint8_t delay = 0;         ///< SBCM.DELY，单位未知；写入路径固定用 0x18
+    uint8_t delay = 0;         ///< SBCM.DELY，小时；见 kSmartChargeDelayHours
     uint8_t startPercent = 0;  ///< SBCM.STCP
     uint8_t stopPercent = 0;   ///< SBCM.SOCP
 
@@ -160,8 +169,9 @@ struct ChargeThreshold {
 // kChargeStartOffset 推出。写入后 mode 变为 kChargeModeManual。
 [[nodiscard]] Result SetChargeLimit(int stopPercent) noexcept;
 
-// 需要管理员权限。把充电交还给厂商的智能充电模式，写入后 mode 变为 kChargeModeSmart，
-// 阈值随后由系统按使用习惯自行调整，界面上的上限数字不再代表一个会兑现的设定。
+// 需要管理员权限。切到智能充电，写入后 mode 变为 kChargeModeSmart，阈值为
+// kSmartChargeStartPercent / kSmartChargeStopPercent。界面上的上限数字要到连续接电满
+// kSmartChargeDelayHours 之后才兑现。
 [[nodiscard]] Result SetSmartCharge() noexcept;
 
 } // namespace Gaokun::Power
