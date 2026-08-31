@@ -259,7 +259,23 @@ bool SetLoginAutoStart(bool enabled) {
     return result == ERROR_SUCCESS;
 }
 
+// 清掉产品改名前的用户级痕迹。MSI 的清理动作跑在 SYSTEM 下够不到各用户的 hive，而托盘
+// 每个用户登录都会跑一次，覆盖面反而完整。三处都是改名遗留：Run 值 EGoTouchRevTray、
+// Software\EGoTouchRev、以及短暂存在过的带空格键名 Software\OpenEGo Hub。现行的
+// Software\OpenEGoHub 与 Software\gaokun-hal 不在清理范围。幂等，失败静默。
+void MigrateLegacyUserState() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunRegistryKey, 0, KEY_SET_VALUE, &key) ==
+        ERROR_SUCCESS) {
+        RegDeleteValueW(key, L"EGoTouchRevTray");
+        RegCloseKey(key);
+    }
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\EGoTouchRev");
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\OpenEGo Hub");
+}
+
 void LoadUserSettings() {
+    MigrateLegacyUserState();
     g_app.autoStart = ReadUserSetting(L"AutoStart", 1) != 0;
     g_app.oneNoteCompatibility =
         ReadUserSetting(L"OneNoteCompatibility", 1) != 0;
