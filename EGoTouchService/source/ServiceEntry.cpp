@@ -127,6 +127,33 @@ static bool UninstallService() {
 }
 #endif
 
+#if defined(_DEBUG)
+// 开启内核的进程句柄追踪（每次 open/close 记录调用栈，dump 里用 !htrace 查询）。
+// ProcessHandleTracing 是未公开的信息类，没有 SDK 头，按 ntdll 的实际契约声明。
+void EnableProcessHandleTracing() {
+    struct HandleTracingEnable {
+        ULONG flags = 0;  // 必须为 0
+    };
+    using NtSetInformationProcessFn =
+        LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+    constexpr ULONG kProcessHandleTracing = 32;
+
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return;
+    const auto setInfo = reinterpret_cast<NtSetInformationProcessFn>(
+        GetProcAddress(ntdll, "NtSetInformationProcess"));
+    if (!setInfo) return;
+
+    HandleTracingEnable enable{};
+    const LONG status = setInfo(GetCurrentProcess(), kProcessHandleTracing,
+                                &enable, sizeof(enable));
+    // 失败只损失追踪能力，不影响服务本体，不必告警到用户可见的层面。
+    if (status < 0) {
+        OutputDebugStringW(L"OpenEGoHub: handle tracing not enabled\n");
+    }
+}
+#endif
+
 // ── 主入口 seam ─────────────────────────────────────────
 
 class ProductionServiceEntryActions final : public Service::IServiceEntryActions {
@@ -139,6 +166,14 @@ public:
     void InitializeServiceProcess() override {
         // Hide console window — logs are forwarded to App via IPC GetLogs
         if (HWND hw = GetConsoleWindow()) ShowWindow(hw, SW_HIDE);
+
+#if defined(_DEBUG)
+        // 句柄开关追踪。实机上抓到过一次 STOP 卡死：initThread 的句柄被进程内某处多关了
+        // 一次、值被复用，join 等在别人的对象上。静态审计没有找到双关点，所以让内核记下
+        // 每次 open/close 的调用栈，再出一次事就在 dump 里 !htrace <值> 直接看是谁关的。
+        // 只开在 Debug：追踪对每次句柄操作抓栈，Release 不背这个开销。
+        EnableProcessHandleTracing();
+#endif
 
         EnsureDataDirectory();
 
