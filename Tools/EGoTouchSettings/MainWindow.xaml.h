@@ -130,6 +130,11 @@ private:
     // 回显的兜底期限。命令有可能根本不生效（硬件拒绝、WMI 失败），没有期限的话滑块会一直
     // 停在用户的意图上，看起来像成功了。
     ULONGLONG m_chargeLimitEchoDeadline = 0;
+    // 键盘无线开关的在途请求，机制与充电阈值那组相同。这个开关的真值在键盘固件里，
+    // 命令要经托盘、服务、宿主、MCU 才回到状态通道，期间回传的仍是旧值。
+    bool m_kbdDetachAwaitingEcho = false;
+    bool m_kbdDetachRequested = false;
+    ULONGLONG m_kbdDetachEchoDeadline = 0;
     // 色温滑条的防抖。每条命令要拉起一个进程写 PCC，逐 tick 发就是几十个进程连续写，画面会抖。
     Microsoft::UI::Xaml::DispatcherTimer m_colorTemperatureTimer{nullptr};
     int m_pendingColorTemperature = 0;

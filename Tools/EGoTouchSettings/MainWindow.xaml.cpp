@@ -1226,10 +1226,22 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
     // 键盘在不在，用 MCU 回报的在位状态判断，不要拿「知不知道无线开关的值」代替：
     // 后者只说明收到过一次应答，键盘拔掉之后它依然为真。
     const bool kbdDetected = state && state->hasKbdPresent && state->kbdPresent;
-    if (kbdDetected && state->hasKbdDetachSupport) {
+    if (m_kbdDetachAwaitingEcho) {
+        const bool echoed = state && state->hasKbdDetachSupport &&
+                            state->kbdDetachSupport == m_kbdDetachRequested;
+        if (echoed || GetTickCount64() >= m_kbdDetachEchoDeadline) {
+            m_kbdDetachAwaitingEcho = false;
+        }
+    }
+    if (kbdDetected && state->hasKbdDetachSupport && !m_kbdDetachAwaitingEcho) {
+        // 必须有 m_updatingControls 护栏：程序性 IsOn 也触发 Toggled，缺了它这次回写会被
+        // 当成用户操作发回托盘。旧值此时还在通道里，发回去正好把用户刚点的那次抵消——
+        // 表现就是开关能关不能开、点了弹回。
+        m_updatingControls = true;
         KeyboardWirelessToggle().IsOn(state->kbdDetachSupport);
+        m_updatingControls = false;
         KeyboardStatusText().Text(L"键盘与主机分离后继续通过无线方式使用。");
-    } else {
+    } else if (!kbdDetected) {
         KeyboardStatusText().Text(L"未检测到键盘，分离后无线连接暂不可用。");
     }
     KeyboardWirelessToggle().IsEnabled(
@@ -1459,7 +1471,12 @@ void MainWindow::KeyboardWirelessToggled(IInspectable const&, RoutedEventArgs co
         KeyboardWirelessToggle().IsOn(!requested);
         m_updatingControls = false;
         ShowError(L"无法修改键盘无线连接设置", L"托盘没有响应，设置没有生效。");
+        return;
     }
+    // 回显确认前不跟随状态通道，机制同充电阈值，见 RefreshControls 里的说明。
+    m_kbdDetachAwaitingEcho = true;
+    m_kbdDetachRequested = requested;
+    m_kbdDetachEchoDeadline = GetTickCount64() + 3000;
 }
 
 // 智能充电与固定上限是同一个硬件字段（SBCM.CHMD）的两种取值，所以这个开关和下面那条滑块
