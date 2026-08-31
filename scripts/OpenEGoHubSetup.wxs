@@ -243,11 +243,16 @@
         会去删旧包还在用的文件，把旧包的卸载序列搅乱；晚于 InstallFiles 则整删目录会连
         刚铺下去的新文件一起删掉。
 
+        锚点不能写 After="RemoveExistingProducts"：MajorUpgrade 默认把 REP 排在
+        InstallInitialize 之前，而 deferred 动作必须落在 InstallInitialize 与
+        InstallFinalize 的事务之内，排在事务外安装器直接报 2762（实测）。挂在
+        InstallInitialize 之后同样满足「REP 之先、InstallFiles 之前」。
+
         条件 NOT Installed 让它只在首装和升级时跑。卸载和修复不跑——卸载有 ServiceControl
         和组件删除各司其职，修复本就不该动用户环境。回滚也不做补偿：清掉的是历史残留，
         安装失败了它们也不值得还原，这是 clean-install 的语义。
       -->
-      <Custom Action="CleanSweep" After="RemoveExistingProducts" Condition="NOT Installed" />
+      <Custom Action="CleanSweep" After="InstallInitialize" Condition="NOT Installed" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
