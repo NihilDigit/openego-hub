@@ -161,7 +161,9 @@ public:
     HostController(const HostController &) = delete;
     HostController &operator=(const HostController &) = delete;
 
-    [[nodiscard]] StartResult Start(const std::wstring &hostExePath) noexcept;
+    // extraArgs 原样附在命令行末尾，调用方用它把自己的日志级别传下去。
+    [[nodiscard]] StartResult Start(const std::wstring &hostExePath,
+                                    const std::wstring &extraArgs = {}) noexcept;
     [[nodiscard]] bool Stop(std::chrono::milliseconds timeout = std::chrono::seconds(10)) noexcept;
     [[nodiscard]] bool IsRunning() const noexcept;
     [[nodiscard]] int ExitCode() const noexcept;

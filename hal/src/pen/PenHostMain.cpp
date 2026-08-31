@@ -7,6 +7,8 @@
 #include "PenChannelLayout.h"
 #include "PenService.h"
 
+#include "shared/HostLog.h"
+
 #include <windows.h>
 
 #include <cstdio>
@@ -42,7 +44,10 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
     if (stopEventName && *stopEventName) {
         stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
         if (!stopEvent) {
-            wprintf(L"cannot open stop event %ls (err=%lu)\n", stopEventName, GetLastError());
+            // 先取 err 再打印：wprintf 自己会调用 Win32，晚一步取到的可能已经是它的错误码。
+            const DWORD err = GetLastError();
+            HOST_LOG_ERROR("cannot open stop event %ls (err=%lu)", stopEventName, err);
+            wprintf(L"cannot open stop event %ls (err=%lu)\n", stopEventName, err);
             return 2;
         }
     }
@@ -51,14 +56,18 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
     if (parentPid != 0) {
         parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
         if (!parent) {
-            wprintf(L"cannot open parent process %lu (err=%lu)\n", parentPid, GetLastError());
+            const DWORD err = GetLastError();
+            HOST_LOG_ERROR("cannot open parent process %lu (err=%lu)", parentPid, err);
+            wprintf(L"cannot open parent process %lu (err=%lu)\n", parentPid, err);
             return 2;
         }
     }
 
     Service service;
     if (!service.Start()) {
-        wprintf(L"failed to start PenService (err=%lu)\n", GetLastError());
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("failed to start PenService (err=%lu)", err);
+        wprintf(L"failed to start PenService (err=%lu)\n", err);
         return 1;
     }
 
@@ -66,17 +75,25 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
     Wire::EventWriter events;
     Wire::CommandReader commands;
     if (!snapshots.Open(Wire::kSnapshotName)) {
-        wprintf(L"cannot create the snapshot mapping (err=%lu)\n", GetLastError());
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("cannot create the snapshot mapping (err=%lu)", err);
+        wprintf(L"cannot create the snapshot mapping (err=%lu)\n", err);
         return 1;
     }
     if (!events.Open(Wire::kEventPipeName)) {
-        wprintf(L"cannot create the event pipe (err=%lu)\n", GetLastError());
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("cannot create the event pipe (err=%lu)", err);
+        wprintf(L"cannot create the event pipe (err=%lu)\n", err);
         return 1;
     }
     if (!commands.Open(Wire::kCommandPipeName)) {
-        wprintf(L"cannot create the command pipe (err=%lu)\n", GetLastError());
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("cannot create the command pipe (err=%lu)", err);
+        wprintf(L"cannot create the command pipe (err=%lu)\n", err);
         return 1;
     }
+
+    HOST_LOG_INFO("hosted and running (parent=%lu)", parentPid);
 
     service.RequestRefresh();
 
@@ -96,7 +113,13 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
     for (;;) {
         if (waitCount > 0) {
             const DWORD result = WaitForMultipleObjects(waitCount, waits, FALSE, tickMs);
-            if (result != WAIT_TIMEOUT) break;
+            if (result != WAIT_TIMEOUT) {
+                // 哪个句柄先亮决定了这次退出是「被要求停」还是「父进程没了」。
+                HOST_LOG_INFO("wait returned %lu (%s)", result,
+                              (stopEvent && result == WAIT_OBJECT_0) ? "stop event"
+                                                                     : "parent exited");
+                break;
+            }
         } else {
             Sleep(tickMs);
         }
@@ -140,6 +163,7 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
         }
     }
 
+    HOST_LOG_INFO("stopping");
     if (stopEvent) CloseHandle(stopEvent);
     if (parent) CloseHandle(parent);
     return 0;
@@ -219,14 +243,21 @@ void PrintUsage() {
 } // namespace
 
 int wmain(int argc, wchar_t **argv) {
+    Gaokun::HostLog::InitFromCommandLine(L"GaokunPenHost", argc, argv);
+    HOST_LOG_INFO("starting (pid=%lu)", GetCurrentProcessId());
+
     std::wstring depend;
     if (!DiscoverDependDirectory(depend)) {
+        HOST_LOG_ERROR("PenService.dll not found under <PCManager>%ls; "
+                       "the vendor Plugins directory was probably removed",
+                       kDependSuffix);
         wprintf(L"PenService.dll not found under <PCManager>%ls\n"
                 L"If that directory was removed to disable the vendor pen handling, this\n"
                 L"feature is unavailable until it is restored.\n",
                 kDependSuffix);
         return 2;
     }
+    HOST_LOG_INFO("depend directory: %ls", depend.c_str());
     (void)SetDllDirectoryW(depend.c_str());
 
     if (argc > 1 && _wcsicmp(argv[1], L"--console") == 0) {

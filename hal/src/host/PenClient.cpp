@@ -74,10 +74,12 @@ void HostController::CloseHandles() noexcept {
     m_process = nullptr;
 }
 
-StartResult HostController::Start(const std::wstring &hostExePath) noexcept {
+StartResult HostController::Start(const std::wstring &hostExePath,
+                                  const std::wstring &extraArgs) noexcept {
     if (!m_process) m_process = new (std::nothrow) Host::Process();
     if (!m_process) return StartResult::LaunchFailed;
-    return Translate(static_cast<Host::Process *>(m_process)->Start(hostExePath, kStopEventPrefix));
+    return Translate(
+        static_cast<Host::Process *>(m_process)->Start(hostExePath, kStopEventPrefix, extraArgs));
 }
 
 bool HostController::Stop(std::chrono::milliseconds timeout) noexcept {

@@ -33,8 +33,9 @@ public:
     Process &operator=(const Process &) = delete;
 
     // eventPrefix 用来区分不同宿主的停止事件，例如 L"GaokunPenHostStop"。
-    [[nodiscard]] LaunchResult Start(const std::wstring &exePath,
-                                     const wchar_t *eventPrefix) noexcept {
+    // extraArgs 原样拼在固定参数之后，调用方负责好引号，目前只用来传 --log-level。
+    [[nodiscard]] LaunchResult Start(const std::wstring &exePath, const wchar_t *eventPrefix,
+                                     const std::wstring &extraArgs = {}) noexcept {
         if (IsRunning()) return LaunchResult::AlreadyRunning;
         CloseHandles();
 
@@ -57,6 +58,7 @@ public:
 
         std::wstring commandLine = L"\"" + exePath + L"\" --hosted --parent " +
                                    std::to_wstring(self) + L" --stop-event " + eventName;
+        if (!extraArgs.empty()) commandLine += L" " + extraArgs;
 
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);

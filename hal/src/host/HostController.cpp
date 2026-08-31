@@ -49,7 +49,8 @@ void HostController::CloseHandles() noexcept {
     m_pid = 0;
 }
 
-StartResult HostController::Start(const std::wstring &hostExePath) noexcept {
+StartResult HostController::Start(const std::wstring &hostExePath,
+                                  const std::wstring &extraArgs) noexcept {
     if (IsRunning()) return StartResult::AlreadyRunning;
     CloseHandles();
 
@@ -67,6 +68,7 @@ StartResult HostController::Start(const std::wstring &hostExePath) noexcept {
     // 走完 ThpFuncStop，而不是留下一个占着设备的孤儿等人收拾。
     std::wstring commandLine = L"\"" + hostExePath + L"\" --hosted --parent " +
                                std::to_wstring(self) + L" --stop-event " + eventName;
+    if (!extraArgs.empty()) commandLine += L" " + extraArgs;
 
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);

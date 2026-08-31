@@ -643,7 +643,12 @@ bool ServiceHost::StartPenSubsystem() {
             return false;
         }
 
-        const auto penStart = m_penHost.Start(penHostPath);
+        // 宿主被 CREATE_NO_WINDOW 拉起，它自己的输出没有去处，只能落到
+        // ProgramData\OpenEGoHub\logs。级别跟随服务，免得两边各调一次。
+        const std::wstring hostLogArgs =
+            std::wstring(L"--log-level ") + Common::Logger::MinLevelName();
+
+        const auto penStart = m_penHost.Start(penHostPath, hostLogArgs);
         if (penStart != Gaokun::Pen::StartResult::Started &&
             penStart != Gaokun::Pen::StartResult::AlreadyRunning) {
             // 立刻退出几乎总是因为 PC Manager 的 Plugins 目录被删过，宿主会自己说明。
@@ -653,7 +658,7 @@ bool ServiceHost::StartPenSubsystem() {
             return false;
         }
 
-        const auto kbdStart = m_kbdHost.Start(kbdHostPath);
+        const auto kbdStart = m_kbdHost.Start(kbdHostPath, hostLogArgs);
         if (kbdStart != Gaokun::Keyboard::StartResult::Started &&
             kbdStart != Gaokun::Keyboard::StartResult::AlreadyRunning) {
             LOG_ERROR("Service", __func__, "MCU",
@@ -1001,7 +1006,11 @@ bool ServiceHost::StartEGoTouchProvider() {
 
     SetInputSuppressed(false);
 
-    switch (m_thpHost.Start(host)) {
+    // 同 StartPenSubsystem：宿主没有控制台，日志只能落盘，级别跟随服务。
+    const std::wstring hostLogArgs =
+        std::wstring(L"--log-level ") + Common::Logger::MinLevelName();
+
+    switch (m_thpHost.Start(host, hostLogArgs)) {
     case Gaokun::Thp::StartResult::Started:
     case Gaokun::Thp::StartResult::AlreadyRunning:
         LOG_INFO("Service", __func__, "Provider", "ARM64EC THP host started.");

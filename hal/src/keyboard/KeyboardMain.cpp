@@ -7,6 +7,8 @@
 #include "KbdChannelLayout.h"
 #include "KeyboardService.h"
 
+#include "shared/HostLog.h"
+
 #include <windows.h>
 
 #include <cstdio>
@@ -42,7 +44,10 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
     if (stopEventName && *stopEventName) {
         stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
         if (!stopEvent) {
-            wprintf(L"cannot open stop event %ls (err=%lu)\n", stopEventName, GetLastError());
+            // 先取 err 再打印：wprintf 自己会调用 Win32，晚一步取到的可能已经是它的错误码。
+            const DWORD err = GetLastError();
+            HOST_LOG_ERROR("cannot open stop event %ls (err=%lu)", stopEventName, err);
+            wprintf(L"cannot open stop event %ls (err=%lu)\n", stopEventName, err);
             return 2;
         }
     }
@@ -51,27 +56,37 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
     if (parentPid != 0) {
         parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
         if (!parent) {
-            wprintf(L"cannot open parent process %lu (err=%lu)\n", parentPid, GetLastError());
+            const DWORD err = GetLastError();
+            HOST_LOG_ERROR("cannot open parent process %lu (err=%lu)", parentPid, err);
+            wprintf(L"cannot open parent process %lu (err=%lu)\n", parentPid, err);
             return 2;
         }
     }
 
     Service service;
     if (!service.Start()) {
-        wprintf(L"failed to start KeyboardService (err=%lu)\n", GetLastError());
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("failed to start KeyboardService (err=%lu)", err);
+        wprintf(L"failed to start KeyboardService (err=%lu)\n", err);
         return 1;
     }
 
     Wire::SnapshotWriter snapshots;
     Wire::EventWriter events;
     if (!snapshots.Open(Wire::kSnapshotName)) {
-        wprintf(L"cannot create the snapshot mapping (err=%lu)\n", GetLastError());
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("cannot create the snapshot mapping (err=%lu)", err);
+        wprintf(L"cannot create the snapshot mapping (err=%lu)\n", err);
         return 1;
     }
     if (!events.Open(Wire::kEventPipeName)) {
-        wprintf(L"cannot create the event pipe (err=%lu)\n", GetLastError());
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("cannot create the event pipe (err=%lu)", err);
+        wprintf(L"cannot create the event pipe (err=%lu)\n", err);
         return 1;
     }
+
+    HOST_LOG_INFO("hosted and running (parent=%lu)", parentPid);
 
     service.RequestRefresh();
 
@@ -88,7 +103,14 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
 
     for (;;) {
         if (waitCount > 0) {
-            if (WaitForMultipleObjects(waitCount, waits, FALSE, tickMs) != WAIT_TIMEOUT) break;
+            const DWORD signalled = WaitForMultipleObjects(waitCount, waits, FALSE, tickMs);
+            if (signalled != WAIT_TIMEOUT) {
+                // 哪个句柄先亮决定了这次退出是「被要求停」还是「父进程没了」。
+                HOST_LOG_INFO("wait returned %lu (%s)", signalled,
+                              (stopEvent && signalled == WAIT_OBJECT_0) ? "stop event"
+                                                                       : "parent exited");
+                break;
+            }
         } else {
             Sleep(tickMs);
         }
@@ -118,6 +140,7 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
         }
     }
 
+    HOST_LOG_INFO("stopping");
     if (stopEvent) CloseHandle(stopEvent);
     if (parent) CloseHandle(parent);
     return 0;
@@ -171,14 +194,21 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
 
+    Gaokun::HostLog::InitFromCommandLine(L"GaokunKeyboardHost", argc, argv);
+    HOST_LOG_INFO("starting (pid=%lu)", GetCurrentProcessId());
+
     std::wstring depend;
     if (!DiscoverDependDirectory(depend)) {
+        HOST_LOG_ERROR("KeyboardService.dll not found under <PCManager>%ls; "
+                       "the vendor Plugins directory was probably removed",
+                       kDependSuffix);
         wprintf(L"KeyboardService.dll not found under <PCManager>%ls\n"
                 L"If that directory was removed to disable the vendor pen handling, this\n"
                 L"feature is unavailable until it is restored.\n",
                 kDependSuffix);
         return 2;
     }
+    HOST_LOG_INFO("depend directory: %ls", depend.c_str());
     (void)SetDllDirectoryW(depend.c_str());
 
     if (_wcsicmp(argv[1], L"--detach-support") == 0) return RunDetachSupport(argc, argv);

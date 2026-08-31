@@ -2,6 +2,8 @@
 #include "ThpModule.h"
 #include "VendorPath.h"
 
+#include "shared/HostLog.h"
+
 #include <windows.h>
 
 #include <cstdio>
@@ -109,6 +111,7 @@ void ReportStatus(DWORD state, DWORD exitCode = NO_ERROR) noexcept {
 
 void StopService() noexcept {
     if (g_module.IsLoaded()) {
+        HOST_LOG_INFO("stopping: ThpFuncStop then unload");
         (void)g_module.ThpFuncStop();
         g_module.Unload();
     }
@@ -138,10 +141,14 @@ DWORD WINAPI ServiceCtrlHandler(DWORD control, DWORD, LPVOID, LPVOID) noexcept {
 bool StartThp() noexcept {
     if (!g_module.Load()) {
         WriteEventLog(EVENTLOG_ERROR_TYPE, L"THP_Service.dll could not be loaded.");
+        HOST_LOG_ERROR("THP_Service.dll could not be loaded (err=%lu)", GetLastError());
         return false;
     }
     RegisterCallbacks();
     (void)g_module.ThpFuncStart();
+    HOST_LOG_INFO("ThpFuncStart called; VHFFunction=%d LogFunction=%d",
+                  Thp::ConfigStore::Instance().GetPenEleValue(0),
+                  Thp::ConfigStore::Instance().GetPenEleValue(1));
     return true;
 }
 
@@ -175,8 +182,10 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName) noexcept {
         // 由父进程创建，这里只打开。名字对不上时视为参数错误，不静默降级成「永不停止」。
         stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
         if (!stopEvent) {
-            wprintf(L"[hwthpec] cannot open stop event %ls (err=%lu)\n",
-                    stopEventName, GetLastError());
+            // 先取 err 再打印：wprintf 自己会调用 Win32，晚一步取到的可能已经是它的错误码。
+            const DWORD err = GetLastError();
+            HOST_LOG_ERROR("cannot open stop event %ls (err=%lu)", stopEventName, err);
+            wprintf(L"[hwthpec] cannot open stop event %ls (err=%lu)\n", stopEventName, err);
             return 2;
         }
     }
@@ -185,18 +194,22 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName) noexcept {
     if (parentPid != 0) {
         parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
         if (!parent) {
-            wprintf(L"[hwthpec] cannot open parent process %lu (err=%lu)\n",
-                    parentPid, GetLastError());
+            const DWORD err = GetLastError();
+            HOST_LOG_ERROR("cannot open parent process %lu (err=%lu)", parentPid, err);
+            wprintf(L"[hwthpec] cannot open parent process %lu (err=%lu)\n", parentPid, err);
             if (stopEvent) CloseHandle(stopEvent);
             return 2;
         }
     }
 
     if (!StartThp()) {
+        HOST_LOG_ERROR("hosted start failed; exiting with 1");
         if (stopEvent) CloseHandle(stopEvent);
         if (parent) CloseHandle(parent);
         return 1;
     }
+
+    HOST_LOG_INFO("hosted and running (parent=%lu)", parentPid);
 
     HANDLE waits[2];
     DWORD count = 0;
@@ -208,7 +221,10 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName) noexcept {
         for (;;) Sleep(1000);
     }
 
-    (void)WaitForMultipleObjects(count, waits, FALSE, INFINITE);
+    const DWORD signalled = WaitForMultipleObjects(count, waits, FALSE, INFINITE);
+    // 哪个句柄先亮决定了这次退出是「被要求停」还是「父进程没了」，两者的后续排查方向不同。
+    HOST_LOG_INFO("wait returned %lu (%s)", signalled,
+                  (stopEvent && signalled == WAIT_OBJECT_0) ? "stop event" : "parent exited");
 
     StopService();
 
@@ -243,12 +259,18 @@ int wmain(int argc, wchar_t **argv) {
     // THP_Service.dll 及其整条依赖链都在原厂安装目录里，而本程序不装到那里，所以必须显式
     // 把搜索路径指过去。原厂是 .NET 服务，CLR 从程序集所在目录解析 P/Invoke 的 DLL，
     // 位置与它一致才不需要这一步。
+    Gaokun::HostLog::InitFromCommandLine(L"GaokunThpHost", argc, argv);
+    HOST_LOG_INFO("starting (pid=%lu)", GetCurrentProcessId());
+
     std::wstring vendorDir;
     if (!Thp::DiscoverVendorDirectory(vendorDir)) {
+        HOST_LOG_ERROR("cannot locate the vendor install directory; "
+                       "is HuaweiThpService registered?");
         wprintf(L"[hwthpec] cannot locate the vendor install directory "
                 L"(is HuaweiThpService registered?)\n");
         return 2;
     }
+    HOST_LOG_INFO("vendor directory: %ls", vendorDir.c_str());
     (void)SetCurrentDirectoryW(vendorDir.c_str());
     (void)SetDllDirectoryW(vendorDir.c_str());
 

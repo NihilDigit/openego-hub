@@ -32,7 +32,9 @@ public:
 
     // 拉起宿主并接管触控。宿主会等待本进程的句柄，因此调用方即便崩溃，宿主也会自行
     // 走完 ThpFuncStop 再退出，不会留下占着设备的孤儿。
-    [[nodiscard]] StartResult Start(const std::wstring &hostExePath) noexcept;
+    // extraArgs 原样附在命令行末尾，调用方用它把自己的日志级别传下去。
+    [[nodiscard]] StartResult Start(const std::wstring &hostExePath,
+                                    const std::wstring &extraArgs = {}) noexcept;
 
     // 请求宿主停止并等待它退出。超时后强制终止并返回 false——那种情况下设备可能停在
     // 中间状态，调用方应当在交还原厂服务前把这一点记进日志。
