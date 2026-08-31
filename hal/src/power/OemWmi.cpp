@@ -154,10 +154,18 @@ Result Invoke(const uint8_t *request, size_t requestSize, uint8_t *response,
     Step(L"ExecQuery", hr);
     if (FAILED(hr)) { failure = hr; return Classify(hr); }
 
+    // 限时而不是 WBEM_INFINITE：查询给的是 WBEM_FLAG_RETURN_IMMEDIATELY，实例是在 Next
+    // 里才真正取的，WMI 服务此刻正忙（开机时常见）就会一直等下去，把调用方一起挂住。
+    // 超时返回 WBEM_S_TIMEDOUT，是成功码，只能靠实例数为 0 分辨，与「枚举不到」同路处理。
+    constexpr long kEnumTimeoutMs = 5000;
     ComPtr<IWbemClassObject> instance;
     ULONG returned = 0;
-    hr = enumerator->Next(WBEM_INFINITE, 1, instance.Receive(), &returned);
+    hr = enumerator->Next(kEnumTimeoutMs, 1, instance.Receive(), &returned);
     Step(L"Next", hr);
+    if (hr == WBEM_S_TIMEDOUT) {
+        failure = WBEM_S_TIMEDOUT;
+        return Result::Failed;
+    }
     if (FAILED(hr) || returned == 0) {
         // 非提升进程走到这里：枚举本身返回 S_FALSE 而不是拒绝访问，实例数为 0。整组
         // BiosWmi 调用曾因此被误判为「这台机器不支持」，见 docs/hardware-hal.md。

@@ -37,6 +37,19 @@ namespace Service {
 
 class ServiceLifecycleCoordinator;
 
+/// 启动阶段编号。启动失败时经 SCM 的 dwServiceSpecificExitCode 上报，值本身会被
+/// 事件日志和 `sc.exe query` 原样显示出来，所以只增不改：改了以后旧日志里的数字就
+/// 指向另一个阶段了。
+enum class ServiceStartPhase : uint32_t {
+    None = 0,
+    Config = 1,
+    RuntimeAndPipeline = 2,
+    IpcSubsystem = 3,
+    PenSubsystem = 4,
+    SystemStateMonitor = 5,
+    Exception = 6,
+};
+
 /// 模块加载器：负责创建、连接、启停所有子模块。
 /// 不知道 SCM 的存在，可以独立测试。
 class ServiceHost {
@@ -55,6 +68,12 @@ public:
 
     ServiceMode GetMode() const { return m_runtimeMode; }
 
+    /// Start() 返回 false 时停在哪个阶段。记录的是最后一个进入过的阶段，成功路径不清零，
+    /// 所以只在 Start() 失败之后读它有意义。
+    ServiceStartPhase LastFailedPhase() const {
+        return m_startPhase.load(std::memory_order_acquire);
+    }
+
 private:
     friend class ServiceLifecycleCoordinator;
     struct Impl;
@@ -66,6 +85,9 @@ private:
     // the startup ConfigStore, and without it Release would fall back to whatever the
     // pipeline member initializers happen to hold.
     ConfigRuntime m_configRuntime;
+
+    // 各 Start 阶段入口处写入。初始化跑在后台线程上，读取方是 SCM 线程，因此用原子。
+    std::atomic<ServiceStartPhase> m_startPhase{ServiceStartPhase::None};
 
     std::unique_ptr<DeviceRuntime> m_deviceRuntime;
     std::unique_ptr<Impl> m_impl;

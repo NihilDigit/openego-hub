@@ -133,11 +133,10 @@ public:
 
         EnsureDataDirectory();
 
-        // Elevate process priority for real-time touch processing
-        if (!SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS)) {
-            // Fallback: try HIGH if REALTIME fails (e.g. insufficient privileges)
-            SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-        }
+        // 触控数据路径不在本进程里：它跑在 GaokunThpHost 中，那边由厂商代码自己设
+        // REALTIME。本进程只是监督器，轮询快照、看住宿主，给它实时优先级不会让笔更跟手，
+        // 反而会在开机那一段把 SCM 和 WMI 的线程压下去，放大启动期的竞争。
+        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 
         // Debug builds register as a separate service (OpenEGoHubServiceDebug, see
         // scripts/install_debug_service.bat) and can run alongside an installed Release
@@ -155,7 +154,7 @@ public:
         Common::Logger::Init(kLoggerName, "C:/ProgramData/OpenEGoHub/logs/", nullptr);
 #endif
 
-        LOG_INFO("Service", __func__, "Boot", "Process priority set to REALTIME_PRIORITY_CLASS.");
+        LOG_INFO("Service", __func__, "Boot", "Process priority set to ABOVE_NORMAL_PRIORITY_CLASS.");
     }
 
 #if EGOTOUCH_SERVICE_ENABLE_IPC

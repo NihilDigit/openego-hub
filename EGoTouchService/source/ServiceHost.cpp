@@ -459,6 +459,7 @@ bool ServiceHost::ValidateStartupConfig(const Config::ConfigStore& store) const 
 }
 
 bool ServiceHost::StartRuntimeAndPipeline() {
+    m_startPhase.store(ServiceStartPhase::RuntimeAndPipeline, std::memory_order_release);
     m_deviceRuntime = std::make_unique<DeviceRuntime>(
         kDevicePathMaster, kDevicePathSlave, kDevicePathInterrupt);
 
@@ -491,9 +492,6 @@ bool ServiceHost::StartRuntimeAndPipeline() {
             return m_impl->m_penStatusWriter.SignalDoubleClick();
         });
         LOG_INFO("Service", __func__, "Boot", "Pen status channel published.");
-        // 开机读一次充电阈值。设置窗第一次打开时滑块要停在真实位置，等到用户提交才有值
-        // 就晚了——在此之前它只能停在 Minimum，看起来像用户自己设过 50%。
-        m_impl->RefreshChargeLimit();
         if (!m_impl->m_penStatusWriter.HasEventChannel()) {
             // 共享内存可用而事件没建成时，面板靠轮询照常显示，但双击转发会无声失效。
             // 不打错误码：事件创建失败发生在 Open() 内部，等日志写完 last error 早被覆盖了。
@@ -574,6 +572,7 @@ bool ServiceHost::StartRuntimeAndPipeline() {
 }
 
 bool ServiceHost::StartSystemStateMonitor() {
+    m_startPhase.store(ServiceStartPhase::SystemStateMonitor, std::memory_order_release);
     m_impl->m_sysMonitor = std::make_unique<Host::SystemStateMonitor>();
     const bool monitorOk = m_impl->m_sysMonitor->Start(
         [this](const Host::SystemStateEvent& ev) {
@@ -621,12 +620,17 @@ bool ServiceHost::StartSystemStateMonitor() {
 // IPC 控制面已经撤掉：调试与配置下发都不再经过命名管道。这三个入口留着是因为
 // ServiceLifecycleCoordinator 按固定顺序调用它们，删掉要动生命周期的阶段表。
 bool ServiceHost::StartIpcSubsystem() {
+    m_startPhase.store(ServiceStartPhase::IpcSubsystem, std::memory_order_release);
     return true;
 }
 
 bool ServiceHost::StartPenSubsystem() {
+    m_startPhase.store(ServiceStartPhase::PenSubsystem, std::memory_order_release);
     if (m_runtimeMode != ServiceMode::Full) {
         LOG_INFO("Service", __func__, "MCU", "Pen modules skipped (touch_only mode).");
+        // 充电阈值的常规首读在 AccessoryLoop 里，touch_only 不启动那个循环，只能在
+        // 这里读一次。整个 Start 已在后台线程且 WMI 有 5 秒上限，不再牵连 SCM。
+        m_impl->RefreshChargeLimit();
         return true;
     }
 
@@ -667,14 +671,24 @@ bool ServiceHost::StartPenSubsystem() {
             return false;
         }
 
-        // 宿主要先建好映射与管道，读者才连得上，所以退让几次而不是一次失败就放弃。
+        // 宿主刚拉起来，映射与管道未必已经建好，所以这五条通道此刻打不开是常态。
+        // 这里只试一次：五条各退让 25 次 200 毫秒，最坏能把启动路径占住 25 秒，而
+        // ServiceMain 要在这之前报 RUNNING。真正的重试交给 AccessoryLoop 的懒打开。
+        //
         // 打不开不算致命：快照读不到时上层显示「未知」，比让整个服务起不来要好。
-        for (int i = 0; i < 25 && !m_penSnapshots.Open(); ++i) Sleep(200);
-        for (int i = 0; i < 25 && !m_penEvents.Open(); ++i) Sleep(200);
-        bool penCommandsOpen = false;
-        for (int i = 0; i < 25 && !(penCommandsOpen = m_penCommands.Open()); ++i) Sleep(200);
-        for (int i = 0; i < 25 && !m_kbdSnapshots.Open(); ++i) Sleep(200);
-        for (int i = 0; i < 25 && !m_kbdEvents.Open(); ++i) Sleep(200);
+        const bool penSnapshotsOpen = m_penSnapshots.Open();
+        const bool penEventsOpen = m_penEvents.Open();
+        const bool penCommandsOpen = m_penCommands.Open();
+        const bool kbdSnapshotsOpen = m_kbdSnapshots.Open();
+        const bool kbdEventsOpen = m_kbdEvents.Open();
+        if (!penSnapshotsOpen || !penEventsOpen || !penCommandsOpen ||
+            !kbdSnapshotsOpen || !kbdEventsOpen) {
+            LOG_WARN("Service", __func__, "MCU",
+                     "Accessory channels not ready yet (penSnapshots={}, penEvents={}, "
+                     "penCommands={}, kbdSnapshots={}, kbdEvents={}).",
+                     penSnapshotsOpen, penEventsOpen, penCommandsOpen,
+                     kbdSnapshotsOpen, kbdEventsOpen);
+        }
 
         if (penCommandsOpen) {
             m_deviceRuntime->SetPenCurrentFuncCommandCallback(
@@ -700,6 +714,7 @@ bool ServiceHost::StartPenSubsystem() {
 bool ServiceHost::Start() {
     return m_impl->m_lifecycle.RunStart([this] {
         try {
+            m_startPhase.store(ServiceStartPhase::Config, std::memory_order_release);
             if (!InitializeConfigStores()) {
                 LOG_ERROR("Service", "Start", "Boot", "Startup config load/validation failed; service start blocked.");
                 return false;
@@ -716,12 +731,14 @@ bool ServiceHost::Start() {
             LOG_INFO("Service", "Start", "Boot", "All modules started.");
             return true;
         } catch (const std::exception& error) {
+            m_startPhase.store(ServiceStartPhase::Exception, std::memory_order_release);
             ServiceLifecycleCoordinator::Stop(*this);
             LOG_ERROR("Service", "Start", "Boot",
                       "Unhandled startup exception; service lifecycle rolled back: {}",
                       error.what());
             return false;
         } catch (...) {
+            m_startPhase.store(ServiceStartPhase::Exception, std::memory_order_release);
             ServiceLifecycleCoordinator::Stop(*this);
             LOG_ERROR("Service", "Start", "Boot",
                       "Unhandled non-standard startup exception; service lifecycle rolled back.");
@@ -741,7 +758,17 @@ void ServiceHost::CloseIpcResources() {
 // 用轮询而不是等宿主的通知：快照本身可重复读，错过一轮没有代价，而少一条跨进程唤醒路径
 // 就少一处可能卡住的地方。事件那侧是管道，Poll 不阻塞，同一个循环里一并取走。
 void ServiceHost::AccessoryLoop() {
+    // 充电阈值的首读挪到了这里。它走 WMI，一次往返在实测里可以花掉几秒，放在启动路径上
+    // 就把 ServiceMain 报 RUNNING 的时刻一起推后，安装程序于是停在「正在启动服务」。
+    // 设置窗第一次打开时滑块仍能停在真实位置：这一轮在 250 毫秒内就跑到了。
+    bool chargeLimitRead = false;
+
     while (!m_accessoryStop.load(std::memory_order_acquire)) {
+        if (!chargeLimitRead) {
+            m_impl->RefreshChargeLimit();
+            chargeLimitRead = true;
+        }
+
         Gaokun::Pen::Event penEvent{};
         while (m_penEvents.Poll(penEvent)) {
             using K = Gaokun::Pen::EventKind;

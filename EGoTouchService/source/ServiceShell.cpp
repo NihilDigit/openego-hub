@@ -5,6 +5,9 @@
 
 #include <powersetting.h>
 
+#include <atomic>
+#include <thread>
+
 namespace Service {
 
 struct ServiceShell::Impl {
@@ -12,6 +15,10 @@ struct ServiceShell::Impl {
     SERVICE_STATUS status{};
     HANDLE stopEvent = nullptr;
     ServiceHost host;
+
+    // 初始化跑在后台，SvcMain 只等停止信号。声明在无条件区：Release 同样要编。
+    std::thread initThread;
+    std::atomic<bool> startFailed{false};
 
     // PBT power setting notification handles
     HPOWERNOTIFY hDisplayNotify = nullptr;
@@ -45,20 +52,51 @@ void WINAPI ServiceShell::SvcMain(DWORD argc, LPWSTR* argv) {
     s->ReportStatus(SERVICE_START_PENDING, 3000);
     s->m_impl->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
-    LOG_INFO("Service", __func__, "Boot", "Starting modules...");
-    if (!s->m_impl->host.Start()) {
-        LOG_ERROR("Service", __func__, "Boot", "ServiceHost::Start() failed.");
-        s->ReportStatus(SERVICE_STOPPED);
+    // 先报 RUNNING，再在后台做初始化。整条启动路径要停华为服务、起三个 hal 宿主、读一次
+    // WMI，谁都可能花上十几秒；SCM 在此期间不会把控制码送进来，安装程序的 StartServices
+    // 就停在「正在启动服务」，用户看到的是装不上，而不是启动慢。
+    //
+    // 更硬的理由是 SCM 重入：启动路径上的 Release() 会去 StartServiceW 拉起 HuaweiThpService，
+    // 而本服务自己还是 START_PENDING，等于在 SCM 里嵌套一次服务操作，有死锁窗口。
+    s->ReportStatus(SERVICE_RUNNING);
+
+    s->m_impl->initThread = std::thread([s] {
+        LOG_INFO("Service", "SvcMain", "Boot", "Starting modules...");
+        if (!s->m_impl->host.Start()) {
+            LOG_ERROR("Service", "SvcMain", "Boot", "ServiceHost::Start() failed; stopping.");
+            s->m_impl->startFailed.store(true, std::memory_order_release);
+            s->SignalShutdownTransportAndStop();
+            return;
+        }
+        s->RegisterPowerNotifications();
+        LOG_INFO("Service", "SvcMain", "Running", "All modules started.");
+    });
+
+    LOG_INFO("Service", __func__, "Running", "Service is running. Waiting for stop signal...");
+    s->WaitForStop();
+
+    // 停止信号可能在初始化还没跑完时到达。join 是安全的：ServiceHost::Start 与 Stop 都
+    // 经 ServiceLifecycleStateMachine 串行化，Stop 会等在飞的 Start 走完再整体回滚。
+    if (s->m_impl->initThread.joinable()) {
+        s->m_impl->initThread.join();
+    }
+    s->CloseStopEvent();
+
+    s->UnregisterPowerNotifications();
+    s->m_impl->host.Stop();
+
+    // 启动失败要报非零退出码。一律 NO_ERROR 会让 SCM 把失败当作干净停止，
+    // ServiceEntry 配的 SC_ACTION_RESTART（5s/10s/30s）于是永远不触发。
+    if (s->m_impl->startFailed.load(std::memory_order_acquire)) {
+        const auto phase = s->m_impl->host.LastFailedPhase();
+        LOG_ERROR("Service", __func__, "Stopped",
+                  "Service stopped after a failed start (phase={}).",
+                  static_cast<unsigned>(phase));
+        s->ReportStatus(SERVICE_STOPPED, 0, ERROR_SERVICE_SPECIFIC_ERROR,
+                        static_cast<DWORD>(phase));
         return;
     }
 
-    s->RegisterPowerNotifications();
-
-    s->ReportStatus(SERVICE_RUNNING);
-    LOG_INFO("Service", __func__, "Running", "Service is running. Waiting for stop signal...");
-    s->WaitForStop();
-    s->UnregisterPowerNotifications();
-    s->m_impl->host.Stop();
     s->ReportStatus(SERVICE_STOPPED);
     LOG_INFO("Service", __func__, "Stopped", "Service stopped.");
 }
@@ -179,6 +217,7 @@ void ServiceShell::RunAsConsole() {
 
     LOG_INFO("Service", __func__, "Running", "Service running in console mode. Press Ctrl+C to stop.");
     WaitForStop();
+    CloseStopEvent();
     m_impl->host.Stop();
     LOG_INFO("Service", __func__, "Stopped", "Console mode stopped.");
 }
@@ -186,12 +225,15 @@ void ServiceShell::RunAsConsole() {
 
 // ─── 辅助 ────────────────────────────────────
 
-void ServiceShell::ReportStatus(DWORD state, DWORD waitHint) {
+void ServiceShell::ReportStatus(DWORD state, DWORD waitHint,
+                                DWORD win32Exit, DWORD specificExit) {
     if (!m_impl->statusHandle) return;
 
     m_impl->status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     m_impl->status.dwCurrentState = state;
-    m_impl->status.dwWin32ExitCode = NO_ERROR;
+    m_impl->status.dwWin32ExitCode = win32Exit;
+    // 只有 dwWin32ExitCode 为 ERROR_SERVICE_SPECIFIC_ERROR 时 SCM 才读这一项。
+    m_impl->status.dwServiceSpecificExitCode = specificExit;
     m_impl->status.dwWaitHint = waitHint;
 
     if (state == SERVICE_START_PENDING) {
@@ -214,9 +256,17 @@ void ServiceShell::ReportStatus(DWORD state, DWORD waitHint) {
     SetServiceStatus(m_impl->statusHandle, &m_impl->status);
 }
 
+// 等待期间不关句柄。初始化线程失败时也会来置这个事件，而它可能与 SCM 送来的 STOP 撞在
+// 一起；等醒来就关掉，另一边的 SetEvent 就打在一个已经回收、可能已被复用的句柄上。
+// 关闭推迟到初始化线程 join 之后。
 void ServiceShell::WaitForStop() {
     if (m_impl->stopEvent) {
         WaitForSingleObject(m_impl->stopEvent, INFINITE);
+    }
+}
+
+void ServiceShell::CloseStopEvent() {
+    if (m_impl->stopEvent) {
         CloseHandle(m_impl->stopEvent);
         m_impl->stopEvent = nullptr;
     }

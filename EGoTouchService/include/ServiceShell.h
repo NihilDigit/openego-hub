@@ -49,8 +49,10 @@ private:
     void SignalShutdownTransportAndStop() noexcept;
     void RegisterPowerNotifications();
     void UnregisterPowerNotifications();
-    void ReportStatus(DWORD state, DWORD waitHint = 0);
+    void ReportStatus(DWORD state, DWORD waitHint = 0,
+                      DWORD win32Exit = NO_ERROR, DWORD specificExit = 0);
     void WaitForStop();
+    void CloseStopEvent();
 
     std::unique_ptr<Impl> m_impl;
 };
