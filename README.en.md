@@ -126,6 +126,16 @@ come with them.
 3. The service starts with Windows from then on, and the settings window opens from the
    Start menu.
 
+### Upgrading and uninstalling
+
+- The installer cleans up before it installs: services, program files and shortcuts left
+  by any previous version — including pre-rename and test builds — are removed
+  automatically, with no manual uninstall needed first.
+- User configuration survives an upgrade: settings, logs, and the record needed to
+  restore any Huawei services you disabled.
+- Uninstalling hands touch back to the Huawei touch service and re-enables any Huawei
+  background services that were disabled from the settings window.
+
 ### How it behaves
 
 - **Touch handover.** The program holds the touch input path while it runs. On exit or on
