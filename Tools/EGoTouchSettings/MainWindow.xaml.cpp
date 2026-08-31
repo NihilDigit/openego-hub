@@ -966,8 +966,14 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
         KeyboardStateText().Text(L"服务未运行");
         KeyboardBatteryIndicator().SetState(false, 0, false);
         KeyboardIdentityGroup().Visibility(Visibility::Collapsed);
+        AccessoryVendorMissingBar().IsOpen(false);
         return;
     }
+
+    // 配件组件缺失的提示直接按当前帧开合，不套用下面那套「整帧空白时保持上次显示」：
+    // hostHealth 由服务每轮无条件发布，这里的假值就是「已探测，组件在」，不是缺信息。
+    AccessoryVendorMissingBar().IsOpen(
+        state->hasHostHealth && (state->penVendorMissing || state->kbdVendorMissing));
 
     // ── 笔 ──
     if (state->modelName[0] != '\0') {

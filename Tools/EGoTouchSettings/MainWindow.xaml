@@ -217,6 +217,18 @@
                     SizeChanged="DeviceCardsSizeChanged"
                     VerticalScrollBarVisibility="Auto"
                     HorizontalScrollBarVisibility="Disabled">
+                    <!-- 提示条与卡片网格并列放进 StackPanel，而不是给网格加一行：网格的
+                         RowSpacing 是 24，空行照样占那 24，提示条收起时页顶会多出一块空白。
+                         StackPanel 则会连同 Margin 一起跳过收起的 InfoBar。 -->
+                    <StackPanel>
+                    <InfoBar
+                        x:Name="AccessoryVendorMissingBar"
+                        Margin="24,8,24,0"
+                        IsOpen="False"
+                        IsClosable="False"
+                        Severity="Warning"
+                        Title="未找到电脑管家的配件组件"
+                        Message="配件状态依赖华为电脑管家自带的组件，当前未能加载，电量与固件信息不可用。重新安装华为电脑管家后会自动恢复。" />
                     <Grid x:Name="DeviceCards" Padding="24,8,24,24"
                           ColumnSpacing="24" RowSpacing="24">
                         <Grid.ColumnDefinitions>
@@ -437,6 +449,7 @@
                             </StackPanel>
                         </StackPanel>
                     </Grid>
+                    </StackPanel>
                 </ScrollViewer>
 
                 <!-- ── 电池页 ── -->
