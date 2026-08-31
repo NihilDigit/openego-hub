@@ -338,6 +338,10 @@ void Service::SetDetachSupport(bool enable) noexcept {
     if (g_api.detachSupportSet) g_api.detachSupportSet(enable ? 1 : 0);
 }
 
+bool Service::HasDetachSupportCommand() const noexcept {
+    return m_module != nullptr && g_api.detachSupportSet != nullptr;
+}
+
 bool Service::QueryDetachSupport(bool &enabled) noexcept {
     if (!m_module || !g_api.detachSupportGet || !g_detachReply) return false;
 

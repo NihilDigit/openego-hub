@@ -41,7 +41,10 @@ struct Snapshot {
     uint8_t battery = 0;
     uint8_t _pad0 = 0;
     uint16_t _pad1 = 0;
-    uint32_t _pad2 = 0;
+    // 宿主还活着的判据。updatedAtUnixMs 只在有字段变化时前移，宿主死后 seqlock 停在最后
+    // 一帧，读者拿到的仍是一份自洽的旧快照而无从分辨。心跳每秒无条件自增一次，读者比对
+    // 两次采样即可。占的是原来的 _pad2，旧读者当填充跳过，176 字节布局不变。
+    uint32_t heartbeat = 0;
     uint64_t updatedAtUnixMs = 0;
     char firmware[kVersionCapacity]{};
     char hardware[kVersionCapacity]{};
@@ -51,13 +54,18 @@ struct Snapshot {
 };
 static_assert(sizeof(Snapshot) == 176, "Snapshot layout must stay fixed across both sides");
 
+// 只追加，不插入也不重排：写者在宿主里、读者在服务里，两个可执行分开构建，插一个值会
+// 让不匹配的一对错位解释所有后续事件。
 enum class EventKind : uint32_t {
     None = 0,
     ConnectRequest,
     ConnectResult,
     DetachChanged,        ///< 插拔，value 非零表示已分离
-    DetachSupportChanged, ///< 开关被改动
+    DetachSupportChanged, ///< 开关被改动，value 是 MCU 的回显
     FirstBatteryAfterConnect,
+    // 命令通道上一条 SetDetachSupport 的落地结果。与 DetachSupportChanged 分开，是因为
+    // 后者由厂商回调产生，无从区分「谁改的」和「改成功没有」。
+    DetachSupportResult,  ///< value: 1 已启用 / 0 已停用 / -1 DLL 不支持 / -2 读回超时
 };
 
 struct Event {
@@ -66,6 +74,20 @@ struct Event {
     uint64_t atUnixMs = 0;
 };
 static_assert(sizeof(Event) == 16, "Event layout must stay fixed across both sides");
+
+// ---- 下行命令 ----
+
+// 同样只追加。与 Gaokun::Pen::CommandKind 同构。
+enum class CommandKind : uint32_t {
+    None = 0,
+    SetDetachSupport,
+};
+
+struct Command {
+    uint32_t kind = 0;
+    int32_t value = 0;
+};
+static_assert(sizeof(Command) == 8, "Command layout must stay fixed across both sides");
 
 class SnapshotReader {
 public:
@@ -93,6 +115,23 @@ public:
 
     [[nodiscard]] bool Open() noexcept;
     [[nodiscard]] bool Poll(Event &out) noexcept;
+
+private:
+    void *m_impl = nullptr;
+};
+
+// 向常驻宿主下发命令。与 Gaokun::Pen::CommandWriter 同构。
+class CommandWriter {
+public:
+    CommandWriter() noexcept = default;
+    ~CommandWriter() noexcept;
+
+    CommandWriter(const CommandWriter &) = delete;
+    CommandWriter &operator=(const CommandWriter &) = delete;
+
+    // 宿主未运行时返回 false，调用方据此退到 SetDetachSupport 那条一次性路径。
+    [[nodiscard]] bool Open() noexcept;
+    [[nodiscard]] bool SetDetachSupport(bool enable) noexcept;
 
 private:
     void *m_impl = nullptr;
@@ -129,8 +168,12 @@ private:
     int m_lastExitCode = -1;
 };
 
-// 分离后无线连接开关的一次性设置。宿主不必常驻：命令发出后由随后的
-// DetachSupportChanged 事件或下一次快照确认。
+// 分离后无线连接开关的一次性设置：另起一个宿主进程跑一次命令行。
+//
+// 常驻宿主在跑的时候不要走这条路，用 CommandWriter。这里拉起的第二个实例会和常驻宿主
+// 争抢同一个 MCU 端点，本身就容易失败；即使成功，回显也发生在一次性实例里，常驻宿主的
+// 快照最快要等下一次整表刷新才翻转，界面按回读判定就会弹回。留着它是因为服务在宿主没起
+// 来时仍要能改这个开关。
 [[nodiscard]] bool SetDetachSupport(const std::wstring &hostExePath, bool enable) noexcept;
 
 } // namespace Gaokun::Keyboard

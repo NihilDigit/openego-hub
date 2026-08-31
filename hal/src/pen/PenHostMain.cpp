@@ -106,7 +106,12 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
     // 因为多数字段本来就由 MCU 主动推送。
     const DWORD tickMs = 200;
     const int ticksPerRefresh = refreshSeconds * 1000 / static_cast<int>(tickMs);
+    // 心跳每秒一次。周期要明显短于服务侧判定宿主失联的窗口，又不必细到每个 tick——
+    // 快照本身没变时，发布只是为了让读者看见心跳在动。
+    const int ticksPerHeartbeat = 1000 / static_cast<int>(tickMs);
     int tick = 0;
+    int sincePublish = 0;
+    uint32_t heartbeat = 0;
     Snapshot lastPublished{};
     bool everPublished = false;
 
@@ -146,12 +151,16 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
             (void)events.Send(event);
         }
 
-        const Snapshot current = service.GetSnapshot();
-        if (!everPublished || current.updatedAtUnixMs != lastPublished.updatedAtUnixMs) {
+        Snapshot current = service.GetSnapshot();
+        const bool changed =
+            !everPublished || current.updatedAtUnixMs != lastPublished.updatedAtUnixMs;
+        if (changed || ++sincePublish >= ticksPerHeartbeat) {
+            sincePublish = 0;
+            current.heartbeat = ++heartbeat;
             snapshots.Publish(current);
             lastPublished = current;
             everPublished = true;
-            if (verbose) {
+            if (verbose && changed) {
                 wprintf(L"snapshot flags=0x%08x battery=%u module=%u\n", current.flags,
                         current.battery, current.moduleId);
             }

@@ -3,6 +3,9 @@
 // 一个可执行同时承担两种用法：常驻宿主（--hosted，把状态与事件发布给上层），以及一次性
 // 命令行（--detach-support，用于手工查看或改动开关）。两者共用同一份 DLL 封装，不必为了
 // 改一个开关而让上层去理解厂商 DLL 的异步模型。
+//
+// 常驻时开关走命令管道，由这个实例自己执行；--detach-support 只是宿主没起来时的退路，
+// 两个实例同时握着 MCU 端点会互相打架。
 
 #include "KbdChannelLayout.h"
 #include "KeyboardService.h"
@@ -23,6 +26,15 @@ namespace {
 constexpr const wchar_t *kDependSuffix =
     L"\\components\\accessories_center\\accessories_app\\AccessoryApp\\Lib\\Plugins\\Depend";
 
+[[nodiscard]] uint64_t NowUnixMs() noexcept {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER v{};
+    v.LowPart = ft.dwLowDateTime;
+    v.HighPart = ft.dwHighDateTime;
+    return (v.QuadPart - 116444736000000000ULL) / 10000ULL;
+}
+
 [[nodiscard]] bool DiscoverDependDirectory(std::wstring &out) noexcept {
     const wchar_t *roots[] = {
         L"C:\\Program Files\\Huawei\\PCManager",
@@ -37,6 +49,39 @@ constexpr const wchar_t *kDependSuffix =
         }
     }
     return false;
+}
+
+// 命令由常驻宿主自己执行，而不是另起一个进程：同一个实例发命令、收回显、发布快照，
+// 界面按回读判定才不会在下一次整表刷新之前读到旧值。
+void HandleCommand(Service &service, Wire::EventWriter &events, const Command &command,
+                   bool verbose) {
+    if (static_cast<CommandKind>(command.kind) != CommandKind::SetDetachSupport ||
+        (command.value != 0 && command.value != 1)) {
+        HOST_LOG_WARN("ignoring command kind=%u value=%d", command.kind, command.value);
+        if (verbose) wprintf(L"ignored command kind=%u value=%d\n", command.kind, command.value);
+        return;
+    }
+
+    const bool enable = command.value != 0;
+    HOST_LOG_INFO("command SetDetachSupport(%s)", enable ? "enable" : "disable");
+
+    int32_t result = -1;
+    if (service.HasDetachSupportCommand()) {
+        service.SetDetachSupport(enable);
+        // 原厂的 set 不等回应，读回是唯一的判据；读回同时也让回调刷新快照里的标志位，
+        // 本轮循环末尾的发布就带上新值。
+        bool now = false;
+        result = service.QueryDetachSupport(now) ? (now ? 1 : 0) : -2;
+        service.RequestRefresh();
+    } else {
+        HOST_LOG_WARN("KeyboardService.dll does not export CommandSendKbdDetachSupportSet");
+    }
+
+    HOST_LOG_INFO("SetDetachSupport(%s) -> %d", enable ? "enable" : "disable", result);
+    if (verbose) wprintf(L"SetDetachSupport(%d) -> %d\n", command.value, result);
+
+    const Event event{static_cast<uint32_t>(EventKind::DetachSupportResult), result, NowUnixMs()};
+    (void)events.Send(event);
 }
 
 int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
@@ -73,6 +118,7 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
 
     Wire::SnapshotWriter snapshots;
     Wire::EventWriter events;
+    Wire::CommandReader commands;
     if (!snapshots.Open(Wire::kSnapshotName)) {
         const DWORD err = GetLastError();
         HOST_LOG_ERROR("cannot create the snapshot mapping (err=%lu)", err);
@@ -85,8 +131,15 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
         wprintf(L"cannot create the event pipe (err=%lu)\n", err);
         return 1;
     }
+    if (!commands.Open(Wire::kCommandPipeName)) {
+        const DWORD err = GetLastError();
+        HOST_LOG_ERROR("cannot create the command pipe (err=%lu)", err);
+        wprintf(L"cannot create the command pipe (err=%lu)\n", err);
+        return 1;
+    }
 
-    HOST_LOG_INFO("hosted and running (parent=%lu)", parentPid);
+    HOST_LOG_INFO("hosted and running (parent=%lu, detachSupportSet=%s)", parentPid,
+                  service.HasDetachSupportCommand() ? "available" : "missing");
 
     service.RequestRefresh();
 
@@ -97,7 +150,12 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
 
     const DWORD tickMs = 200;
     const int ticksPerRefresh = 5000 / static_cast<int>(tickMs);
+    // 心跳每秒一次。周期要明显短于服务侧判定宿主失联的窗口，又不必细到每个 tick——
+    // 快照本身没变时，发布只是为了让读者看见心跳在动。
+    const int ticksPerHeartbeat = 1000 / static_cast<int>(tickMs);
     int tick = 0;
+    int sincePublish = 0;
+    uint32_t heartbeat = 0;
     Snapshot lastPublished{};
     bool everPublished = false;
 
@@ -116,6 +174,12 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
         }
 
         events.PollForReader();
+        commands.PollForWriter();
+
+        Command command{};
+        while (commands.Poll(command)) {
+            HandleCommand(service, events, command, verbose);
+        }
 
         Event event{};
         while (service.PopEvent(event)) {
@@ -123,12 +187,16 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
             (void)events.Send(event);
         }
 
-        const Snapshot current = service.GetSnapshot();
-        if (!everPublished || current.updatedAtUnixMs != lastPublished.updatedAtUnixMs) {
+        Snapshot current = service.GetSnapshot();
+        const bool changed =
+            !everPublished || current.updatedAtUnixMs != lastPublished.updatedAtUnixMs;
+        if (changed || ++sincePublish >= ticksPerHeartbeat) {
+            sincePublish = 0;
+            current.heartbeat = ++heartbeat;
             snapshots.Publish(current);
             lastPublished = current;
             everPublished = true;
-            if (verbose) {
+            if (verbose && changed) {
                 wprintf(L"snapshot flags=0x%08x battery=%u module=%u\n", current.flags,
                         current.battery, current.moduleId);
             }

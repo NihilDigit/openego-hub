@@ -9,11 +9,14 @@ namespace Gaokun::Keyboard::Wire {
 
 inline constexpr wchar_t kSnapshotName[] = L"Global\\GaokunKbdSnapshot";
 inline constexpr wchar_t kEventPipeName[] = L"\\\\.\\pipe\\GaokunKbdEvents";
+inline constexpr wchar_t kCommandPipeName[] = L"\\\\.\\pipe\\GaokunKbdCommands";
 inline constexpr wchar_t kStopEventPrefix[] = L"GaokunKbdHostStop";
 
 using SnapshotWriter = Channel::SeqlockWriter<Snapshot>;
 using SnapshotReaderImpl = Channel::SeqlockReader<Snapshot>;
 using EventWriter = Channel::EventPipeWriter<Event>;
 using EventReaderImpl = Channel::EventPipeReader<Event>;
+using CommandReader = Channel::CommandPipeReader<Command>;
+using CommandWriterImpl = Channel::CommandPipeWriter<Command>;
 
 } // namespace Gaokun::Keyboard::Wire

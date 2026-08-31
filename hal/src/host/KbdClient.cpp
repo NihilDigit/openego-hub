@@ -50,6 +50,20 @@ bool EventReader::Poll(Event &out) noexcept {
     return static_cast<EventReaderImpl *>(m_impl)->Poll(out);
 }
 
+CommandWriter::~CommandWriter() noexcept { delete static_cast<CommandWriterImpl *>(m_impl); }
+
+bool CommandWriter::Open() noexcept {
+    if (!m_impl) m_impl = new (std::nothrow) CommandWriterImpl();
+    if (!m_impl) return false;
+    return static_cast<CommandWriterImpl *>(m_impl)->Open(kCommandPipeName);
+}
+
+bool CommandWriter::SetDetachSupport(bool enable) noexcept {
+    if (!m_impl) return false;
+    const Command command{static_cast<uint32_t>(CommandKind::SetDetachSupport), enable ? 1 : 0};
+    return static_cast<CommandWriterImpl *>(m_impl)->Send(command);
+}
+
 HostController::~HostController() noexcept { delete static_cast<Host::Process *>(m_process); }
 
 void HostController::CloseHandles() noexcept {

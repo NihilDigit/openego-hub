@@ -33,6 +33,10 @@ public:
     // 分离后无线连接开关。原厂不等回应，写入是否生效要靠随后的快照或事件确认。
     void SetDetachSupport(bool enable) noexcept;
 
+    // 不同版本的 KeyboardService 导出并不一致，Set 缺失时上面那个调用是静默的空操作，
+    // 与「发了但 MCU 没理」分不开，所以要能先问。
+    [[nodiscard]] bool HasDetachSupportCommand() const noexcept;
+
     // 仅供一次性的命令行用法：发出查询并等一个回应，超时返回 false。
     [[nodiscard]] bool QueryDetachSupport(bool &enabled) noexcept;
 

@@ -30,7 +30,9 @@ void PrintUsage() {
     wprintf(L"gaokun-ctl -- drive and inspect the hal hosts\n\n"
             L"  thp  --test <seconds>    take the touch device, hold, hand it back\n"
             L"  pen  --watch <seconds>   pen state and events\n"
-            L"  kbd  --watch <seconds>   keyboard state and events\n\n"
+            L"  kbd  --watch <seconds>   keyboard state and events\n"
+            L"  kbd  --detach-support <enable|disable>\n"
+            L"                           drive the resident host over the command pipe\n\n"
             L"thp requires HuaweiThpService to be stopped first: the device can only be\n"
             L"held by one implementation at a time.\n");
 }
@@ -78,6 +80,7 @@ void PrintPen(const Gaokun::Pen::Snapshot &s) {
     using F = Gaokun::Pen::Flag;
     const auto has = [&](F f) { return (s.flags & static_cast<uint32_t>(f)) != 0; };
     wprintf(L"  flags      0x%08x\n", s.flags);
+    wprintf(L"  heartbeat  %u\n", s.heartbeat);
     if (has(F::HasConnected)) wprintf(L"  connected  %ls\n", has(F::Connected) ? L"yes" : L"no");
     if (has(F::HasBattery)) wprintf(L"  battery    %u%%\n", s.battery);
     if (has(F::HasCharging)) wprintf(L"  charging   %ls\n", has(F::Charging) ? L"yes" : L"no");
@@ -137,6 +140,7 @@ const wchar_t *KbdKindName(uint32_t kind) {
     case K::DetachChanged: return L"DetachChanged";
     case K::DetachSupportChanged: return L"DetachSupportChanged";
     case K::FirstBatteryAfterConnect: return L"FirstBatteryAfterConnect";
+    case K::DetachSupportResult: return L"DetachSupportResult";
     default: return L"None";
     }
 }
@@ -145,6 +149,7 @@ void PrintKbd(const Gaokun::Keyboard::Snapshot &s) {
     using F = Gaokun::Keyboard::Flag;
     const auto has = [&](F f) { return (s.flags & static_cast<uint32_t>(f)) != 0; };
     wprintf(L"  flags        0x%08x\n", s.flags);
+    wprintf(L"  heartbeat    %u\n", s.heartbeat);
     if (has(F::HasConnected)) wprintf(L"  connected    %ls\n", has(F::Connected) ? L"yes" : L"no");
     if (has(F::HasDetached)) wprintf(L"  detached     %ls\n", has(F::Detached) ? L"yes" : L"no");
     if (has(F::HasDetachSupport))
@@ -194,9 +199,76 @@ int RunKbd(int seconds) {
     return clean ? 0 : 1;
 }
 
+// 命令通道的端到端验证。宿主已在跑就直接连它的命令管道，不另起一个——多一个实例就会和
+// 常驻的那个抢 MCU 端点，那正是这条命令要取代的旧路径。
+int RunKbdDetachSupport(bool enable) {
+    Gaokun::Keyboard::CommandWriter commands;
+    Gaokun::Keyboard::HostController controller;
+    bool started = false;
+
+    if (!commands.Open()) {
+        wprintf(L"no resident host on the command pipe; starting one\n");
+        const auto result = controller.Start(SiblingPath(L"GaokunKeyboardHost.exe"));
+        if (result != Gaokun::Keyboard::StartResult::Started &&
+            result != Gaokun::Keyboard::StartResult::AlreadyRunning) {
+            wprintf(L"start failed (result=%d, exit=%d)\n", static_cast<int>(result),
+                    controller.ExitCode());
+            return 1;
+        }
+        started = true;
+        for (int i = 0; i < 20 && !commands.Open(); ++i) Sleep(200);
+    }
+
+    Gaokun::Keyboard::SnapshotReader snapshots;
+    for (int i = 0; i < 20 && !snapshots.Open(); ++i) Sleep(200);
+    Gaokun::Keyboard::EventReader events;
+    for (int i = 0; i < 20 && !events.Open(); ++i) Sleep(200);
+
+    if (!commands.SetDetachSupport(enable)) {
+        wprintf(L"sending the command failed (err=%lu)\n", GetLastError());
+        if (started) (void)controller.Stop();
+        return 1;
+    }
+    wprintf(L"sent SetDetachSupport(%ls); watching for the result\n",
+            enable ? L"enable" : L"disable");
+
+    // 结果先经事件回来，快照随后翻转，两个都等到才算这条路走通了。
+    const DWORD deadline = GetTickCount() + 5000;
+    int exitCode = 1;
+    while (GetTickCount() < deadline) {
+        Gaokun::Keyboard::Event event{};
+        while (events.Poll(event)) {
+            wprintf(L"event %ls value=%d\n", KbdKindName(event.kind), event.value);
+            if (static_cast<Gaokun::Keyboard::EventKind>(event.kind) ==
+                Gaokun::Keyboard::EventKind::DetachSupportResult) {
+                exitCode = event.value == (enable ? 1 : 0) ? 0 : 1;
+            }
+        }
+        Sleep(100);
+    }
+
+    Gaokun::Keyboard::Snapshot snapshot{};
+    if (snapshots.Read(snapshot)) {
+        wprintf(L"snapshot:\n");
+        PrintKbd(snapshot);
+    }
+    if (started) (void)controller.Stop();
+    return exitCode;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t **argv) {
+    if (argc == 4 && _wcsicmp(argv[1], L"kbd") == 0 &&
+        _wcsicmp(argv[2], L"--detach-support") == 0) {
+        const bool enable = _wcsicmp(argv[3], L"enable") == 0;
+        if (!enable && _wcsicmp(argv[3], L"disable") != 0) {
+            PrintUsage();
+            return 1;
+        }
+        return RunKbdDetachSupport(enable);
+    }
+
     if (argc < 4) {
         PrintUsage();
         return 1;

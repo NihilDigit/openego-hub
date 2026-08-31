@@ -45,7 +45,10 @@ struct Snapshot {
     uint8_t keySupport = 0;  // 按键能力掩码
     uint8_t keyFunc = 0;     // 当前按键功能
     uint8_t _pad0 = 0;
-    uint32_t _pad1 = 0;
+    // 宿主还活着的判据，与 GaokunKeyboard.h 的同名字段同义同偏移。updatedAtUnixMs 只在有
+    // 字段变化时前移，宿主死后 seqlock 停在最后一帧，读者拿到的仍是一份自洽的旧快照。
+    // 占的是原来的 _pad1，旧读者当填充跳过，176 字节布局不变。
+    uint32_t heartbeat = 0;
     uint64_t updatedAtUnixMs = 0;
     char firmware[kVersionCapacity]{};
     char hardware[kVersionCapacity]{};
