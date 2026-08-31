@@ -38,6 +38,10 @@ public:
     // 刚重启完的宽限期。宿主要先加载厂商 DLL 再建映射，这段时间里读不到心跳是正常的，
     // 不宽限就会在它起来之前又判它一次死。
     static constexpr std::chrono::seconds kStartGrace{5};
+    // 宿主报「厂商组件缺失」之后隔多久再探一次。这条失败在用户重装电脑管家之前每次都得到
+    // 同一个结果，5 秒一轮只会刷日志——实测 90 分钟刷了 500 多条。取 5 分钟：组件装回来之后
+    // 几分钟内能自动恢复，用户不必重启服务，日志量也回到可忽略。
+    static constexpr std::chrono::seconds kVendorMissingReprobe{300};
 
     explicit HostSupervisor(std::string name) : m_name(std::move(name)) {}
 
@@ -50,11 +54,15 @@ public:
         m_quietUntil = desired ? now + kStartGrace : Clock::time_point{};
         m_windowStart = Clock::time_point{};
         m_restartsInWindow = 0;
+        m_vendorMissing = false;
     }
 
     [[nodiscard]] bool DesiredRunning() const noexcept { return m_desired; }
     // 宿主此刻可用：进程在、心跳在走。转发快照和下发命令都以它为准。
     [[nodiscard]] bool Healthy() const noexcept { return m_healthy; }
+    // 宿主起不来的原因是厂商组件缺失，重探节奏因此是 kVendorMissingReprobe 而不是 5 秒。
+    // 界面据它把「等它重启」和「去重装电脑管家」分开说。
+    [[nodiscard]] bool VendorMissing() const noexcept { return m_vendorMissing; }
     [[nodiscard]] const std::string& Name() const noexcept { return m_name; }
 
     // 采样一轮。heartbeat 取自宿主快照，快照读不到时传 nullopt。
@@ -78,7 +86,11 @@ public:
         const bool heartbeatStale =
             m_heartbeatSeen && now - m_lastHeartbeatChange > kHeartbeatTimeout;
         m_healthy = processAlive && !heartbeatStale;
-        if (m_healthy) return HostAction::None;
+        if (m_healthy) {
+            // 心跳走起来了就说明厂商组件已经装回来，标志自动摘除，不必等谁来复位。
+            m_vendorMissing = false;
+            return HostAction::None;
+        }
 
         if (m_windowStart == Clock::time_point{} || now - m_windowStart > kRestartWindow) {
             m_windowStart = now;
@@ -106,6 +118,20 @@ public:
 
     [[nodiscard]] bool LastRestartFailed() const noexcept { return m_lastRestartFailed; }
 
+    // 宿主用 kHostExitVendorComponentsMissing 立刻退出。重探由 quietUntil 驱动，Tick 因此
+    // 不需要为这个状态单开分支。
+    //
+    // 重启窗口的计数一并清零：那份预算是为「偶发崩溃重启几次就好」准备的，用尽之后进 30 秒
+    // 冷却再回到 5 秒一轮，正是要避开的循环。确定性失败不占用它。
+    void NoteVendorMissing(Clock::time_point now) {
+        m_vendorMissing = true;
+        m_healthy = false;
+        ResetHeartbeat();
+        m_quietUntil = now + kVendorMissingReprobe;
+        m_windowStart = Clock::time_point{};
+        m_restartsInWindow = 0;
+    }
+
 private:
     void ResetHeartbeat() {
         m_heartbeatSeen = false;
@@ -127,6 +153,7 @@ private:
     bool m_healthy = false;
     bool m_heartbeatSeen = false;
     bool m_lastRestartFailed = false;
+    bool m_vendorMissing = false;
     uint32_t m_lastHeartbeat = 0;
     Clock::time_point m_lastHeartbeatChange{};
     Clock::time_point m_quietUntil{};

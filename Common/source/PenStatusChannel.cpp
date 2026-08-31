@@ -351,6 +351,8 @@ bool Writer::Publish(const State& state) {
         staged.hostHealth = kHostHealthValid;
         if (state.penHostHealthy) staged.hostHealth |= kHostHealthPen;
         if (state.kbdHostHealthy) staged.hostHealth |= kHostHealthKbd;
+        if (state.penVendorMissing) staged.hostHealth |= kHostHealthPenVendorMissing;
+        if (state.kbdVendorMissing) staged.hostHealth |= kHostHealthKbdVendorMissing;
     }
     staged.updatedAtUnixMs = NowUnixMs();
     std::strncpy(staged.modelName, state.modelName, sizeof(staged.modelName) - 1);
@@ -472,6 +474,8 @@ bool Reader::Read(State& out) const {
             candidate.hasHostHealth = (copy.hostHealth & kHostHealthValid) != 0;
             candidate.penHostHealthy = (copy.hostHealth & kHostHealthPen) != 0;
             candidate.kbdHostHealthy = (copy.hostHealth & kHostHealthKbd) != 0;
+            candidate.penVendorMissing = (copy.hostHealth & kHostHealthPenVendorMissing) != 0;
+            candidate.kbdVendorMissing = (copy.hostHealth & kHostHealthKbdVendorMissing) != 0;
             candidate.modelId = copy.modelId;
             candidate.notificationSequence = copy.notificationSequence;
             candidate.notificationKind = static_cast<NotificationKind>(copy.notificationKind);

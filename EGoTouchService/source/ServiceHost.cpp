@@ -16,6 +16,7 @@
 // gaokun-hal 的电池读取。充电阈值只有服务读得到——那条 WMI 通道要管理员权限，而设置窗
 // 是中完整性进程，自己读会拿到「拒绝访问」。
 #include "GaokunPower.h"
+#include "GaokunHostExit.h"
 
 #include "Logger.h"
 #include "config/ConfigBinder.h"
@@ -127,6 +128,10 @@ struct ServiceHost::Impl {
     // 于是托盘继续显示键盘的电量和开关，用户点开关也毫无反应。宁可发布「未知」。
     std::atomic<bool> m_penHostHealthy{false};
     std::atomic<bool> m_kbdHostHealthy{false};
+    // 不健康的原因是 PC Manager 的配件组件缺失。健康位只说「现在能不能用」，界面要把「等它
+    // 重启」和「用户得去重装电脑管家」分开说，靠的是这两个。
+    std::atomic<bool> m_penVendorMissing{false};
+    std::atomic<bool> m_kbdVendorMissing{false};
 
     // 键盘状态镜像。含字符串，用不了原子，改由互斥保护：写入方是 MCU 读线程，
     // 读取方是 DeviceRuntime 回调线程上的状态发布。
@@ -734,9 +739,17 @@ bool ServiceHost::StartPenSubsystem() {
 
         if (!penHostPath.empty()) {
             const auto penStart = m_penHost.Start(penHostPath, hostLogArgs);
-            if (penStart != Gaokun::Pen::StartResult::Started &&
-                penStart != Gaokun::Pen::StartResult::AlreadyRunning) {
-                // 立刻退出几乎总是因为 PC Manager 的 Plugins 目录被删过，宿主会自己说明。
+            const bool penVendorMissing =
+                penStart == Gaokun::Pen::StartResult::ExitedImmediately &&
+                m_penHost.ExitCode() == Gaokun::kHostExitVendorComponentsMissing;
+            if (penVendorMissing) {
+                LOG_ERROR("Service", __func__, "MCU",
+                          "Pen host exited immediately: the PC Manager accessory components "
+                          "are missing. Reinstalling PC Manager is what fixes it; until then "
+                          "the host is probed once every {} s instead of being restarted.",
+                          HostSupervisor::kVendorMissingReprobe.count());
+            } else if (penStart != Gaokun::Pen::StartResult::Started &&
+                       penStart != Gaokun::Pen::StartResult::AlreadyRunning) {
                 LOG_ERROR("Service", __func__, "MCU",
                           "Pen host failed to start (result={}, exit={}); the supervisor "
                           "will retry it.",
@@ -744,18 +757,31 @@ bool ServiceHost::StartPenSubsystem() {
             }
             // 意图与「这一次起没起来」无关：起不来的宿主同样归巡检管，预算内它会被重试。
             m_impl->m_penSupervisor.SetDesiredRunning(true, now);
+            // 顺序不能反：SetDesiredRunning 会复位状态，其中就包括 vendorMissing。
+            if (penVendorMissing) m_impl->m_penSupervisor.NoteVendorMissing(now);
         }
 
         if (!kbdHostPath.empty()) {
             const auto kbdStart = m_kbdHost.Start(kbdHostPath, hostLogArgs);
-            if (kbdStart != Gaokun::Keyboard::StartResult::Started &&
-                kbdStart != Gaokun::Keyboard::StartResult::AlreadyRunning) {
+            const bool kbdVendorMissing =
+                kbdStart == Gaokun::Keyboard::StartResult::ExitedImmediately &&
+                m_kbdHost.ExitCode() == Gaokun::kHostExitVendorComponentsMissing;
+            if (kbdVendorMissing) {
+                LOG_ERROR("Service", __func__, "MCU",
+                          "Keyboard host exited immediately: the PC Manager accessory "
+                          "components are missing. Reinstalling PC Manager is what fixes it; "
+                          "until then the host is probed once every {} s instead of being "
+                          "restarted.",
+                          HostSupervisor::kVendorMissingReprobe.count());
+            } else if (kbdStart != Gaokun::Keyboard::StartResult::Started &&
+                       kbdStart != Gaokun::Keyboard::StartResult::AlreadyRunning) {
                 LOG_ERROR("Service", __func__, "MCU",
                           "Keyboard host failed to start (result={}, exit={}); the supervisor "
                           "will retry it.",
                           static_cast<int>(kbdStart), m_kbdHost.ExitCode());
             }
             m_impl->m_kbdSupervisor.SetDesiredRunning(true, now);
+            if (kbdVendorMissing) m_impl->m_kbdSupervisor.NoteVendorMissing(now);
         }
 
         // 宿主刚拉起来，映射与管道未必已经建好，所以这六条通道此刻打不开是常态。这里只试
@@ -926,11 +952,18 @@ void ServiceHost::SuperviseAccessoryHosts() {
                   "Pen host restarted too often; leaving it down for {} s.",
                   HostSupervisor::kRestartCooldown.count());
     } else if (penAction == HostAction::Restart) {
-        LOG_ERROR("Service", __func__, "MCU",
-                  "Pen host is not responding (running={}, exit={}); restarting it.",
-                  m_penHost.IsRunning(), m_penHost.ExitCode());
+        // 已知是组件缺失时这只是一次定期重探，不是新故障，别按错误报。
+        if (m_impl->m_penSupervisor.VendorMissing()) {
+            LOG_INFO("Service", __func__, "MCU",
+                     "Probing the pen host again in case PC Manager was reinstalled.");
+        } else {
+            LOG_ERROR("Service", __func__, "MCU",
+                      "Pen host is not responding (running={}, exit={}); restarting it.",
+                      m_penHost.IsRunning(), m_penHost.ExitCode());
+        }
         const std::wstring path = ResolveHostPath(L"GaokunPenHost.exe");
         bool started = false;
+        bool vendorMissing = false;
         if (path.empty()) {
             LOG_ERROR("Service", __func__, "MCU", "GaokunPenHost.exe is no longer where it was.");
         } else {
@@ -939,11 +972,28 @@ void ServiceHost::SuperviseAccessoryHosts() {
             const auto result = m_penHost.Start(path, HostLogArgs());
             started = result == Gaokun::Pen::StartResult::Started ||
                       result == Gaokun::Pen::StartResult::AlreadyRunning;
+            vendorMissing = result == Gaokun::Pen::StartResult::ExitedImmediately &&
+                            m_penHost.ExitCode() == Gaokun::kHostExitVendorComponentsMissing;
         }
         // 旧句柄对着上一条命的宿主：映射和管道的名字虽然相同，句柄却仍指向已经消失的那份
         // 内核对象，读永远读不到新数据。整体丢掉，下一轮补开。
         if (started) ClosePenChannels();
-        m_impl->m_penSupervisor.NoteRestartResult(started, now);
+        if (vendorMissing) {
+            // 只在转入这个状态的那一轮报错。后续每次重探都得到同一个结果，逐轮报错就是这条
+            // 改动要消掉的那 500 多条日志。
+            if (!m_impl->m_penSupervisor.VendorMissing()) {
+                LOG_ERROR("Service", __func__, "MCU",
+                          "Pen host cannot start: the PC Manager accessory components are "
+                          "missing. Reinstall PC Manager to restore it; probing every {} s.",
+                          HostSupervisor::kVendorMissingReprobe.count());
+            } else {
+                LOG_INFO("Service", __func__, "MCU",
+                         "Pen host still reports missing PC Manager components.");
+            }
+            m_impl->m_penSupervisor.NoteVendorMissing(now);
+        } else {
+            m_impl->m_penSupervisor.NoteRestartResult(started, now);
+        }
     }
 
     const auto kbdAction =
@@ -955,11 +1005,17 @@ void ServiceHost::SuperviseAccessoryHosts() {
                   "Keyboard host restarted too often; leaving it down for {} s.",
                   HostSupervisor::kRestartCooldown.count());
     } else if (kbdAction == HostAction::Restart) {
-        LOG_ERROR("Service", __func__, "MCU",
-                  "Keyboard host is not responding (running={}, exit={}); restarting it.",
-                  m_kbdHost.IsRunning(), m_kbdHost.ExitCode());
+        if (m_impl->m_kbdSupervisor.VendorMissing()) {
+            LOG_INFO("Service", __func__, "MCU",
+                     "Probing the keyboard host again in case PC Manager was reinstalled.");
+        } else {
+            LOG_ERROR("Service", __func__, "MCU",
+                      "Keyboard host is not responding (running={}, exit={}); restarting it.",
+                      m_kbdHost.IsRunning(), m_kbdHost.ExitCode());
+        }
         const std::wstring path = ResolveHostPath(L"GaokunKeyboardHost.exe");
         bool started = false;
+        bool vendorMissing = false;
         if (path.empty()) {
             LOG_ERROR("Service", __func__, "MCU",
                       "GaokunKeyboardHost.exe is no longer where it was.");
@@ -968,10 +1024,32 @@ void ServiceHost::SuperviseAccessoryHosts() {
             const auto result = m_kbdHost.Start(path, HostLogArgs());
             started = result == Gaokun::Keyboard::StartResult::Started ||
                       result == Gaokun::Keyboard::StartResult::AlreadyRunning;
+            vendorMissing = result == Gaokun::Keyboard::StartResult::ExitedImmediately &&
+                            m_kbdHost.ExitCode() == Gaokun::kHostExitVendorComponentsMissing;
         }
         if (started) CloseKeyboardChannels();
-        m_impl->m_kbdSupervisor.NoteRestartResult(started, now);
+        if (vendorMissing) {
+            if (!m_impl->m_kbdSupervisor.VendorMissing()) {
+                LOG_ERROR("Service", __func__, "MCU",
+                          "Keyboard host cannot start: the PC Manager accessory components "
+                          "are missing. Reinstall PC Manager to restore it; probing every "
+                          "{} s.",
+                          HostSupervisor::kVendorMissingReprobe.count());
+            } else {
+                LOG_INFO("Service", __func__, "MCU",
+                         "Keyboard host still reports missing PC Manager components.");
+            }
+            m_impl->m_kbdSupervisor.NoteVendorMissing(now);
+        } else {
+            m_impl->m_kbdSupervisor.NoteRestartResult(started, now);
+        }
     }
+
+    // 状态发布在别的线程上，两个原因位在这一轮的判定全部落定之后再发布。
+    m_impl->m_penVendorMissing.store(m_impl->m_penSupervisor.VendorMissing(),
+                                     std::memory_order_release);
+    m_impl->m_kbdVendorMissing.store(m_impl->m_kbdSupervisor.VendorMissing(),
+                                     std::memory_order_release);
 }
 
 void ServiceHost::OpenAccessoryChannels() {
@@ -1052,6 +1130,8 @@ void ServiceHost::StopPenSubsystem() {
     m_impl->m_kbdSupervisor.SetDesiredRunning(false, now);
     m_impl->m_penHostHealthy.store(false, std::memory_order_release);
     m_impl->m_kbdHostHealthy.store(false, std::memory_order_release);
+    m_impl->m_penVendorMissing.store(false, std::memory_order_release);
+    m_impl->m_kbdVendorMissing.store(false, std::memory_order_release);
     ClosePenChannels();
     CloseKeyboardChannels();
     (void)m_penHost.Stop();
@@ -1222,6 +1302,10 @@ void ServiceHost::PublishStatusSnapshot() {
     out.hasHostHealth = m_runtimeMode == ServiceMode::Full;
     out.penHostHealthy = penHealthy;
     out.kbdHostHealthy = kbdHealthy;
+    // 不健康时还要说明是不是「电脑管家的配件组件缺失」这种得由用户去修的确定性失败，否则
+    // 界面只能笼统地说宿主没起来，而它其实永远不会自己起来。
+    out.penVendorMissing = m_impl->m_penVendorMissing.load(std::memory_order_acquire);
+    out.kbdVendorMissing = m_impl->m_kbdVendorMissing.load(std::memory_order_acquire);
 
     // 橡皮态只有 DeviceRuntime 知道：它由 MCU 的 0x7F EraserToggle 和 ToggleEraser 模式下的
     // 双击共同维护，而厂商的 PenService.dll 根本不暴露 EraserToggle。这里一度改用

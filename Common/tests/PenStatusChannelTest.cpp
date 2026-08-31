@@ -53,6 +53,13 @@ PenStatus::State MakeState(uint8_t battery, bool charging, bool attached) {
     s.inputSuppressed = charging;
     s.hasKbdDetachSupport = true;
     s.kbdDetachSupport = charging;
+    // 健康位与「组件缺失」这个原因位共用 hostHealth 一个字节，两者取相反值，掩码写错就会
+    // 读回同一个值。
+    s.hasHostHealth = true;
+    s.penHostHealthy = charging;
+    s.penVendorMissing = !charging;
+    s.kbdHostHealthy = attached;
+    s.kbdVendorMissing = !attached;
     s.hasPenFirmware = true;
     s.hasPenHardware = true;
     s.hasPenSerial = true;
@@ -105,6 +112,11 @@ bool SameState(const PenStatus::State& a, const PenStatus::State& b) {
            a.inputSuppressed == b.inputSuppressed &&
            a.hasKbdDetachSupport == b.hasKbdDetachSupport &&
            a.kbdDetachSupport == b.kbdDetachSupport &&
+           a.hasHostHealth == b.hasHostHealth &&
+           a.penHostHealthy == b.penHostHealthy &&
+           a.kbdHostHealthy == b.kbdHostHealthy &&
+           a.penVendorMissing == b.penVendorMissing &&
+           a.kbdVendorMissing == b.kbdVendorMissing &&
            a.hasPenFirmware == b.hasPenFirmware &&
            a.hasPenHardware == b.hasPenHardware &&
            a.hasPenSerial == b.hasPenSerial &&

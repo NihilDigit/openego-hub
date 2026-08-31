@@ -133,6 +133,54 @@ void TestStoppedHostIsNotSupervised() {
     Require(!supervisor.Healthy(), "and is never reported healthy");
 }
 
+// 厂商组件缺失是确定性失败：宿主起多少次都在 100 毫秒内退出，重探因此拉到 5 分钟一轮。
+void TestVendorMissingReprobesSlowly() {
+    auto now = Clock::time_point{};
+    auto supervisor = MakeRunning(now);
+    Require(supervisor.Tick(now, false, std::nullopt) == HostAction::Restart,
+            "precondition: the first tick restarts");
+    supervisor.NoteVendorMissing(now);
+    Require(supervisor.VendorMissing(), "the reason is recorded");
+    Require(!supervisor.Healthy(), "a host that cannot start is not healthy");
+
+    now += HostSupervisor::kVendorMissingReprobe - std::chrono::seconds(1);
+    Require(supervisor.Tick(now, false, std::nullopt) == HostAction::None,
+            "nothing is attempted until the reprobe is due");
+
+    now += std::chrono::seconds(2);
+    Require(supervisor.Tick(now, false, std::nullopt) == HostAction::Restart,
+            "the host is probed again once the components may have been reinstalled");
+}
+
+void TestVendorMissingClearsWhenTheHostComesUp() {
+    auto now = Clock::time_point{};
+    auto supervisor = MakeRunning(now);
+    supervisor.NoteVendorMissing(now);
+
+    now += HostSupervisor::kVendorMissingReprobe + std::chrono::seconds(1);
+    Require(supervisor.Tick(now, false, std::nullopt) == HostAction::Restart, "precondition: reprobe");
+    supervisor.NoteRestartResult(true, now);
+
+    now += HostSupervisor::kStartGrace + std::chrono::seconds(1);
+    Require(supervisor.Tick(now, true, 1) == HostAction::None, "the host is up again");
+    Require(supervisor.Healthy() && !supervisor.VendorMissing(),
+            "a heartbeat means the vendor components are back");
+}
+
+// 重启预算是给「重启几次就好」的偶发崩溃准备的。确定性失败占用它的话，预算一用尽就进
+// 30 秒冷却、然后回到 5 秒一轮，正是这条改动要避开的循环。
+void TestVendorMissingDoesNotSpendTheRestartBudget() {
+    auto now = Clock::time_point{};
+    auto supervisor = MakeRunning(now);
+
+    for (int i = 0; i < HostSupervisor::kMaxRestartsPerWindow + 2; ++i) {
+        Require(supervisor.Tick(now, false, std::nullopt) == HostAction::Restart,
+                "every reprobe is a restart, never a cooldown");
+        supervisor.NoteVendorMissing(now);
+        now += HostSupervisor::kVendorMissingReprobe + std::chrono::seconds(1);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -144,6 +192,9 @@ int main() {
         TestBudgetEndsInCooldown();
         TestBudgetIsPerWindow();
         TestStoppedHostIsNotSupervised();
+        TestVendorMissingReprobesSlowly();
+        TestVendorMissingClearsWhenTheHostComesUp();
+        TestVendorMissingDoesNotSpendTheRestartBudget();
         std::cout << "[TEST] Host supervisor tests passed.\n";
         return 0;
     } catch (const std::exception& error) {

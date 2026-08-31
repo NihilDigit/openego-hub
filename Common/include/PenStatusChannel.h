@@ -67,6 +67,12 @@ enum class NotificationKind : uint8_t {
 inline constexpr uint8_t kHostHealthValid = 1u << 0;
 inline constexpr uint8_t kHostHealthPen   = 1u << 1;
 inline constexpr uint8_t kHostHealthKbd   = 1u << 2;
+// 宿主不健康的「原因」位：置位表示宿主因 PC Manager 的配件组件缺失而起不来（退出码
+// kHostExitVendorComponentsMissing）。健康位只回答「现在能不能用」，界面要把「等它重启」
+// 和「用户得去重装电脑管家」分开说，靠的是这两位。同一个字节里的空闲位，旧读者读到 0，
+// 布局与 ABI 版本不变。
+inline constexpr uint8_t kHostHealthPenVendorMissing = 1u << 3;
+inline constexpr uint8_t kHostHealthKbdVendorMissing = 1u << 4;
 
 inline constexpr uint32_t kFlagHasBatteryLevel   = 1u << 0;
 inline constexpr uint32_t kFlagHasChargingState  = 1u << 1;
@@ -233,6 +239,9 @@ struct State {
     bool hasHostHealth = false;
     bool penHostHealthy = false;
     bool kbdHostHealthy = false;
+    // 宿主起不来的原因是 PC Manager 配件组件缺失，见 kHostHealthPenVendorMissing。
+    bool penVendorMissing = false;
+    bool kbdVendorMissing = false;
     bool hasVendorServices = false;
     bool vendorServicesDisabled = false;
     bool vendorServicesRunning = false;
