@@ -10,6 +10,7 @@
 #include "KbdChannelLayout.h"
 #include "KeyboardService.h"
 
+#include "GaokunHostExit.h"
 #include "shared/HostLog.h"
 
 #include <windows.h>
@@ -274,7 +275,7 @@ int wmain(int argc, wchar_t **argv) {
                 L"If that directory was removed to disable the vendor pen handling, this\n"
                 L"feature is unavailable until it is restored.\n",
                 kDependSuffix);
-        return 2;
+        return Gaokun::kHostExitVendorComponentsMissing;
     }
     HOST_LOG_INFO("depend directory: %ls", depend.c_str());
     (void)SetDllDirectoryW(depend.c_str());
