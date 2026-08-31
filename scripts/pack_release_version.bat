@@ -6,9 +6,21 @@ echo ==============================================
 cd /d "%~dp0\.."
 
 set "BUILD_VERSION=%~1"
+if not "%BUILD_VERSION%"=="" goto :version_ready
+
+REM No version on the command line: read the one in CMakeLists.txt, which the
+REM build already cross-checks against Common\include\AppVersion.h. A literal
+REM default here goes stale silently and ships an MSI whose ProductVersion does
+REM not match the binaries inside it.
+for /f "tokens=3" %%v in ('findstr /r /c:"^project(.*VERSION " CMakeLists.txt') do set "BUILD_VERSION=%%v"
+
 if "%BUILD_VERSION%"=="" (
-    set "BUILD_VERSION=0.2.0"
+    echo [ERROR] Could not read the project version from CMakeLists.txt.
+    exit /b 1
 )
+
+:version_ready
+echo Packing version %BUILD_VERSION%
 
 REM hal builds separately and first: the main CMakeLists fails configuration when
 REM hal\build\Release\GaokunHal.lib is missing, and the MSI packs the hosts from
@@ -39,7 +51,11 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [3/4] Preparing and building MSI Installer using WiX...
-wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=%BUILD_VERSION% -d BuildOutputDir=build\arm64-Release -d HalOutputDir=%HAL_OUTPUT_DIR% scripts\OpenEGoHubSetup.wxs -loc scripts\zh-CN.wxl -out build\OpenEGoHubSetup.msi
+REM The two extensions are a machine-level prerequisite that nothing in the
+REM repository declares otherwise; "add" is idempotent when already installed.
+wix extension add -g WixToolset.UI.wixext >nul 2>&1
+wix extension add -g WixToolset.Util.wixext >nul 2>&1
+wix build -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch arm64 -d BuildVersion=%BUILD_VERSION% -d BuildOutputDir=build\arm64-Release -d HalOutputDir=%HAL_OUTPUT_DIR% scripts\OpenEGoHubSetup.wxs -loc scripts\zh-CN.wxl -out build\OpenEGoHubSetup.msi
 if %errorlevel% neq 0 (
     echo [ERROR] WiX build failed.
     exit /b %errorlevel%

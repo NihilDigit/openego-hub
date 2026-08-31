@@ -68,8 +68,8 @@ jobs:
       # gated on MSVC, so a clang configuration produces no OpenEGoHubSettings.exe and the
       # installer below fails on a missing file. Do not pass CMAKE_*_COMPILER_TARGET here
       # either -- it is clang-only, and it makes CMake emit GNU-style link flags cl.exe
-      # cannot parse. The build directory stays "build" because that is what the .wxs
-      # files default BuildOutputDir to.
+      # cannot parse. Ninja is single-config here, so every exe lands directly in
+      # "build" -- the packaging step below passes that as BuildOutputDir.
       - name: CMake Configure
         run: |
           cmake -G "Ninja" -S . -B build `
@@ -83,18 +83,22 @@ jobs:
       - name: CMake Build
         run: cmake --build build --config Release --parallel
 
+      # Pinned to the version the packaging is developed against. An unpinned install
+      # takes whatever is newest on the day the tag is pushed, so a release build can
+      # break on a toolset nobody here has run.
       - name: Install WiX Toolset
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version 7.0.0
 
       - name: Build Installers
         run: |
           wix eula accept wix7
           wix extension add -g WixToolset.UI.wixext
+          wix extension add -g WixToolset.Util.wixext
 
           $assetDir = "build\release-assets"
           New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
 
-          wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=$env:MSI_VERSION -d HalOutputDir=hal\build\Release scripts\OpenEGoHubSetup.wxs -loc scripts\zh-CN.wxl -out "$assetDir\OpenEGoHubSetup_arm64_$($env:RELEASE_TAG).msi"
+          wix build -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch arm64 -d BuildVersion=$env:MSI_VERSION -d BuildOutputDir=build -d HalOutputDir=hal\build\Release scripts\OpenEGoHubSetup.wxs -loc scripts\zh-CN.wxl -out "$assetDir\OpenEGoHubSetup_arm64_$($env:RELEASE_TAG).msi"
 
       - name: Generate SHA256 checksums
         run: |
