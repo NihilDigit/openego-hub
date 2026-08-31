@@ -22,6 +22,17 @@ the vendor's own modules for the low-level algorithms and take over the hardware
 every feature here keeps working with Huawei PC Manager and its background services
 disabled.
 
+> [!IMPORTANT]
+> A complete installation of Huawei PC Manager must be retained on the system.
+> Touch, accessory status, battery thresholds, and colour management directly rely
+> on low-level DLLs shipped with PC Manager; removing related components will cause
+> the corresponding features to fail.
+>
+> This dependency introduces no background overhead: OpenEGo Hub disables the
+> official x64 services of PC Manager so they no longer remain resident in the
+> background, eliminating the original emulation overhead. Required DLLs are loaded
+> on demand by this project's host processes.
+
 ---
 
 ## Features
