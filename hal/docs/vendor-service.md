@@ -1,7 +1,7 @@
 # 原厂 HuaweiThpService 逆向记录
 
 本文记录 `C:\Program Files\Huawei\HuaweiThpService\HuaweiThpService.exe` 的完整行为。
-结论来自该文件的 IL 反汇编，原文保存在同目录 `vendor-service.il`，可逐条复核。
+结论来自对本机已安装文件的 IL 静态分析；仓库仅保留行为规格与分析结论，不保存完整反汇编产物。
 
 ## 原厂服务是托管程序
 
