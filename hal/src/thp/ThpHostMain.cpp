@@ -15,6 +15,10 @@ namespace {
 // 原厂在 InitializeComponent 里把 ServiceName 设为 HUAWEIThpService，而 SCM 中注册的名字
 // 是 HuaweiThpService。大小写不一致但服务名不区分大小写，照抄以免留下无谓的差异。
 constexpr const wchar_t *kServiceName = L"HUAWEIThpService";
+// 与 kServiceName 同一个服务，另立一个常量是因为两处的角色不同：kServiceName 是本进程
+// 作为原厂服务的替身向 SCM 注册时用的名字，这一个是托管模式下要操作的那个原厂服务。
+// 拼写照抄 VendorPath.cpp，两处指的是 SCM 里注册的同一条记录。
+constexpr const wchar_t *kVendorServiceName = L"HuaweiThpService";
 constexpr const wchar_t *kEventSource = L"THPEvent";
 constexpr const wchar_t *kEventLogName = L"THPLog";
 
@@ -171,11 +175,85 @@ void ApplyProcessPriority() noexcept {
     (void)SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
 }
 
+// 父进程消失后把原厂触控服务请回来，只用于「父进程没了」这条退出来路。
+//
+// 服务进程非正常消失（崩溃、被强杀）时没有任何人做交还：本进程等的是父进程句柄，父进程
+// 一没就退出，此后系统里既没有 OpenEGo 的提供方也没有华为的，触控整个消失。实测杀掉正式
+// 服务后：137 毫秒服务没了，2217 毫秒本进程退出，5198 毫秒 SCM 按 SC_ACTION_RESTART 把
+// 服务拉回，5777 毫秒华为 RUNNING——中间 5 秒是零提供方，而且补上它的是 SCM 的恢复动作，
+// 配额只有 24 小时 3 次。配额用尽之后就是永久无触控：在没有配恢复动作的服务上实测，杀掉
+// 之后 90 秒里 svc=STOPPED hw=STOPPED thp=0 一动不动，正是用户报告的「触摸失灵，华为驱动
+// 也没启动上」。
+//
+// 本进程是这条链上最后一个还活着的成员，跑在 LocalSystem 下，有 SCM 权限，所以由它关灯。
+// 调用点必须排在 StopService() 之后：ThpFuncStop 并卸载 DLL 才算把设备干净交出来，设备还
+// 被我们占着的时候拉起华为，等于让它接手一个中间状态。
+void RestoreVendorService() noexcept {
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!manager) {
+        HOST_LOG_ERROR("restore: OpenSCManager failed (err=%lu)", GetLastError());
+        return;
+    }
+
+    SC_HANDLE service =
+        OpenServiceW(manager, kVendorServiceName, SERVICE_START | SERVICE_QUERY_STATUS);
+    if (!service) {
+        HOST_LOG_ERROR("restore: cannot open %ls (err=%lu)", kVendorServiceName, GetLastError());
+        CloseServiceHandle(manager);
+        return;
+    }
+
+    if (!StartServiceW(service, 0, nullptr)) {
+        const DWORD err = GetLastError();
+        // 已经在运行是成功，不是失败：服务侧可能已经先一步把华为拉起来了。
+        if (err == ERROR_SERVICE_ALREADY_RUNNING) {
+            HOST_LOG_INFO("restore: %ls already running", kVendorServiceName);
+        } else {
+            HOST_LOG_ERROR("restore: StartService %ls failed (err=%lu)", kVendorServiceName, err);
+        }
+        CloseServiceHandle(service);
+        CloseServiceHandle(manager);
+        return;
+    }
+
+    // StartServiceW 只表示请求被受理，还要等它真的进入 RUNNING 才能在日志里断言恢复成功。
+    //
+    // 超时按实测定：华为服务启动耗时 323/325/341 毫秒，2 秒是它的六倍左右，足够容下一次
+    // 明显的抖动。不能再长——这段代码跑在进程退出的最后一段，等待期间本进程一直不消失，
+    // 外面看到的是宿主赖着不退。超时也只是不再等，SCM 那边该起还是会起。
+    constexpr DWORD kStartTimeoutMs = 2000;
+    constexpr DWORD kPollIntervalMs = 50;
+
+    DWORD waited = 0;
+    for (;;) {
+        SERVICE_STATUS status{};
+        if (!QueryServiceStatus(service, &status)) {
+            HOST_LOG_ERROR("restore: QueryServiceStatus failed (err=%lu)", GetLastError());
+            break;
+        }
+        if (status.dwCurrentState == SERVICE_RUNNING) {
+            HOST_LOG_INFO("restore: %ls running after %lu ms", kVendorServiceName, waited);
+            break;
+        }
+        if (waited >= kStartTimeoutMs) {
+            HOST_LOG_ERROR("restore: %ls still in state %lu after %lu ms", kVendorServiceName,
+                           status.dwCurrentState, waited);
+            break;
+        }
+        Sleep(kPollIntervalMs);
+        waited += kPollIntervalMs;
+    }
+
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+}
+
 // 托管模式。OpenEGoHub 拉起本进程接管触控，切走或自身退出时再把设备交还原厂。
 //
 // 停止有两条来路，都必须走到 ThpFuncStop：父进程主动置位停止事件，或父进程自己没了。
 // 后者不能只靠 Job Object 的 KILL_ON_JOB_CLOSE 兜底——那是直接终止，DLL 没有机会复位 AFE，
-// 设备会停在中间状态，随后原厂服务接手时要多一次恢复。等父进程句柄能把这条路径也收干净。
+// 设备会停在中间状态，随后原厂服务接手时要多一次恢复。等父进程句柄把这条路径也收干净：
+// 停止事件那条由父进程自己负责交还，父进程没了那条则由 RestoreVendorService 收尾。
 int RunHosted(DWORD parentPid, const wchar_t *stopEventName) noexcept {
     HANDLE stopEvent = nullptr;
     if (stopEventName && *stopEventName) {
@@ -222,11 +300,19 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName) noexcept {
     }
 
     const DWORD signalled = WaitForMultipleObjects(count, waits, FALSE, INFINITE);
-    // 哪个句柄先亮决定了这次退出是「被要求停」还是「父进程没了」，两者的后续排查方向不同。
-    HOST_LOG_INFO("wait returned %lu (%s)", signalled,
-                  (stopEvent && signalled == WAIT_OBJECT_0) ? "stop event" : "parent exited");
+    // 哪个句柄先亮决定了这次退出是「被要求停」还是「父进程没了」，两者的后续排查方向不同，
+    // 也决定了下面要不要替父进程把华为请回来。
+    const bool stopRequested = stopEvent && signalled == WAIT_OBJECT_0;
+    const char *reason = "parent exited";
+    if (stopRequested) reason = "stop event";
+    else if (signalled == WAIT_FAILED) reason = "wait failed";
+    HOST_LOG_INFO("wait returned %lu (%s)", signalled, reason);
 
     StopService();
+
+    // 父进程主动要求停止时不插手：服务自己会处理交还，宿主再去启动华为只会和它抢同一个
+    // 服务。等待本身失败也走恢复——那说明这条链已经不可靠，宁可把触控还给原厂。
+    if (!stopRequested) RestoreVendorService();
 
     if (stopEvent) CloseHandle(stopEvent);
     if (parent) CloseHandle(parent);
