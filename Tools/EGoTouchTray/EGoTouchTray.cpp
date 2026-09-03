@@ -1700,6 +1700,11 @@ constexpr DWORD kMaxRunValueDataBytes = 65536;
 
 // 托盘没有日志文件，调试输出是唯一的通道。这些失败对用户没有可操作性（真正的开关状态
 // 由服务那半边回报），所以不弹气球提示，只留给调试器。
+//
+// TODO: 托盘接一份日志文件。整个进程只有这里两行 OutputDebugStringW，用户机器上没人挂
+// 调试器，于是自启项处理失败在真实部署里完全不可见：备份写失败会让 Run 项留在原地，用户
+// 看到的是「点了禁用，AcAppDaemon 每次登录还是回来」，而日志里一个字都没有。服务侧有
+// Common/include/Logger.h 那套，托盘照着接一份即可，不必新造。
 void LogAutorun(const wchar_t* format, ...) {
     wchar_t line[512];
     va_list args;

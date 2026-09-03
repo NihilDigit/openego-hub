@@ -584,6 +584,15 @@ void PenEventBridge::OnConnected() {
     m_kbdAbsentPending = false;
 }
 
+// TODO: 这条端点上有两个读者。本类打开的 device path 与 hal 的 GaokunKeyboardHost（经厂商
+// PenService.dll / KeyboardService.dll）是同一个，而一个中断包只交付给一个读者，谁抢到算谁
+// 的，见 docs/KBDMCU_PROTOCOL.md 6.3。下面这段按子系统 ID 分流只解决了「本进程内不误判」，
+// 解决不了跨进程丢帧：界面读的是 hal 那份快照，它漏掉的帧就是界面上迟迟不更新的状态。
+//
+// 两条路都可行，选哪条要先定：让 hal 宿主成为唯一读者、本类改从它的快照取键盘状态；或者
+// 反过来，键盘状态回到本类、hal 只留笔。前者与「厂商 DLL 是唯一数据源」的现有方向一致，
+// 但侧键握手（PenEventBridge 的 0x7101 + 0x7701 + 0x7B InitParam）必须留在本类，那是
+// 厂商 DLL 不做而 MCU 又必需的一步。
 void PenEventBridge::OnPacketReceived(std::span<const uint8_t> packet) {
     // 与键盘共用同一个 USB 端点，一个中断包只交付一个读者。先按子系统 ID（byte[4]）分流：
     // 0x01 是 pen 事件，走下面的原有解析；其余（0x00 detach、0x02 键盘）交给键盘处理。不分
