@@ -41,8 +41,11 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <cwctype>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -1677,6 +1680,236 @@ bool SubmitChargeLimitCommand(uint8_t percent) {
     return true;
 }
 
+// ── 华为用户态自启项 ─────────────────────────────────────────────────────────
+//
+// 「禁用厂商组件」在服务那侧做了两层：杀掉 PC Manager 目录下的进程，以及把七个 SCM 服务
+// 设为禁用。第三层落不到服务身上——AcAppDaemon 一类是 HKCU\...\Run 里的自启项，服务跑在
+// session 0 的 LocalSystem 下，写 HKCU 会落进 SYSTEM 自己的 hive，用户那份一条也改不到。
+// 托盘就在用户会话里，是唯一能写对 hive 的地方。
+//
+// 必须处理，不只是省内存：AcAppDaemon 会拉起 AccessoryApp，那条链经 PenService.dll /
+// KeyboardService.dll 打开与本程序同一个 MCU device path，两边 ReadFile 互吃包，
+// 见 docs/KBDMCU_PROTOCOL.md 6.3。进程被杀掉之后 Run 项还在，下次登录照样回来。
+constexpr wchar_t kVendorAutorunBackupKey[] =
+    L"Software\\OpenEGoHub\\VendorAutorunBackup";
+
+// Run 键的值个数上限。这里跑在 UI 线程上，遍历必须有边界；正常机器上这个键只有十几项。
+constexpr DWORD kMaxRunValues = 256;
+constexpr DWORD kMaxRunValueNameChars = 16384;   // 注册表值名上限 16383 字符
+constexpr DWORD kMaxRunValueDataBytes = 65536;
+
+// 托盘没有日志文件，调试输出是唯一的通道。这些失败对用户没有可操作性（真正的开关状态
+// 由服务那半边回报），所以不弹气球提示，只留给调试器。
+void LogAutorun(const wchar_t* format, ...) {
+    wchar_t line[512];
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(line, std::size(line), _TRUNCATE, format, args);
+    va_end(args);
+    OutputDebugStringW(line);
+    OutputDebugStringW(L"\n");
+}
+
+std::wstring ToLowerCopy(const std::wstring& text) {
+    std::wstring lowered = text;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+    return lowered;
+}
+
+// 从 Run 值的命令行里取出可执行文件路径。带引号的直接取引号内；不带引号的按 .exe 后缀
+// 断句——不能简单地切到第一个空格，「C:\Program Files\...」本身就带空格。
+std::wstring ExtractExecutablePath(const std::wstring& command) {
+    const size_t begin = command.find_first_not_of(L" \t");
+    if (begin == std::wstring::npos) return {};
+    const std::wstring trimmed = command.substr(begin);
+
+    if (trimmed.front() == L'"') {
+        const size_t closing = trimmed.find(L'"', 1);
+        if (closing == std::wstring::npos) return trimmed.substr(1);
+        return trimmed.substr(1, closing - 1);
+    }
+
+    const std::wstring lowered = ToLowerCopy(trimmed);
+    size_t pos = 0;
+    while ((pos = lowered.find(L".exe", pos)) != std::wstring::npos) {
+        const size_t end = pos + 4;
+        if (end == lowered.size() || lowered[end] == L' ') return trimmed.substr(0, end);
+        pos = end;
+    }
+    // 没有 .exe 后缀（脚本、rundll32 之类）就退回第一个空格前的部分。
+    return trimmed.substr(0, trimmed.find(L' '));
+}
+
+// 判据与服务侧的 TerminateVendorProcesses 一致：只看目录，不认进程名。写死 AcAppDaemon
+// 会漏掉华为以后新加的自启项，而这两个目录的语义是稳定的。
+bool IsVendorAutorunCommand(DWORD type, const std::wstring& command) {
+    if (type != REG_SZ && type != REG_EXPAND_SZ) return false;
+
+    std::wstring expanded = command;
+    if (type == REG_EXPAND_SZ) {
+        wchar_t buffer[32768]{};
+        const DWORD written = ExpandEnvironmentStringsW(
+            command.c_str(), buffer, static_cast<DWORD>(std::size(buffer)));
+        if (written > 0 && written <= static_cast<DWORD>(std::size(buffer))) {
+            expanded.assign(buffer);
+        }
+    }
+
+    const std::wstring path = ToLowerCopy(ExtractExecutablePath(expanded));
+    return path.find(L"\\huawei\\pcmanager\\") != std::wstring::npos ||
+           path.find(L"\\huawei\\hiview\\") != std::wstring::npos;
+}
+
+struct RunValue {
+    std::wstring      name;
+    DWORD             type = REG_SZ;
+    std::vector<BYTE> data;
+};
+
+// 枚举一个键下的全部值。删值会打断枚举，所以先收齐再动手。
+std::vector<RunValue> EnumerateValues(HKEY key) {
+    std::vector<RunValue> values;
+    std::wstring       name(kMaxRunValueNameChars, L'\0');
+    std::vector<BYTE>  data(kMaxRunValueDataBytes);
+
+    for (DWORD index = 0; index < kMaxRunValues; ++index) {
+        DWORD nameChars = static_cast<DWORD>(name.size());
+        DWORD dataBytes = static_cast<DWORD>(data.size());
+        DWORD type = 0;
+        const LONG result = RegEnumValueW(key, index, name.data(), &nameChars, nullptr,
+                                          &type, data.data(), &dataBytes);
+        if (result == ERROR_NO_MORE_ITEMS) break;
+        if (result != ERROR_SUCCESS) continue;
+
+        RunValue value;
+        value.name.assign(name.c_str(), nameChars);
+        value.type = type;
+        value.data.assign(data.begin(), data.begin() + dataBytes);
+        values.push_back(std::move(value));
+    }
+    return values;
+}
+
+std::wstring ValueAsString(const RunValue& value) {
+    if (value.data.size() < sizeof(wchar_t)) return {};
+    const auto* text = reinterpret_cast<const wchar_t*>(value.data.data());
+    const size_t chars = value.data.size() / sizeof(wchar_t);
+    return std::wstring(text, wcsnlen(text, chars));
+}
+
+bool ValueExists(HKEY key, const std::wstring& name) {
+    return RegQueryValueExW(key, name.c_str(), nullptr, nullptr, nullptr, nullptr) ==
+           ERROR_SUCCESS;
+}
+
+// 禁用：把匹配到的 Run 项原样（名字 + 类型 + 数据）备份到 VendorAutorunBackup，再删掉。
+// 幂等靠两点：已经有备份的不覆盖（覆盖会把华为重新写回来的那份当成原值），备份没写成功
+// 就不删——否则这条自启项再也回不来。
+bool DisableVendorAutorun() {
+    HKEY runKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunRegistryKey, 0, KEY_READ | KEY_SET_VALUE,
+                      &runKey) != ERROR_SUCCESS) {
+        LogAutorun(L"[autorun] 打开 Run 键失败: %lu", GetLastError());
+        return false;
+    }
+
+    std::vector<RunValue> vendorValues;
+    for (auto& value : EnumerateValues(runKey)) {
+        if (IsVendorAutorunCommand(value.type, ValueAsString(value))) {
+            vendorValues.push_back(std::move(value));
+        }
+    }
+    if (vendorValues.empty()) {
+        RegCloseKey(runKey);
+        return true;
+    }
+
+    HKEY backupKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kVendorAutorunBackupKey, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_READ | KEY_SET_VALUE, nullptr,
+                        &backupKey, nullptr) != ERROR_SUCCESS) {
+        LogAutorun(L"[autorun] 创建备份键失败: %lu", GetLastError());
+        RegCloseKey(runKey);
+        return false;
+    }
+
+    bool allDone = true;
+    for (const auto& value : vendorValues) {
+        if (!ValueExists(backupKey, value.name)) {
+            const LONG written = RegSetValueExW(
+                backupKey, value.name.c_str(), 0, value.type, value.data.data(),
+                static_cast<DWORD>(value.data.size()));
+            if (written != ERROR_SUCCESS) {
+                LogAutorun(L"[autorun] 备份 %s 失败: %ld", value.name.c_str(), written);
+                allDone = false;
+                continue;
+            }
+        }
+        const LONG deleted = RegDeleteValueW(runKey, value.name.c_str());
+        if (deleted != ERROR_SUCCESS && deleted != ERROR_FILE_NOT_FOUND) {
+            LogAutorun(L"[autorun] 删除 %s 失败: %ld", value.name.c_str(), deleted);
+            allDone = false;
+        }
+    }
+
+    RegCloseKey(backupKey);
+    RegCloseKey(runKey);
+    return allDone;
+}
+
+// 恢复：按备份逐条写回 Run，写回成功的立刻从备份里删掉。没有备份就什么也不做——凭空造
+// 一条 Run 项会在没装过 PC Manager 的机器上留下指向不存在文件的自启项。
+bool RestoreVendorAutorun() {
+    HKEY backupKey = nullptr;
+    const LONG opened = RegOpenKeyExW(HKEY_CURRENT_USER, kVendorAutorunBackupKey, 0,
+                                      KEY_READ | KEY_SET_VALUE, &backupKey);
+    if (opened == ERROR_FILE_NOT_FOUND) return true;
+    if (opened != ERROR_SUCCESS) {
+        LogAutorun(L"[autorun] 打开备份键失败: %ld", opened);
+        return false;
+    }
+
+    const std::vector<RunValue> backups = EnumerateValues(backupKey);
+    if (backups.empty()) {
+        RegCloseKey(backupKey);
+        (void)RegDeleteKeyW(HKEY_CURRENT_USER, kVendorAutorunBackupKey);
+        return true;
+    }
+
+    HKEY runKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunRegistryKey, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &runKey,
+                        nullptr) != ERROR_SUCCESS) {
+        LogAutorun(L"[autorun] 打开 Run 键失败: %lu", GetLastError());
+        RegCloseKey(backupKey);
+        return false;
+    }
+
+    bool allDone = true;
+    for (const auto& value : backups) {
+        const LONG written = RegSetValueExW(runKey, value.name.c_str(), 0, value.type,
+                                            value.data.data(),
+                                            static_cast<DWORD>(value.data.size()));
+        if (written != ERROR_SUCCESS) {
+            LogAutorun(L"[autorun] 写回 %s 失败: %ld", value.name.c_str(), written);
+            allDone = false;
+            continue;
+        }
+        (void)RegDeleteValueW(backupKey, value.name.c_str());
+    }
+
+    RegCloseKey(runKey);
+    RegCloseKey(backupKey);
+    // 全部写回之后备份键已经空了，顺手删掉；有条目没写回就留着，下次还能再试。
+    if (allDone) (void)RegDeleteKeyW(HKEY_CURRENT_USER, kVendorAutorunBackupKey);
+    return allDone;
+}
+
+bool ApplyVendorAutorun(bool disable) {
+    return disable ? DisableVendorAutorun() : RestoreVendorAutorun();
+}
+
 bool SubmitVendorServicesCommand(bool disable) {
     std::lock_guard<std::mutex> submitLock(g_controlSubmitMutex);
     g_app.control.Close();
@@ -2088,8 +2321,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case EGoTouchTrayIpc::Command::SetKeyboardWirelessOnDetach:
             return RequestKbdDetachSupport(lParam != 0) ? 1 : 0;
 
-        case EGoTouchTrayIpc::Command::SetVendorServicesDisabled:
-            return SubmitVendorServicesCommand(lParam != 0) ? 1 : 0;
+        case EGoTouchTrayIpc::Command::SetVendorServicesDisabled: {
+            const bool disable = lParam != 0;
+            // 先处理 HKCU 的自启项，再把服务那一半转发出去。两层互相独立：Run 项没处理成
+            // 功也要让服务去停服务、杀进程，能做一层是一层。失败只进调试输出，开关状态由
+            // 服务回报，这里回滚反而会让界面和实际不符。
+            (void)ApplyVendorAutorun(disable);
+            return SubmitVendorServicesCommand(disable) ? 1 : 0;
+        }
 
         case EGoTouchTrayIpc::Command::SetChargeLimit: {
             const auto percent = static_cast<uint8_t>(lParam);
