@@ -177,6 +177,16 @@ public:
     bool UninstallService() override { return ::UninstallService(); }
 #endif
 
+    // 刻意留在 EGOTOUCH_SERVICE_ENABLE_IPC 之外。那个宏在当前构建里根本没有定义，
+    // 整块管理命令因此从不进二进制——安装包用 ServiceControl 原生装卸服务，不需要它们，
+    // 于是没人发现。而恢复厂商服务与 IPC 毫无关系，卸载时必须调得到。
+    bool RestoreVendorServices() override {
+        const bool ok = Service::VendorServices::RestoreAll();
+        wprintf(ok ? L"[OK] Huawei background services restored.\n"
+                   : L"[WARN] Some Huawei background services could not be restored.\n");
+        return ok;
+    }
+
     void InitializeServiceProcess() override {
         // Hide console window — logs are forwarded to App via IPC GetLogs
         if (HWND hw = GetConsoleWindow()) ShowWindow(hw, SW_HIDE);

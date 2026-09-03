@@ -114,6 +114,16 @@
     <CustomAction Id="RestoreVendorAutorun" FileRef="EGoTouchTrayEXE"
                   ExeCommand="--restore-vendor-autorun"
                   Execute="immediate" Impersonate="yes" Return="ignore" />
+
+    <!--
+      卸载时把禁用过的华为后台服务还回去。服务代码里本来就有这一步，但它挂在 UninstallService
+      上，而安装包用的是 ServiceControl 原生删除服务，那条路从来不被调用——实测卸载之后七个
+      服务仍然全是 DISABLED，而 README 承诺会恢复。
+      与自启项那条相反，这里要 Impersonate="no"：备份在 HKLM，改的又是 SCM，都要系统身份。
+    -->
+    <CustomAction Id="RestoreVendorServices" FileRef="EGoTouchServiceEXE"
+                  ExeCommand="--restore-vendor-services"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
     <UI>
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTray"
                Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
@@ -170,6 +180,16 @@
               ThirdFailureActionType="restart"
               RestartServiceDelayInSeconds="5"
               ResetPeriodInDays="1" />
+
+          <!--
+            默认只有「进程没报 SERVICE_STOPPED 就没了」才算失败，而启动失败走的是另一条路：
+            ServiceShell 报 SERVICE_STOPPED 并带上 ERROR_SERVICE_SPECIFIC_ERROR，那在默认
+            设置下是一次干净停止，上面配的重启一条都不会触发。
+            ServiceEntry 的手工安装路径里设了这个标志，但 MSI 走的是 ServiceInstall 原生
+            注册，那条路从不被调用（实测装出来是 FALSE），所以这里必须再声明一次。
+          -->
+          <ServiceConfig OnInstall="yes" OnReinstall="yes"
+                         FailureActionsWhen="failedToStopOrReturnedError" />
         </ServiceInstall>
 
         <!-- 控制在安装/卸载时自动启停服务 -->
@@ -307,6 +327,12 @@
         新版本装完就得让用户再禁用一次。
       -->
       <Custom Action="RestoreVendorAutorun" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+
+      <!--
+        同样只在卸载时跑，同样必须早于 RemoveFiles——它执行的是即将被删掉的服务 exe。排在
+        自启项那条之后：两者互不依赖，但恢复服务要动 SCM，慢一些，放后面不挡住前一条。
+      -->
+      <Custom Action="RestoreVendorServices" After="RestoreVendorAutorun" Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
