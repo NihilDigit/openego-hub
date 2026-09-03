@@ -11,14 +11,8 @@ struct BatteryIndicator : BatteryIndicatorT<BatteryIndicator> {
 
 private:
     void ShowStep(int step, bool charging);
-    void StartChargingAnimation();
-    void StopChargingAnimation();
 
     Microsoft::UI::Xaml::Media::Brush BrushFor(const wchar_t* key);
-
-    // 非空表示充电动画正在放。
-    Microsoft::UI::Xaml::DispatcherTimer m_chargingTimer{nullptr};
-    int m_chargingFrame = 0;
 };
 
 } // namespace winrt::EGoTouchSettings::implementation

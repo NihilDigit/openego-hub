@@ -22,8 +22,6 @@ namespace {
 constexpr wchar_t kBatteryBase = 0xE850;          // Battery0..Battery9
 constexpr wchar_t kBatteryChargingBase = 0xE85A;  // BatteryCharging0..BatteryCharging9
 constexpr int kMaxStep = 9;
-// 充电时逐档播放一遍需要的节拍。整轮约一秒半，与相邻的动效节奏接近。
-constexpr int kChargingFrameMs = 170;
 // 低电阈值。与「电量低」的口径无关的地方不要复用它。
 constexpr int kLowLevel = 20;
 
@@ -53,30 +51,9 @@ Media::Brush BatteryIndicator::BrushFor(const wchar_t* key) {
     return Resources().Lookup(box_value(hstring{key})).as<Media::Brush>();
 }
 
-// 充电动画就是把充电态那十一个字形挨个放一遍再从头来。动画只表示「在充」，不表示充到了
-// 多少——真实电量在旁边的百分比里，而按真实档位播放的话，九成以上的电量只剩一两帧行程。
-void BatteryIndicator::StartChargingAnimation() {
-    if (m_chargingTimer) return;
-    m_chargingFrame = 0;
-    m_chargingTimer = DispatcherTimer();
-    m_chargingTimer.Interval(std::chrono::milliseconds(kChargingFrameMs));
-    m_chargingTimer.Tick([this](IInspectable const&, IInspectable const&) {
-        m_chargingFrame = (m_chargingFrame + 1) % (kMaxStep + 1);
-        ShowStep(m_chargingFrame, true);
-    });
-    m_chargingTimer.Start();
-}
-
-void BatteryIndicator::StopChargingAnimation() {
-    if (!m_chargingTimer) return;
-    m_chargingTimer.Stop();
-    m_chargingTimer = nullptr;
-}
-
 void BatteryIndicator::SetState(bool hasLevel, uint8_t level, bool charging) {
     IndicatorRoot().Visibility(hasLevel ? Visibility::Visible : Visibility::Collapsed);
     if (!hasLevel) {
-        StopChargingAnimation();
         return;
     }
 
@@ -89,14 +66,11 @@ void BatteryIndicator::SetState(bool hasLevel, uint8_t level, bool charging) {
                                            : low    ? L"BatteryLowBrush"
                                                     : L"BatteryNormalBrush"));
 
-    if (charging) {
-        // 已经在放就别重来：状态每秒刷新一次，每次都从头会让它停在第一帧。
-        StartChargingAnimation();
-        return;
-    }
-
-    StopChargingAnimation();
-    ShowStep(StepFor(level), false);
+    // 充电时同样画真实档位。这里曾经是一个 0 到 9 循环播放的动画，它占掉了图标唯一的表达位
+    // 去说「在充」，而那件事闪电字形、绿色和旁边的百分比已经各说了一遍；代价是图标与真实电量
+    // 对不上——98% 时它还在从空扫到满，扫一眼得到的印象要靠读数字纠正回来。
+    // 何况插着电是常态不是事件，为常态配一个永不停止的动画，剩下的只有视觉噪音。
+    ShowStep(StepFor(level), charging);
 }
 
 } // namespace winrt::EGoTouchSettings::implementation
