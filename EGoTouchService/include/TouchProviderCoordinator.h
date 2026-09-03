@@ -29,6 +29,10 @@ struct TouchProviderOperations {
     // 仍停在 EGoTouch，而设备已经没有任何提供方在驱动。留空则退化为原来的「起来即认定
     // 一直在」，Tick 不做存活检查。
     std::function<bool()> egoAlive;
+    // 读取当前时刻。切换是同步的，实测一次接管占住控制线程 4888~5129 毫秒，而租期就是
+    // 5000 毫秒；租期只能从切换完成的那一刻起算，所以切换之后必须再读一次时钟，不能沿用
+    // 进入时的那个时刻。留空则用 Clock::now()，单元测试注入可控时钟。
+    std::function<std::chrono::steady_clock::time_point()> now;
 };
 
 // 串行执行 EGoTouch ↔ HuaweiTHP 的事务式切换，并持有托盘租约。类本身不碰 SCM，
@@ -47,9 +51,9 @@ public:
     // 原厂请回来，全程可能十几秒；不冷却的话下一次续租又会从头来一遍，原厂服务被反复
     // 起停，触控在这段时间里时有时无。比崩溃冷却短得多：失败常常是暂时的。
     static constexpr std::chrono::seconds kAcquireFailureCooldown{10};
-    // 唤醒后至少给出这么长的租约，与冻结时剩下的时长取大者。托盘的心跳是每秒一次的
-    // WM_TIMER，而用户会话恢复得比服务晚；只按剩下的那点时间计时的话，第一拍心跳还没到
-    // 租约就过期了，触控白白交还原厂再抢回来一次。
+    // 唤醒后的租约下限。唤醒走的是与普通接管相同的路径，租期本来就从宿主真正起来的那一刻
+    // 起算，多数情况下比这个下限还长；但服务比用户会话先恢复，托盘那每秒一次的 WM_TIMER
+    // 要晚一些才回来，接管快的时候第一拍心跳还没到租约就过期了，触控白白交还原厂再抢一次。
     static constexpr std::chrono::seconds kResumeLeaseGrace{10};
 
     TouchProviderCoordinator(TouchProviderOperations operations,
@@ -61,7 +65,8 @@ public:
     void Tick(Clock::time_point now);
     // 系统挂起与唤醒。宿主里的 THP_Service 自己注册了电源通知，但托管进程没有窗口也没有
     // 消息泵，那些通知一条都收不到：面板断电之后宿主内部已经死了而进程还在，egoAlive 看
-    // 不出来。于是由服务代管——挂起时主动干净停掉，唤醒时重启。
+    // 不出来（唤醒瞬间服务日志报 running=1, exit=-1）。于是由服务代管——挂起时把触控整个
+    // 交还原厂，唤醒时重新接管。
     void OnSuspend(Clock::time_point now);
     void OnResume(Clock::time_point now);
     void Shutdown();
@@ -76,6 +81,7 @@ private:
     void HandleEGoHostDeath(Clock::time_point now);
     void Publish(PenStatus::TouchProviderState state,
                  TouchProviderError error = TouchProviderError::None);
+    [[nodiscard]] Clock::time_point ReadClock() const;
 
     TouchProviderOperations m_operations;
     StateChanged m_stateChanged;
@@ -83,13 +89,15 @@ private:
     Clock::time_point m_leaseDeadline{};
     Clock::time_point m_restartWindowStart{};
     Clock::time_point m_egoCooldownUntil{};
-    // 挂起时租约还剩多久。存时长而不是 deadline：睡眠期间 steady_clock 走不走由平台决定，
-    // 按绝对时刻恢复的话唤醒的一瞬间租约可能已经过期，触控被交还一次谁也没要求的原厂。
-    std::chrono::milliseconds m_leaseRemainingOnSuspend{0};
     int m_restartsInWindow = 0;
     PenStatus::TouchProviderState m_state = PenStatus::TouchProviderState::Unknown;
     TouchProviderError m_error = TouchProviderError::None;
     bool m_hasLease = false;
+    // 系统正在睡，触控已经交还原厂，但租约还在托盘手里、唤醒后要自动恢复接管。这件事只能
+    // 用内部标志表达：对外发布的状态必须是真实的 Huawei，托盘看到的才是当下真正在驱动
+    // 触控的那一方。挂起期间托盘照常每秒续租一次，这个标志就是拦住那些续租、不让它们把刚
+    // 停下的宿主又拉起来的地方。
+    bool m_suspended = false;
 };
 
 } // namespace Service

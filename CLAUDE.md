@@ -238,6 +238,9 @@ build.
   through is gone.
 - `docs/KBDMCU_PROTOCOL.md`, `docs/KEYBOARD_IDENTITY.md`, `docs/ACCESSORY_CENTER.md` —
   reverse-engineered MCU and PC Manager behaviour.
+- `docs/touch-provider-lifecycle.md` — measured time constants for provider switching, and
+  the lease and lifecycle design they dictate. Anything that changes a timeout, a debounce
+  or a restart budget should be checked against these numbers first.
 - `hal/docs/` — the vendor DLL reverse engineering: display colour management, the OSD,
   battery and the vendor services. `display-manage.md` also records two negative results
   worth not repeating.
