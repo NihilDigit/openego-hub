@@ -52,7 +52,10 @@ static bool InstallService() {
         return err == ERROR_SERVICE_EXISTS;
     }
 
-    // 崩溃恢复策略：5s → 10s → 30s 重启，24h 重置计数器
+    // 崩溃恢复策略：5s → 10s → 30s 重启，24h 重置计数器。三条不等于「只重启三次」：
+    // 第 N 次失败取数组第 N-1 项，N 超出数组长度时重复最后一项，所以第四次以后一直是
+    // 30 秒重启。这一条是服务在接管态崩掉之后触控唯一的自动出路——实测服务被强杀后
+    // 5.2 秒被拉回、7.5 秒恢复接管，没有它就是 90 秒内两个提供方都不在跑。
     SC_ACTION actions[3] = {
         { SC_ACTION_RESTART, 5000 },
         { SC_ACTION_RESTART, 10000 },
@@ -63,6 +66,13 @@ static bool InstallService() {
     failCfg.cActions = 3;
     failCfg.lpsaActions = actions;
     ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &failCfg);
+
+    // 默认只有「进程没报 SERVICE_STOPPED 就没了」才算失败。启动失败走的是另一条路：
+    // ServiceShell 报 SERVICE_STOPPED 并带上 ERROR_SERVICE_SPECIFIC_ERROR，那在默认设置下
+    // 是一次干净停止，上面配的重启一次都不会触发。置位之后带非零退出码的停止同样算失败。
+    SERVICE_FAILURE_ACTIONS_FLAG failFlag{};
+    failFlag.fFailureActionsOnNonCrashFailures = TRUE;
+    ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &failFlag);
 
     // 服务描述
     SERVICE_DESCRIPTIONW desc{};
