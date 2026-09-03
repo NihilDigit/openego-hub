@@ -34,6 +34,10 @@ constexpr wchar_t kSettingsRegistryKey[] = L"Software\\OpenEGoHub";
 // 640，宽度取它加上左右各 24 的内边距。
 constexpr int32_t kWindowWidth = 688;
 constexpr int32_t kWindowHeight = 760;
+// 恢复尺寸时的下限，单位与上面一致（DIP）。内容区自身 MaxWidth 是 640，比这更窄就开始压
+// 卡片里的两列布局了。
+constexpr int32_t kMinWindowWidth = 480;
+constexpr int32_t kMinWindowHeight = 400;
 
 // DWMWA_USE_IMMERSIVE_DARK_MODE。SDK 里到 Windows 11 才有这个名字，自带一份省得跟着
 // WINDOWS_SDK_VERSION 走。
@@ -223,6 +227,7 @@ MainWindow::MainWindow() {
     m_batteryTimer.Start();
 
     Closed([this](IInspectable const&, WindowEventArgs const&) {
+        SaveWindowPlacement();
         if (m_refreshTimer) m_refreshTimer.Stop();
         if (m_batteryTimer) m_batteryTimer.Stop();
         // 防抖计时器要一并停掉：窗口关了之后它再触发，SendTrayCommand 会对着已经销毁的
@@ -267,8 +272,17 @@ void MainWindow::ConfigureWindow() {
     // 与之一致，无需再换算。
     const UINT dpi = GetDpiForWindow(hwnd);
     const double scale = dpi > 0 ? dpi / 96.0 : 1.0;
-    int32_t physicalWidth = static_cast<int32_t>(std::lround(kWindowWidth * scale));
-    int32_t physicalHeight = static_cast<int32_t>(std::lround(kWindowHeight * scale));
+
+    // 记住的是 DIP 而不是物理像素：这台设备在外接屏和内屏之间缩放不同，按物理像素恢复会让
+    // 窗口在另一块屏上大一圈或小一圈。下限拦住的是「上次被拖得极小」这种状态，否则下次打开
+    // 会是一个看不到内容的窗口，用户还得自己拉回来。
+    const int32_t savedWidth = static_cast<int32_t>(ReadUserSetting(L"WindowWidth", kWindowWidth));
+    const int32_t savedHeight = static_cast<int32_t>(ReadUserSetting(L"WindowHeight", kWindowHeight));
+    const int32_t targetWidth = std::max(kMinWindowWidth, savedWidth);
+    const int32_t targetHeight = std::max(kMinWindowHeight, savedHeight);
+
+    int32_t physicalWidth = static_cast<int32_t>(std::lround(targetWidth * scale));
+    int32_t physicalHeight = static_cast<int32_t>(std::lround(targetHeight * scale));
 
     const DisplayArea areaCells = DisplayArea::GetFromWindowId(windowId, DisplayAreaFallback::Primary);
     const bool hasArea = areaCells != nullptr;
@@ -288,13 +302,71 @@ void MainWindow::ConfigureWindow() {
         presenter.IsMinimizable(true);
     }
 
-    if (hasArea) {
+    // 记住的位置只在它仍落在某块屏幕上时才用。显示器拔掉、分辨率改小、副屏换边之后，上次
+    // 的坐标可能整个在可见区域之外，照搬会得到一个用户找不到的窗口——那时退回居中。
+    bool restoredPosition = false;
+    if (ReadUserSetting(L"WindowPosValid", 0) != 0) {
+        const int32_t savedX = static_cast<int32_t>(ReadUserSetting(L"WindowX", 0));
+        const int32_t savedY = static_cast<int32_t>(ReadUserSetting(L"WindowY", 0));
+        const RectInt32 wanted{savedX, savedY, physicalWidth, physicalHeight};
+        if (DisplayArea::GetFromRect(wanted, DisplayAreaFallback::None) != nullptr) {
+            appWindow.Move(PointInt32{savedX, savedY});
+            restoredPosition = true;
+        }
+    }
+
+    if (!restoredPosition && hasArea) {
         appWindow.Move(PointInt32{
             work.X + std::max(0, (work.Width - physicalWidth) / 2),
             work.Y + std::max(0, (work.Height - physicalHeight) / 3)});
     }
 
+    // 最大化放在尺寸和位置都定好之后：对着已经最大化的窗口 Move，动的是它的还原状态，
+    // 用户按下还原键就会落到一个没人指定过的地方。
+    if (ReadUserSetting(L"WindowMaximized", 0) != 0) {
+        if (const auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>()) {
+            presenter.Maximize();
+        }
+    }
+
     ApplyWindowIcon(hwnd, dpi);
+}
+
+// 关窗时记下尺寸，下次按同样大小打开。存 DIP 而不是物理像素，理由见 ConfigureWindow。
+//
+// 最大化时不覆盖尺寸：那时 AppWindow.Size 是整个工作区，记下来的话用户下次还原窗口会得到一
+// 个铺满屏幕的「普通」窗口，等于把他原来的尺寸弄丢了。最大化状态本身单独记一位。
+void MainWindow::SaveWindowPlacement() {
+    const HWND hwnd = WindowHandle();
+    if (!hwnd) return;
+
+    // 走 Win32 而不是 AppWindow.Size()：Closed 触发时 AppWindow 已经不再跟着真实窗口走，
+    // 实测把窗口拖到 1200x1100 之后关掉，它报回来的仍是上一次的尺寸，存下去的数就是错的。
+    // GetWindowRect 问的是窗口本身，这个时候还准。
+    RECT rect{};
+    if (!GetWindowRect(hwnd, &rect)) return;
+
+    const bool maximized = IsZoomed(hwnd) != FALSE;
+    WriteUserSetting(L"WindowMaximized", maximized ? 1 : 0);
+    if (maximized) return;
+
+    const UINT dpi = GetDpiForWindow(hwnd);
+    const double scale = dpi > 0 ? dpi / 96.0 : 1.0;
+    if (scale <= 0.0) return;
+
+    const long width = rect.right - rect.left;
+    const long height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0) return;
+
+    WriteUserSetting(L"WindowWidth", static_cast<DWORD>(std::lround(width / scale)));
+    WriteUserSetting(L"WindowHeight", static_cast<DWORD>(std::lround(height / scale)));
+
+    // 位置存物理像素，与 DisplayArea.WorkArea 同一套坐标；换算成 DIP 反而要先知道落在哪块
+    // 屏上，而那正是这里要存下来才能回答的问题。左上角可以是负数（副屏在主屏左侧或上方），
+    // 存进 DWORD 走的是补码，读出来再转回 int32 就是原值。
+    WriteUserSetting(L"WindowX", static_cast<DWORD>(rect.left));
+    WriteUserSetting(L"WindowY", static_cast<DWORD>(rect.top));
+    WriteUserSetting(L"WindowPosValid", 1);
 }
 
 // 显式给窗口挂图标。不挂的话壳层退回去读 exe 的图标资源，而那条路会被按**路径**缓存：

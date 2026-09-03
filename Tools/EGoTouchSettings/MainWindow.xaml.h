@@ -62,6 +62,8 @@ private:
     void ApplyTheme(Microsoft::UI::Xaml::ElementTheme theme);
     void SyncFrameTheme();
     void ConfigureWindow();
+    // 关窗时把尺寸与最大化状态记下来，供下次 ConfigureWindow 恢复。
+    void SaveWindowPlacement();
     static void ApplyWindowIcon(HWND hwnd, UINT dpi);
     void LoadStoredSettings();
     void RefreshState();
