@@ -112,13 +112,18 @@ int __cdecl OnConnect(int value) noexcept {
 }
 
 int __cdecl OnDetach(int value) noexcept {
+    // 0x31 的 packet[8] 非零是「已吸附」，不是「已分离」。原先按插件在 Detach.png 与
+    // Snapping.png 之间的切换推出的极性是反的，实机上分离时这里收到 0，界面于是把分离
+    // 显示成已吸附。见 docs/KEYBOARD_IDENTITY.md 3.1 的更正。
+    const bool detached = value == 0;
     {
         std::lock_guard<std::mutex> guard(g_mutex);
         SetFlag(Flag::HasDetached, true);
-        SetFlag(Flag::Detached, value != 0);
+        SetFlag(Flag::Detached, detached);
         Touch();
     }
-    PushEvent(EventKind::DetachChanged, value);
+    // 事件值按 DetachChanged 声明的语义归一，不透传 MCU 原值。
+    PushEvent(EventKind::DetachChanged, detached ? 1 : 0);
     return 0;
 }
 

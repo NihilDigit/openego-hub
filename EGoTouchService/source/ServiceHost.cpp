@@ -93,6 +93,68 @@ struct ServiceHost::Impl {
     // 未收到过应答时 known 为 false，此时状态通道不置 has 位，托盘据此把该项显示为不可用。
     std::atomic<bool> m_kbdDetachSupportKnown{false};
     std::atomic<bool> m_kbdDetachSupport{false};
+
+    // 键盘接上的边沿检测。键盘状态源从 PenEventBridge 换成 hal 宿主时，这段一并被删掉，
+    // 顶替它的是厂商 DLL 的连接结果回调——那两条对应 MCU 的 0x16 / 0x39，只在分离后的无线
+    // 配对上报，键盘吸附回机身走的是 0x12 和 0x31，一条事件都不产生，弹窗于是在最常见的那次
+    // 操作上从不出现。边沿只能自己在状态位上求，判据沿用 PenEventBridge::IsKbdConnectionEdge。
+    struct KeyboardArrivalDetector {
+        // AccessoryLoop 每 250 毫秒采一次。
+        static constexpr int kPresenceStableTicks = 8;  // 2 秒
+        static constexpr int kDuplicateTicks = 6;       // 1.5 秒
+
+        bool m_havePresence = false;
+        bool m_present = false;
+        bool m_candidatePresent = false;
+        int m_presenceTicks = 0;
+
+        bool m_haveAttached = false;
+        bool m_attached = false;
+
+        int m_ticksSinceNotify = kDuplicateTicks;
+
+        // 快照读不到时作废基线：宿主重启后键盘多半还在原位，重建基线的那一轮不该弹窗。
+        void Invalidate() noexcept {
+            m_havePresence = false;
+            m_haveAttached = false;
+            m_presenceTicks = 0;
+        }
+
+        // 返回真表示这一轮出现了一次「键盘接上了」。
+        [[nodiscard]] bool Sample(bool present, bool hasAttached, bool attached) noexcept {
+            if (m_ticksSinceNotify < kDuplicateTicks) ++m_ticksSinceNotify;
+
+            bool arrived = false;
+
+            // 0x12 在息屏和唤醒前后会抖出一两秒的 0（docs/KEYBOARD_IDENTITY.md 3.4），照边沿
+            // 直接弹会变成每次唤醒都弹一次。取值稳定住才更新基线，抖动因此两头都留不下痕迹。
+            if (present != m_candidatePresent) {
+                m_candidatePresent = present;
+                m_presenceTicks = 0;
+            } else if (m_presenceTicks < kPresenceStableTicks &&
+                       ++m_presenceTicks == kPresenceStableTicks) {
+                arrived = m_havePresence && present && !m_present;
+                m_present = present;
+                m_havePresence = true;
+            }
+
+            // 吸附是一次明确的物理动作，不等稳定窗口——等两秒的弹窗已经错过了用户看它的时刻。
+            if (hasAttached) {
+                arrived = arrived || (m_haveAttached && attached && !m_attached);
+                m_attached = attached;
+                m_haveAttached = true;
+            } else {
+                m_haveAttached = false;
+            }
+
+            // 0x12 与 0x31 通常紧挨着到达，表达的是同一次物理动作，合并成一条。
+            if (!arrived || m_ticksSinceNotify < kDuplicateTicks) return false;
+            m_ticksSinceNotify = 0;
+            return true;
+        }
+    };
+    // 只被 AccessoryLoop 那个线程碰，不需要同步。
+    KeyboardArrivalDetector m_kbdArrival;
     // 充电阈值的缓存。读一次要走 WMI 往返约 6 毫秒，而状态发布跟着设备回调走、一秒可能
     // 好几次，每次都读会把这条 ACPI 通道占满，还要和别的 WMI 消费者抢。阈值只在用户提交
     // 之后变化，所以启动时读一次、每次提交后重读。
@@ -923,8 +985,36 @@ void ServiceHost::AccessoryLoop() {
             }
         }
 
+        DetectKeyboardArrival();
         PublishStatusSnapshot();
         Sleep(250);
+    }
+}
+
+// 键盘接上时提示一次。判据取自快照的状态位而不是厂商的连接结果回调，理由写在
+// KeyboardArrivalDetector 的说明里。
+void ServiceHost::DetectKeyboardArrival() {
+    Gaokun::Keyboard::Snapshot kbd{};
+    bool read = false;
+    if (m_impl->m_kbdHostHealthy.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lk(m_impl->m_accessoryChannelMutex);
+        read = m_kbdSnapshots && m_kbdSnapshots->Read(kbd);
+    }
+    if (!read) {
+        m_impl->m_kbdArrival.Invalidate();
+        return;
+    }
+
+    using F = Gaokun::Keyboard::Flag;
+    const auto has = [&](F f) { return (kbd.flags & static_cast<uint32_t>(f)) != 0; };
+    const bool present = has(F::HasConnected) && has(F::Connected);
+    const bool hasAttached = has(F::HasDetached);
+    const bool attached = hasAttached && !has(F::Detached);
+
+    if (m_impl->m_kbdArrival.Sample(present, hasAttached, attached)) {
+        LOG_INFO("Service", __func__, "MCU",
+                 "Keyboard connected (present={}, attached={}).", present, attached);
+        m_impl->RaiseNotification(PenStatus::NotificationKind::KeyboardConnected);
     }
 }
 

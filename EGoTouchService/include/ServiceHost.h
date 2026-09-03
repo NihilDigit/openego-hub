@@ -128,6 +128,8 @@ private:
     void OpenAccessoryChannels();
     void CloseKeyboardChannels();
     void ClosePenChannels();
+    // 键盘接上的边沿。只在 AccessoryLoop 这一个线程上调用。
+    void DetectKeyboardArrival();
     // 状态快照的唯一构造点，见实现处的说明。
     void PublishStatusSnapshot();
 
