@@ -29,9 +29,10 @@ disabled.
 > the corresponding features to fail.
 >
 > This dependency introduces no background overhead: OpenEGo Hub disables the
-> official x64 services of PC Manager so they no longer remain resident in the
-> background, eliminating the original emulation overhead. Required DLLs are loaded
-> on demand by this project's host processes.
+> official x64 services of PC Manager and removes its logon autostart entries, so
+> they no longer remain resident in the background, eliminating the original
+> emulation overhead. Required DLLs are loaded on demand by this project's host
+> processes.
 
 ---
 
@@ -142,10 +143,14 @@ come with them.
 - The installer cleans up before it installs: services, program files and shortcuts left
   by any previous version — including pre-rename and test builds — are removed
   automatically, with no manual uninstall needed first.
-- User configuration survives an upgrade: settings, logs, and the record needed to
-  restore any Huawei services you disabled.
+- User configuration survives an upgrade: settings, logs, and the records needed to
+  restore any Huawei services and autostart entries you disabled.
 - Uninstalling hands touch back to the Huawei touch service and re-enables any Huawei
   background services that were disabled from the settings window.
+- Logon autostart entries have to be restored before uninstalling, by turning off
+  "disable vendor components" in the settings window. They live under the current
+  user's registry, which the uninstaller — running as the system account — cannot
+  reach.
 
 ### How it behaves
 
