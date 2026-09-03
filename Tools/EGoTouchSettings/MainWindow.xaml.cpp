@@ -340,6 +340,10 @@ void MainWindow::SaveWindowPlacement() {
     const HWND hwnd = WindowHandle();
     if (!hwnd) return;
 
+    // 最小化时什么都不记。那时 GetWindowRect 报的是 -32000,-32000 和一条 314x50 的标题条，
+    // 存进去等于把用户真正用的那个尺寸冲掉；保留上一次的记录才是他想要的。
+    if (IsIconic(hwnd)) return;
+
     // 走 Win32 而不是 AppWindow.Size()：Closed 触发时 AppWindow 已经不再跟着真实窗口走，
     // 实测把窗口拖到 1200x1100 之后关掉，它报回来的仍是上一次的尺寸，存下去的数就是错的。
     // GetWindowRect 问的是窗口本身，这个时候还准。

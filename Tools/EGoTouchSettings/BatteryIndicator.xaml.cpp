@@ -19,14 +19,20 @@ namespace {
 // 填充档位与 FontIcon 画出来的并不一致——两边取到的不是同一份字体——照离线那张表去数，会
 // 把满档认成第九档，再另找一个「满档」码点补上，而那个码点是尺寸小一圈的另一枚图标，垫在
 // 下层会被上层的空壳整个罩住，看起来就是一格空电池。要调这里，必须在应用里看。
-constexpr wchar_t kBatteryBase = 0xE850;          // Battery0..Battery9
-constexpr wchar_t kBatteryChargingBase = 0xE85A;  // BatteryCharging0..BatteryCharging9
+constexpr wchar_t kBatteryBase = 0xE850;          // Battery0..Battery9   = E850..E859
+constexpr wchar_t kBatteryChargingBase = 0xE85A;  // BatteryCharging0..8  = E85A..E862
+// 两组的档位数不一样，这是这里最容易踩的一处：普通组连续排到 Battery9，充电组只排到
+// BatteryCharging8，紧接着 E863 就是节能组的第一枚（电池旁边一片叶子，尺寸也小一圈）。
+// 两组共用 9 作上限的话，充电满档会算到 E863，垫在下层被上层的空壳整个罩住，屏幕上就是
+// 一格空电池——而它恰好只在电量接近满时出现。
 constexpr int kMaxStep = 9;
+constexpr int kMaxChargingStep = 8;
 // 低电阈值。与「电量低」的口径无关的地方不要复用它。
 constexpr int kLowLevel = 20;
 
-int StepFor(uint8_t level) {
-    return std::clamp((level * kMaxStep + 50) / 100, 0, kMaxStep);
+int StepFor(uint8_t level, bool charging) {
+    const int maxStep = charging ? kMaxChargingStep : kMaxStep;
+    return std::clamp((level * maxStep + 50) / 100, 0, maxStep);
 }
 
 wchar_t GlyphFor(int step, bool charging) {
@@ -70,7 +76,7 @@ void BatteryIndicator::SetState(bool hasLevel, uint8_t level, bool charging) {
     // 去说「在充」，而那件事闪电字形、绿色和旁边的百分比已经各说了一遍；代价是图标与真实电量
     // 对不上——98% 时它还在从空扫到满，扫一眼得到的印象要靠读数字纠正回来。
     // 何况插着电是常态不是事件，为常态配一个永不停止的动画，剩下的只有视觉噪音。
-    ShowStep(StepFor(level), charging);
+    ShowStep(StepFor(level, charging), charging);
 }
 
 } // namespace winrt::EGoTouchSettings::implementation
