@@ -1911,6 +1911,21 @@ bool RestoreVendorAutorun() {
     return allDone;
 }
 
+// 逐个比对整参数，不用 wcsstr：安装目录的路径也在命令行里，子串匹配会把碰巧含有同样字样
+// 的路径当成开关。
+bool HasCommandLineSwitch(const wchar_t* name) {
+    int count = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!argv) return false;
+
+    bool found = false;
+    for (int i = 1; i < count && !found; ++i) {
+        found = _wcsicmp(argv[i], name) == 0;
+    }
+    LocalFree(argv);
+    return found;
+}
+
 bool ApplyVendorAutorun(bool disable) {
     return disable ? DisableVendorAutorun() : RestoreVendorAutorun();
 }
@@ -2583,6 +2598,17 @@ void ReleaseGraphics() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
+    // 卸载时把华为的登录自启项还回去，做完就退出。
+    //
+    // 这一趟只能由托盘跑：备份记在 HKCU，而卸载流程本身以系统身份执行，它读到的是 SYSTEM
+    // 自己的 hive，用户那份一条也看不到。安装包因此在删文件之前以用户身份调一次本程序。
+    //
+    // 放在单实例互斥量之前：卸载时通常还有一个托盘在跑，抢不到互斥量就直接返回的话这趟
+    // 什么也不会做，而它正是最后一次能恢复的机会。恢复本身只动注册表，与那个实例不冲突。
+    if (HasCommandLineSwitch(L"--restore-vendor-autorun")) {
+        return RestoreVendorAutorun() ? 0 : 1;
+    }
+
     // One panel per session is enough; a second instance would fight over the same
     // screen corner.
     HANDLE singleton = CreateMutexW(nullptr, TRUE, kMutexName);

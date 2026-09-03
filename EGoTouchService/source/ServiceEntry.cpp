@@ -123,11 +123,9 @@ static bool UninstallService() {
     // 卸载要把华为的后台服务一并还回去。禁用状态记在注册表里，本服务删掉之后没有任何人
     // 会再去恢复它们，用户拿到的是一台既没有 OpenEGo Hub 也没有原厂后台的机器。
     //
-    // TODO: 登录自启项还没有走这条路，卸载之后它们留在备份键里不还回去，PC Manager 的配件
-    // 中心从此静默不再自启。原因是那份记录在 HKCU 而这里跑在 LocalSystem 下，读到的是
-    // SYSTEM 自己的 hive；托盘那半边在卸载流程里也不会被调用。可行的做法是让安装包在卸载时
-    // 以用户身份跑一次托盘（WiX 里 LaunchTray 已经是 Impersonate="yes" 的现成例子），给它
-    // 加一个只做恢复就退出的命令行开关。在那之前 README 里写明要在卸载前自己关掉开关。
+    // 这里只还得回 HKLM 的服务。登录自启项记在 HKCU，本进程跑在 LocalSystem 下读到的是
+    // SYSTEM 自己的 hive，够不着用户那份；那一半由安装包在卸载时以用户身份调一次
+    // OpenEGoHubTray.exe --restore-vendor-autorun 完成，见 scripts/OpenEGoHubSetup.wxs。
     if (!Service::VendorServices::RestoreAll()) {
         wprintf(L"[WARN] Some vendor services could not be restored.\n");
     } else {

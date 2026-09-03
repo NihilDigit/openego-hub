@@ -146,11 +146,8 @@ come with them.
 - User configuration survives an upgrade: settings, logs, and the records needed to
   restore any Huawei services and autostart entries you disabled.
 - Uninstalling hands touch back to the Huawei touch service and re-enables any Huawei
-  background services that were disabled from the settings window.
-- Logon autostart entries have to be restored before uninstalling, by turning off
-  "disable vendor components" in the settings window. They live under the current
-  user's registry, which the uninstaller — running as the system account — cannot
-  reach.
+  background services and logon autostart entries that were disabled from the
+  settings window.
 
 ### How it behaves
 

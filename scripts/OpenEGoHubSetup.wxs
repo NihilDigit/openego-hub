@@ -101,6 +101,19 @@
     <Property Id="WixShellExecTarget" Value="[#EGoTouchTrayEXE]" />
     <CustomAction Id="LaunchTray" DllEntry="WixShellExec" Impersonate="yes"
                   BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" />
+
+    <!--
+      卸载时把华为的登录自启项还回去。禁用状态记在 HKCU，而卸载序列以系统身份执行，读到的
+      是 SYSTEM 自己的 hive——服务那侧的 RestoreAll 只够还原 HKLM 的服务，这一半够不着。
+      Impersonate="yes" 让它落在触发卸载的那个用户上下文里，也就是当初禁用它们的那个人。
+
+      同步执行而不是 ShellExec：托盘的 exe 马上就要被 RemoveFiles 删掉，异步启动会跑输删除。
+      Return="ignore" 是因为恢复失败不该拦住卸载——留下几条自启项，比留下一个装了一半的
+      系统好得多。
+    -->
+    <CustomAction Id="RestoreVendorAutorun" FileRef="EGoTouchTrayEXE"
+                  ExeCommand="--restore-vendor-autorun"
+                  Execute="immediate" Impersonate="yes" Return="ignore" />
     <UI>
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTray"
                Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
@@ -287,6 +300,13 @@
         安装失败了它们也不值得还原，这是 clean-install 的语义。
       -->
       <Custom Action="CleanSweep" After="InstallInitialize" Condition="NOT Installed" />
+
+      <!--
+        只在卸载时跑，且必须早于 RemoveFiles：它要执行的正是马上要被删掉的那个托盘 exe。
+        REMOVE="ALL" 把升级排除在外——升级时 REP 也会走一遍卸载序列，那时把自启项还回去，
+        新版本装完就得让用户再禁用一次。
+      -->
+      <Custom Action="RestoreVendorAutorun" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
