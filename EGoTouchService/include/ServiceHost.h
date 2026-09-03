@@ -66,6 +66,10 @@ public:
     /// 逆序停止所有模块
     void Stop();
 
+    /// 这次停止是系统关机引起的。SCM 的控制码只有 ServiceShell 看得到，而要用它的是三层
+    /// 之下的交还逻辑；改一串签名不如让它自己记一笔。停止路径开始前置位，只写一次。
+    void NoteSystemShutdown() { m_systemShuttingDown.store(true, std::memory_order_release); }
+
     ServiceMode GetMode() const { return m_runtimeMode; }
 
     /// Start() 返回 false 时停在哪个阶段。记录的是最后一个进入过的阶段，成功路径不清零，
@@ -116,6 +120,8 @@ private:
     // 用轮询而不是等通知：错过一轮没有代价，而少一个跨进程的唤醒路径就少一处可能卡住的地方。
     std::thread m_accessoryThread;
     std::atomic<bool> m_accessoryStop{false};
+    // 见 NoteSystemShutdown。SCM 的控制线程写，停止路径读。
+    std::atomic<bool> m_systemShuttingDown{false};
 
     // 宿主可执行文件的位置：优先本服务同目录（部署形态），其次 hal 的构建目录（开发形态）。
     [[nodiscard]] static std::wstring ResolveHostPath(const wchar_t* exeName);

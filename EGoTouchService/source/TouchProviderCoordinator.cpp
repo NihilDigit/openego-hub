@@ -155,9 +155,23 @@ void TouchProviderCoordinator::HandleEGoHostDeath(Clock::time_point now) {
     Publish(m_state, TouchProviderError::EGoHostDied);
 }
 
-void TouchProviderCoordinator::Shutdown() {
+void TouchProviderCoordinator::Shutdown(bool systemShutdown) {
     m_hasLease = false;
     m_suspended = false;
+
+    // 关机时只把设备交出来，不请原厂回来。它是 AUTO_START，下次开机自己会起；而此刻
+    // StartService 必然返回 ERROR_SHUTDOWN_IN_PROGRESS，等它是纯粹的白等——实测正常停止
+    // 要 6331 毫秒，其中一大半花在这一趟上，而 STOP_PENDING 只报了 5000 毫秒 hint。
+    // 超时之后 SCM 直接终止进程，终止点可能正落在「原厂已停、宿主也已停」之间，那正是
+    // 开机后没有触控的来源。
+    //
+    // 这里不发布状态：宿主已停而原厂未起，没有哪个枚举值说的是这件事，而托盘此刻也在退出，
+    // 发布一个不准确的状态不如什么都不说。
+    if (systemShutdown) {
+        if (m_operations.stopEGo) (void)m_operations.stopEGo();
+        return;
+    }
+
     (void)SwitchToHuawei();
 }
 

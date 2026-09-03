@@ -102,6 +102,10 @@ void WINAPI ServiceShell::SvcMain(DWORD argc, LPWSTR* argv) {
 
     // 启动失败要报非零退出码。一律 NO_ERROR 会让 SCM 把失败当作干净停止，
     // ServiceEntry 配的 SC_ACTION_RESTART（5s/10s/30s）于是永远不触发。
+    //
+    // 光有非零退出码还不够：默认只有「进程没报 SERVICE_STOPPED 就没了」才算失败，带错误码
+    // 的正常停止同样不触发恢复动作。这条路能走通依赖 ServiceEntry 里那个
+    // SERVICE_CONFIG_FAILURE_ACTIONS_FLAG，两处要一起看。
     if (s->m_impl->startFailed.load(std::memory_order_acquire)) {
         const auto phase = s->m_impl->host.LastFailedPhase();
         LOG_ERROR("Service", __func__, "Stopped",
@@ -129,8 +133,14 @@ DWORD WINAPI ServiceShell::SvcCtrlHandlerEx(
     case SERVICE_CONTROL_SHUTDOWN:
     case SERVICE_CONTROL_PRESHUTDOWN:
         LOG_INFO("Service", __func__, "Stopping", "Received stop/shutdown control code={}.", ctrl);
+        // 关机与普通停止要分开：关机时把原厂请回来是白等，它下次开机自己会起。
+        if (ctrl == SERVICE_CONTROL_SHUTDOWN || ctrl == SERVICE_CONTROL_PRESHUTDOWN) {
+            s->m_impl->host.NoteSystemShutdown();
+        }
         s->SignalShutdownTransportAndStop();
-        s->ReportStatus(SERVICE_STOP_PENDING, 5000);
+        // 实测一次正常停止要 6331 毫秒——停宿主 4.4 秒，交还原厂又几秒——而这里原先只报
+        // 5000 毫秒。报少了 SCM 会在服务还在交还的中途认定它没响应。
+        s->ReportStatus(SERVICE_STOP_PENDING, 20000);
         return NO_ERROR;
 
     case SERVICE_CONTROL_POWEREVENT: {

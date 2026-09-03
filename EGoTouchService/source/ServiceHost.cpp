@@ -1830,7 +1830,8 @@ void ServiceHost::StopRuntimeSubsystem() {
     // 先交还 Huawei 并等到 Running，再拆掉 runtime 对象。正常停止、卸载和服务关闭都走
     // 这里；托盘被强杀则由上面的租约超时走同一个 coordinator 分支。
     if (m_impl->m_touchProviderCoordinator) {
-        m_impl->m_touchProviderCoordinator->Shutdown();
+        m_impl->m_touchProviderCoordinator->Shutdown(
+            m_systemShuttingDown.load(std::memory_order_acquire));
         m_impl->m_touchProviderCoordinator.reset();
     }
 

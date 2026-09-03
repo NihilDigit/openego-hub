@@ -69,7 +69,8 @@ public:
     // 交还原厂，唤醒时重新接管。
     void OnSuspend(Clock::time_point now);
     void OnResume(Clock::time_point now);
-    void Shutdown();
+    // systemShutdown 为真表示机器正在关机，此时不把原厂请回来，理由见实现处。
+    void Shutdown(bool systemShutdown);
 
     [[nodiscard]] PenStatus::TouchProviderState State() const noexcept { return m_state; }
     [[nodiscard]] TouchProviderError Error() const noexcept { return m_error; }

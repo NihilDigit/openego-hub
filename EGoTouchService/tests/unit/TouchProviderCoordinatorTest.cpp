@@ -400,6 +400,36 @@ void TestSlowTakeoverDoesNotExpireItsOwnLease() {
     Require(coordinator.HasLease(), "the lease survives its own takeover");
 }
 
+// 关机时把原厂请回来是白等：它是 AUTO_START，下次开机自己会起，而此刻 StartService 必然
+// 失败。实测正常停止要 6331 毫秒，多出来的那几秒正是花在这一趟上，而 STOP_PENDING 只报了
+// 5000 毫秒 hint，超时之后 SCM 直接终止进程，终止点可能落在两个提供方都停着的那一刻。
+void TestShutdownDuringSystemShutdownDoesNotWaitForHuawei() {
+    Fixture f;
+    auto coordinator = f.Make();
+    Require(coordinator.AcquireOrRenew(TouchProviderCoordinator::Clock::time_point{}),
+            "precondition: EGo active");
+
+    f.calls.clear();
+    coordinator.Shutdown(true);
+    Require(f.calls == std::vector<std::string>{"stopEGo"},
+            "a system shutdown only hands the device back, it does not start Huawei");
+}
+
+// 普通停止（服务被停掉、升级、卸载）机器还要接着用，触控必须交还原厂。
+void TestOrdinaryShutdownStillRestoresHuawei() {
+    Fixture f;
+    auto coordinator = f.Make();
+    Require(coordinator.AcquireOrRenew(TouchProviderCoordinator::Clock::time_point{}),
+            "precondition: EGo active");
+
+    f.calls.clear();
+    coordinator.Shutdown(false);
+    Require(f.calls == std::vector<std::string>{"stopEGo", "restoreHuawei"},
+            "an ordinary stop hands touch back to Huawei");
+    Require(coordinator.State() == PenStatus::TouchProviderState::Huawei,
+            "and says so");
+}
+
 // 看护宿主的判据是「原厂正被我们停着」，不是「我们有没有租约」。租约超时那条路先清掉
 // m_hasLease 再切换，这次切换若失败并回滚成 EGoTouch，宿主就跑在一个没人看着的状态里，
 // 而托盘此时通常已经不在了——宿主再死就是彻底无触控，状态却仍显示 EGoTouch。
@@ -449,6 +479,8 @@ int main() {
         TestResumeLeaseIsAtLeastTheGrace();
         TestSlowTakeoverDoesNotExpireItsOwnLease();
         TestHostStaysWatchedAfterTheLeaseIsGone();
+        TestShutdownDuringSystemShutdownDoesNotWaitForHuawei();
+        TestOrdinaryShutdownStillRestoresHuawei();
         std::cout << "[TEST] Touch provider coordinator tests passed.\n";
         return 0;
     } catch (const std::exception& error) {
