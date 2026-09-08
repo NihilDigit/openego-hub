@@ -28,13 +28,17 @@ THP_Service.dll / ApDaemon.dll
 当前项目中对应实现为：
 
 ```text
-PenEventBridge          col00 事件/控制通道
-btmcu/PenUsb*.h         协议 builder、parser、ACK 表、初始化状态机
+PenEventBridge          col00 事件通道，只读加一次性查询
+btmcu/PenUsb*.h         协议 builder、parser
 DeviceRuntime           原厂状态位与上层行为映射
 PenPressureReader       col01 压力通道，不属于本文事件协议主体
 ```
 
-整体判断：当前 `penevt` + `btmcu` + `DeviceRuntime` 已经覆盖原厂关键 wire protocol：设备发现、`0x7101/0x7701` 初始查询、`0x8001` ACK、`0x7D01` 初始化参数、RX event 解析、核心状态位更新与按钮/橡皮擦事件转发。仍有少量边缘事件和未使用命令需要补齐或保持为待确认项。
+**`PenEventBridge` 是这个端点上的被动读者。** 下文记录的握手（`0x7101/0x7701`）、`0x8001` ACK
+和 `0x7D01` 初始化参数由 `THP_Service.dll` 在它的宿主进程里完成，本项目不再重复：曾经重复做
+过，MCU 在笔唤醒重协商时收到两份 ACK 外加本项目的查询，之后 TSACore 收蓝牙压力时断时续，笔尖
+在信号弱的区域被当成手指。本项目只保留通道建立时的一次性查询和用户触发的命令。这些记录仍然
+有效，是解读 THP 日志和 MCU 行为的依据。
 
 ---
 
@@ -456,12 +460,17 @@ ACK 表：符合原厂
 
 ## MCU 要先握手才会上报事件
 
-这条不在原厂文档里，是重构踩坑之后确认的：**没有 `PenEventBridge` 的初始化握手
-（`0x7101` + 两次 `0x7701` + `0x7B` InitParam）并对每帧回 ACK，MCU 不会上报任何事件。**
+这条不在原厂文档里，是重构踩坑之后确认的：**没有初始化握手（`0x7101` + 两次 `0x7701` +
+`0x7B` InitParam）并对每帧回 ACK，MCU 不会上报任何事件。**
 
 厂商的 `PenService.dll` 顶不上这个位置——它的 `GetInterruptPipeMsg` 只读不发，自己不做握手
 （见 `docs/penservice_events.md`）。只加载它并注册 `RegisterCallbackPenCurrentFunc`，回调
 永远不响；实测独占 MCU 端点双击 45 秒收不到任何东西，握手一做上立刻就有。
+
+做握手的是 `THP_Service.dll` 的 `Usb_Start`（`hal/docs/thp-eraser.md` 与 THP 逆向记录），两个
+触控提供方装的都是它，所以只要任一提供方在跑，握手和 ACK 就有人做。当年那次实测是在两个提供方
+都停着、由本项目自己的触控栈驱动面板时做的，才会出现「没人握手」。`PenEventBridge` 曾据此自己
+握手并 ACK，与 `THP_Service` 重复，现已撤掉；两个提供方都不在的窗口里侧键事件会随触控一起消失。
 
 一度以为是多个读者抢包（`docs/KBDMCU_PROTOCOL.md` 6.3 节），实测停掉其余宿主让 THP 独占也
 照样收不到，抢包不是原因。

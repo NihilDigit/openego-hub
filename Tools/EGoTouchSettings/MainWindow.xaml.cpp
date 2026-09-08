@@ -323,10 +323,22 @@ void MainWindow::ConfigureWindow() {
 
     // 最大化放在尺寸和位置都定好之后：对着已经最大化的窗口 Move，动的是它的还原状态，
     // 用户按下还原键就会落到一个没人指定过的地方。
+    //
+    // 但不能在这里就 Maximize：它会把窗口显示出来。托盘为了弹接入提示会用 --background
+    // 拉起本进程，窗口本该一直藏着，上次是最大化关掉的话，提示一弹设置窗就跟着整个出现。
+    // 所以只记下来，等窗口第一次真的被激活再最大化。
     if (ReadUserSetting(L"WindowMaximized", 0) != 0) {
-        if (const auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>()) {
-            presenter.Maximize();
-        }
+        m_maximizeOnFirstActivate = true;
+        Activated([this](IInspectable const&, WindowActivatedEventArgs const& args) {
+            if (!m_maximizeOnFirstActivate ||
+                args.WindowActivationState() == WindowActivationState::Deactivated) {
+                return;
+            }
+            m_maximizeOnFirstActivate = false;
+            if (const auto presenter = AppWindow().Presenter().try_as<OverlappedPresenter>()) {
+                presenter.Maximize();
+            }
+        });
     }
 
     ApplyWindowIcon(hwnd, dpi);

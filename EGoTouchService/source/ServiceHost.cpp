@@ -732,24 +732,9 @@ bool ServiceHost::StartSystemStateMonitor() {
             default:
                 break;
             }
-
-            if (!Host::IsPenStatusWakeEvent(ev.type) ||
-                m_runtimeMode != ServiceMode::Full) {
-                return;
-            }
-
-            std::lock_guard<std::mutex> penLock(m_impl->m_penSubsystemMutex);
-            auto* penEventBridge = m_impl->m_penEventBridge.get();
-            if (!penEventBridge || !penEventBridge->IsRunning()) {
-                LOG_INFO("Service", __func__, "MCU",
-                         "Wake status query skipped because PenEventBridge is not running.");
-                return;
-            }
-
-            if (!penEventBridge->SendQueryPenStatus()) {
-                LOG_WARN("Service", __func__, "MCU",
-                         "Wake status query failed for event {}.", Host::ToString(ev.type));
-            }
+            // 这里曾在每次亮屏时向 MCU 发 0x7101 查连接状态。MCU 会回一条 PEN_CONN_STATUS，
+            // THP_Service 收到后让 ApDaemon 重新初始化蓝牙笔、再下发一次 0x7D01——亮屏时
+            // 平白多出一轮笔的重协商。连接状态由 MCU 自己的 0x71/0x12 推送维持，不必问。
         });
 
     if (!monitorOk) {

@@ -149,15 +149,16 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
     if (stopEvent) waits[waitCount++] = stopEvent;
     if (parent) waits[waitCount++] = parent;
 
+    // 整表刷新只在启动和键盘接上时各做一次，其余靠 MCU 的推送。这里曾经每 5 秒查 9 项，
+    // 与笔宿主一起构成 MCU 上的持续查询流量，见 PenHostMain.cpp。
     const DWORD tickMs = 200;
-    const int ticksPerRefresh = 5000 / static_cast<int>(tickMs);
     // 心跳每秒一次。周期要明显短于服务侧判定宿主失联的窗口，又不必细到每个 tick——
     // 快照本身没变时，发布只是为了让读者看见心跳在动。
     const int ticksPerHeartbeat = 1000 / static_cast<int>(tickMs);
-    int tick = 0;
     int sincePublish = 0;
     uint32_t heartbeat = 0;
     Snapshot lastPublished{};
+    bool wasConnected = false;
     bool everPublished = false;
 
     for (;;) {
@@ -189,6 +190,11 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
         }
 
         Snapshot current = service.GetSnapshot();
+        // 键盘接上的那一次边沿补一遍整表：型号、版本、序列号 MCU 不会主动推。
+        const bool connected =
+            (current.flags & static_cast<uint32_t>(Flag::Connected)) != 0;
+        if (connected && !wasConnected) service.RequestRefresh();
+        wasConnected = connected;
         const bool changed =
             !everPublished || current.updatedAtUnixMs != lastPublished.updatedAtUnixMs;
         if (changed || ++sincePublish >= ticksPerHeartbeat) {
@@ -201,11 +207,6 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
                 wprintf(L"snapshot flags=0x%08x battery=%u module=%u\n", current.flags,
                         current.battery, current.moduleId);
             }
-        }
-
-        if (ticksPerRefresh > 0 && ++tick >= ticksPerRefresh) {
-            tick = 0;
-            service.RequestRefresh();
         }
     }
 

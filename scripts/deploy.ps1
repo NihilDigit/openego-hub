@@ -26,6 +26,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 提权后的窗口是独立的，脚本一抛错窗口就关，服务停在半路却没人看见原因。把错误留在窗口里。
+trap {
+    Write-Host "[x] $_" -ForegroundColor Red
+    Read-Host "press Enter to close"
+    break
+}
 
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($id)
@@ -42,6 +48,24 @@ $HalDir    = Join-Path $RepoRoot "hal\build\$Config"
 $Target    = 'C:\Program Files\OpenEGoHub'
 $Backup    = 'C:\Program Files\OpenEGoHub.backup'
 
+# 托盘不能由这个提权 shell 直接拉起：Start-Process 会把管理员令牌传下去，托盘变成高完整性,
+# 设置窗的每一次配置提交都被 UIPI 挡掉。借 explorer.exe 转一手，它以登录用户身份运行,
+# 由它拉起的进程拿到的是普通用户令牌。explorer 是异步转交，拿不到句柄也拿不到退出码,
+# 所以等一下再确认进程真的起来了。
+function Start-Tray {
+    $tray = Join-Path $Target 'OpenEGoHubTray.exe'
+    Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$tray`""
+    $deadline = (Get-Date).AddSeconds(5)
+    while (-not (Get-Process -Name 'OpenEGoHubTray' -ErrorAction SilentlyContinue)) {
+        if ((Get-Date) -gt $deadline) {
+            Write-Host "[!] OpenEGoHubTray did not start; launch it from a non-elevated prompt" -ForegroundColor Yellow
+            return
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    Write-Host "[ok] tray started" -ForegroundColor Green
+}
+
 function Stop-Stack {
     foreach ($name in 'OpenEGoHubServiceDebug', 'OpenEGoHubService') {
         $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
@@ -51,9 +75,17 @@ function Stop-Stack {
             (Get-Service $name).WaitForStatus('Stopped', '00:00:20')
         }
     }
-    Get-Process OpenEGoHubTray, OpenEGoHubSettings, GaokunThpHost, GaokunPenHost, GaokunKeyboard `
-        -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 2
+    # Get-Process 按进程名精确匹配，写成 GaokunKeyboard 杀不到 GaokunKeyboardHost；服务停下后
+    # 宿主要等父进程句柄才退出，这里不杀干净，下面的 Copy-Item 会撞上被占用的 exe 而中止。
+    $apps = 'OpenEGoHubTray', 'OpenEGoHubSettings', 'GaokunThpHost', 'GaokunPenHost', 'GaokunKeyboardHost'
+    Get-Process $apps -ErrorAction SilentlyContinue | Stop-Process -Force
+    # 宿主在父进程消失后自己收尾再退出，GaokunThpHost 还要交还设备并等华为服务起来，最长要
+    # 好几秒。exe 在这之前仍被映射，Copy-Item 会失败，所以等到它们真的不在了再往下走。
+    $deadline = (Get-Date).AddSeconds(20)
+    while (Get-Process $apps -ErrorAction SilentlyContinue) {
+        if ((Get-Date) -gt $deadline) { throw "hosts still running after 20 s: $((Get-Process $apps -ErrorAction SilentlyContinue).Name -join ', ')" }
+        Start-Sleep -Milliseconds 250
+    }
 }
 
 if ($Restore) {
@@ -62,6 +94,8 @@ if ($Restore) {
     Copy-Item "$Backup\*" $Target -Recurse -Force
     Write-Host "[ok] restored from $Backup" -ForegroundColor Green
     Start-Service OpenEGoHubService
+    (Get-Service OpenEGoHubService).WaitForStatus('Running', '00:00:20')
+    Start-Tray
     Read-Host "press Enter to close"
     return
 }
@@ -108,4 +142,5 @@ Write-Host "[ok] deployed $Config to $Target" -ForegroundColor Green
 Start-Service OpenEGoHubService
 (Get-Service OpenEGoHubService).WaitForStatus('Running', '00:00:20')
 Get-Service OpenEGoHubService | Format-Table Name, Status -AutoSize
+Start-Tray
 Read-Host "press Enter to close"

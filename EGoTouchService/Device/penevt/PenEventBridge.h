@@ -1,7 +1,6 @@
 #pragma once
 
 #include "btmcu/BtHidChannel.h"
-#include "btmcu/PenUsbInitSession.h"
 #include "btmcu/PenUsbTypes.h"
 
 #include <atomic>
@@ -19,25 +18,15 @@ namespace Himax::Pen {
 ///
 /// 负责：
 ///   - USB HID col00 设备发现（SetupDi GUID 枚举）
-///   - 初始握手 (0x7101 + 0x7701 + 0x7701)
-///   - 事件帧读取 + 自动 ACK (0x8001)
-///   - 0x7B InitParam → 0x7D01 回显
-///   - 上层事件回调分发
+///   - 事件帧读取与上层事件回调分发
+///   - 通道建立时的一次性状态查询，以及用户触发的键盘开关命令
+///
+/// 它是这个端点上的被动读者。握手、ACK 和 0x7D01 初始化参数由 THP_Service.dll 在它的
+/// 宿主进程里做，本类不重复。见 PenEventBridge.cpp 的 OnConnected。
 class PenEventBridge : public BtHidChannel {
 public:
     PenEventBridge() = default;
     ~PenEventBridge() override;
-
-    /// 向 BT MCU 发送 SetScanMode 命令，通知笔切换扫描频率。
-    /// 对应原厂 THP_Service::BtPen_SendPacket + ApDaemon::SetScanMode 的联合逻辑。
-    /// @param freq1  新的 TX1 频率码
-    /// @param freq2  新的 TX2 频率码
-    /// @param mode   0=正常扫描, 3=检测模式（默认 0）
-    /// @return true if packet was sent successfully
-    bool SendScanMode(uint8_t freq1, uint8_t freq2, uint8_t mode = 0);
-
-    /// 发送原厂固定的 0x7D01 初始化参数，不使用动态扫描模式参数。
-    bool SendFactoryInitProtocolParams();
 
     /// 设置 MCU 事件回调（线程安全）。回调从事件读取线程发起，不得长时间阻塞。
     void SetEventCallback(PenEventCallback cb);
@@ -46,19 +35,13 @@ public:
         m_notifyEvent.store(h, std::memory_order_release);
     }
 
-    /// 手动触发握手（0x7101 + 0x7701 + 0x7701），通常无需手动调用。
-    void RunHandshake();
-
     bool SendQueryPenModule();
     bool SendQuerySerialNumber();
     bool SendQueryHardwareVersion();
     bool SendQueryFirmwareVersion();
-    bool SendQueryPenStatus();
-    bool SendFirstMcuStatusQuery();
-    bool SendSecondMcuStatusQuery();
-    bool SendPairInfoSet(uint8_t value);
 
-    /// 主动查询电量。MCU 不主动播报电量，只在收到 0x0801 后回一条 BATTERY_STATUS。
+    /// 查询一次电量。MCU 不主动播报电量，只在收到 0x0801 后回一条 BATTERY_STATUS。
+    /// 只在通道建立时发，不做周期轮询：每次查询都是 MCU 到笔的一次蓝牙往返。
     bool SendQueryPenBattery();
 
     /// 主动查询一次充电状态。仅用于通道刚建立时补齐初始快照；后续仍由 0x09 广播驱动，
@@ -130,8 +113,6 @@ protected:
     const char* ChannelName() const override { return "PenEventBridge"; }
 
 private:
-    static int GetAckCode(uint8_t eventCode);
-
     bool SendRawPacket(std::span<const uint8_t> pkt);
     // 非 pen 子系统的帧（byte[4] != 0x01）的入口。当前只消费 detach support 应答，其余
     // 键盘帧记 debug 后丢弃。
@@ -139,14 +120,9 @@ private:
     void ApplyKbdPresent(bool present);
     void TickKbdAbsentDebounce();
     void NotifyKbdState();
-    void MaybePollBattery();
     void MaybeRetryPenModuleQuery();
-    void SendAck(uint8_t eventCode, uint8_t ackCode);
-    void ExecuteInitAction(PenUsbInitAction action);
-    void AdvanceSessionFromEvent(uint8_t eventCode);
 
     mutable std::mutex m_cbMutex;
-    mutable std::mutex m_sessionMutex;
     mutable std::mutex m_txMutex;
     std::shared_ptr<const PenEventCallback> m_eventCallback;
     std::shared_ptr<const KbdDetachSupportCallback> m_kbdDetachCallback;
@@ -164,12 +140,10 @@ private:
     std::chrono::steady_clock::time_point m_kbdAbsentSince{};
     bool m_kbdAbsentPending = false;
     std::atomic<NativeEventHandle> m_notifyEvent{nullptr};
-    PenUsbInitSession m_initSession;
 
-    // 只在读线程上访问（OnConnected / OnPacketReceived / OnIdleTick 都在 WorkerFunc 里），
-    // 因此不需要原子。
-    std::chrono::steady_clock::time_point m_nextBatteryPollAt{};
-
+    // 下面几个只在读线程上访问（OnConnected / OnPacketReceived / OnIdleTick 都在
+    // WorkerFunc 里），因此不需要原子。
+    //
     // MCU 对 0x0001 QueryPenModule 的应答时有时无——实测 8 次连接里有 4 次不回。不回时上层
     // 只能从固件版本串反推型号，得到的是同代的近似值（CD54R 会退化成 CD54），型号 ID 因此在
     // 两次启动之间摇摆。补发几次把它拉稳。

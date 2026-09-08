@@ -314,10 +314,6 @@ struct FakePen {
         return true;
     }
 
-    void SendQueryPenStatus() {
-        if (eventStarted) calls->Add("penEvent.query.0x7101");
-    }
-
     void Stop() {
         if (notifyAttached) calls->Add("pen.notify.detach");
         notifyAttached = false;
@@ -352,12 +348,8 @@ struct FakeServiceHostHarness {
     bool StartIpcSubsystem() { return ipc.Start(); }
     bool StartPenSubsystem() { return pen.Start(config.mode); }
     bool StartSystemStateMonitor() {
-        return monitor.Start([this](Host::SystemStateEventType event) {
+        return monitor.Start([this](Host::SystemStateEventType) {
             runtime.HandlePolicyEvent();
-            if (config.mode == Service::ServiceMode::Full &&
-                Host::IsPenStatusWakeEvent(event)) {
-                pen.SendQueryPenStatus();
-            }
             monitor.WaitInsideCallbackIfRequested();
         });
     }
@@ -607,26 +599,6 @@ bool MonitorFailureRollsBackAllCompletedStages() {
     return true;
 }
 
-bool WakeCallbacksIssuePenStatusQueryOnlyInFullMode() {
-    FakeServiceHostHarness fullHost;
-    REQUIRE_TRUE(fullHost.Start());
-    fullHost.monitor.Emit(Host::SystemStateEventType::DisplayOn);
-    fullHost.monitor.Emit(Host::SystemStateEventType::LidOn);
-    fullHost.monitor.Emit(Host::SystemStateEventType::ResumeAutomatic);
-    fullHost.monitor.Emit(Host::SystemStateEventType::Unknown);
-
-    const auto fullCalls = fullHost.calls.Snapshot();
-    REQUIRE_TRUE(std::count(fullCalls.begin(), fullCalls.end(),
-                            "penEvent.query.0x7101") == 3);
-
-    FakeServiceHostHarness touchOnlyHost;
-    touchOnlyHost.config.mode = Service::ServiceMode::TouchOnly;
-    REQUIRE_TRUE(touchOnlyHost.Start());
-    touchOnlyHost.monitor.Emit(Host::SystemStateEventType::DisplayOn);
-    REQUIRE_TRUE(!Contains(touchOnlyHost.calls.Snapshot(), "penEvent.query.0x7101"));
-    return true;
-}
-
 bool StopWaitsForPenLocalProducersToPublish() {
     FakeServiceHostHarness host;
     StageBarrier beforePublish;
@@ -811,7 +783,6 @@ bool StopWaitsForMonitorAndIpcBeforePenTeardown() {
 
     host.monitor.BeginInFlightCallback(Host::SystemStateEventType::ResumeAutomatic);
     REQUIRE_TRUE(host.calls.WaitFor("monitor.callback.enter"));
-    REQUIRE_TRUE(host.calls.WaitFor("penEvent.query.0x7101"));
     host.ipc.BeginInFlightHandler();
     REQUIRE_TRUE(host.calls.WaitFor("ipc.handler.enter"));
 
@@ -853,7 +824,6 @@ int main() {
     failures += RunTest(&IpcReadinessFailureCanRetryWithoutLeakingResources, "IpcReadinessFailureCanRetryWithoutLeakingResources");
     failures += RunTest(&PenFailureGatesIpcThenRollsBackPartialPen, "PenFailureGatesIpcThenRollsBackPartialPen");
     failures += RunTest(&MonitorFailureRollsBackAllCompletedStages, "MonitorFailureRollsBackAllCompletedStages");
-    failures += RunTest(&WakeCallbacksIssuePenStatusQueryOnlyInFullMode, "WakeCallbacksIssuePenStatusQueryOnlyInFullMode");
     failures += RunTest(&StopWaitsForPenLocalProducersToPublish, "StopWaitsForPenLocalProducersToPublish");
     failures += RunTest(&StopWaitsForIpcAndMonitorStartupStages, "StopWaitsForIpcAndMonitorStartupStages");
     failures += RunTest(&ConcurrentStartExceptionReturnsFalseAndAllowsRetry, "ConcurrentStartExceptionReturnsFalseAndAllowsRetry");

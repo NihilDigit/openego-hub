@@ -40,7 +40,7 @@ constexpr const wchar_t *kDependSuffix =
     return false;
 }
 
-int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds, bool verbose) {
+int RunHosted(DWORD parentPid, const wchar_t *stopEventName, bool verbose) {
     HANDLE stopEvent = nullptr;
     if (stopEventName && *stopEventName) {
         stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
@@ -103,18 +103,19 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
     if (stopEvent) waits[waitCount++] = stopEvent;
     if (parent) waits[waitCount++] = parent;
 
-    // 主循环节奏由事件流决定，不是由刷新周期决定：事件要尽快转出去，而整表刷新只是兜底,
-    // 因为多数字段本来就由 MCU 主动推送。
+    // 主循环节奏由事件流决定：事件要尽快转出去。整表刷新只在启动和笔连上时各做一次，
+    // 原厂选件中心也是这样，全靠回调、没有定时查询。这里曾经每 5 秒把 9 项整表查一遍，
+    // 其中序列号、版本、电量都要 MCU 走蓝牙去问笔，笔唤醒重协商时正撞上这批查询，
+    // 之后 TSACore 收蓝牙压力就时断时续。多数字段本来就由 MCU 主动推送。
     const DWORD tickMs = 200;
-    const int ticksPerRefresh = refreshSeconds * 1000 / static_cast<int>(tickMs);
     // 心跳每秒一次。周期要明显短于服务侧判定宿主失联的窗口，又不必细到每个 tick——
     // 快照本身没变时，发布只是为了让读者看见心跳在动。
     const int ticksPerHeartbeat = 1000 / static_cast<int>(tickMs);
-    int tick = 0;
     int sincePublish = 0;
     uint32_t heartbeat = 0;
     Snapshot lastPublished{};
     bool everPublished = false;
+    bool wasConnected = false;
 
     for (;;) {
         if (waitCount > 0) {
@@ -153,6 +154,11 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
         }
 
         Snapshot current = service.GetSnapshot();
+        // 笔连上的那一次边沿补一遍整表：型号、版本、按键功能这些字段 MCU 不会主动推。
+        const bool connected =
+            (current.flags & static_cast<uint32_t>(Flag::Connected)) != 0;
+        if (connected && !wasConnected) service.RequestRefresh();
+        wasConnected = connected;
         const bool changed =
             !everPublished || current.updatedAtUnixMs != lastPublished.updatedAtUnixMs;
         if (changed || ++sincePublish >= ticksPerHeartbeat) {
@@ -165,11 +171,6 @@ int RunHosted(DWORD parentPid, const wchar_t *stopEventName, int refreshSeconds,
                 wprintf(L"snapshot flags=0x%08x battery=%u module=%u\n", current.flags,
                         current.battery, current.moduleId);
             }
-        }
-
-        if (ticksPerRefresh > 0 && ++tick >= ticksPerRefresh) {
-            tick = 0;
-            service.RequestRefresh();
         }
     }
 
@@ -291,9 +292,9 @@ int wmain(int argc, wchar_t **argv) {
                 SetEvent(ctx.stop);
                 return 0;
             }, nullptr, 0, nullptr);
-            return RunHosted(0, name, 5, true);
+            return RunHosted(0, name, true);
         }
-        return RunHosted(0, nullptr, 5, true);
+        return RunHosted(0, nullptr, true);
     }
 
     if (argc > 2 && _wcsicmp(argv[1], L"--set-current-func") == 0) {
@@ -314,7 +315,7 @@ int wmain(int argc, wchar_t **argv) {
                 stopEvent = argv[i + 1];
             }
         }
-        return RunHosted(parentPid, stopEvent, 5, false);
+        return RunHosted(parentPid, stopEvent, false);
     }
 
     PrintUsage();

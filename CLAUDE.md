@@ -225,11 +225,16 @@ build.
   which comes from the same `Invert` bit — so the tray's UIA workaround is not the only
   possible route, just the only one that works today. See `hal/docs/thp-eraser.md`,
   `docs/onenote_ink_eraser.md`, `docs/pen_eraser_flow.md` and `docs/penservice_events.md`.
-- **Side-button events depend on a handshake nothing else performs.** `PenEventBridge` is
-  what makes the MCU report at all (`0x7101` + two `0x7701` + `0x7B` InitParam, plus an ACK
-  per frame). The vendor's `PenService.dll` does not do it, so loading that DLL and
-  registering `RegisterCallbackPenCurrentFunc` yields a callback that never fires. Removing
-  the bridge's instantiation once already cost every side-button binding, silently.
+- **Side-button events depend on a handshake that only `THP_Service.dll` performs.** The
+  MCU reports nothing until a host has sent `0x7101` + two `0x7701`, answered `0x7B` with
+  a `0x7D01` InitParam and ACKs every frame. `THP_Service.dll` does all of that in
+  `Usb_Start`, so it is covered whenever either touch provider is running. The vendor's
+  `PenService.dll` does not do it, and neither does `PenEventBridge` any more: it used to,
+  and the duplicate handshake and ACKs on the same endpoint left the pen intermittently
+  reporting no pressure after waking, which TSACore turns into the pen tip being reported
+  as a finger in low-signal regions. The gap is the window in which neither provider is
+  running (a handover, or the cooldown after a crash loop); side-button events stop there
+  as well as touch.
 
 ## Where the reasoning is written down
 

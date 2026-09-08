@@ -23,10 +23,6 @@ ego_add_device_test(DevicePenUsbProtocolPacketTest Device.PenUsb.ProtocolPacket
     "Device;Device.Unit;Device.PenUsb;NoHardware" 10
     "${DEVICE_ROOT}/tests/btmcu/PenUsbProtocolPacketTest.cpp")
 
-ego_add_device_test(DevicePenUsbInitSessionTest Device.PenUsb.InitSession
-    "Device;Device.Unit;Device.PenUsb;NoHardware" 10
-    "${DEVICE_ROOT}/tests/btmcu/PenUsbInitSessionTest.cpp")
-
 ego_add_device_test(DevicePenFactoryStatusFlagsTest Device.PenUsb.FactoryStatusFlags
     "Device;Device.Unit;Device.PenUsb;NoHardware" 10
     "${DEVICE_ROOT}/tests/btmcu/PenFactoryStatusFlagsTest.cpp")

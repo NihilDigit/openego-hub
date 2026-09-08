@@ -86,43 +86,7 @@ std::optional<std::wstring> PenEventBridge::FindDevicePath() {
     return result;
 }
 
-// ── SetScanMode — BT 笔切频命令 ───────────────────────────────────────────
-//
-// 原厂调用链:
-//   ApDaemon::SetScanMode → 构造 IPC {type=1, code=3, "freq1,freq2,mode"}
-//     → THP_Service::BtPen_HandleInitParamEvent → 解码 ASCII → binary
-//       → BtPen_SendPacket(header, binary_payload, 0x20)
-//
-// 我们直接操作 col00 USB 设备，跳过 THP_Service 的解码层，
-// 因此必须自行实现 HandleInitParamEvent 的 type-3 编码。
-//
-// Header (汇编验证: THP_Service.dll @ 0x18000fe0a-0x18000fe1d):
-//   MOV byte ptr [RSP+0x38], 0x07      → byte[0] = 0x07
-//   MOV word ptr [RSP+0x39], 0x0201    → byte[1] = 0x01, byte[2] = 0x02
-//   MOV word ptr [RSP+0x3c], 0x7D01    → byte[4] = 0x01, byte[5] = 0x7D
-//   MOV byte ptr [RSP+0x3f], 0x20      → byte[7] = 0x20
-//   (byte[6] 由 BtPen_SendPacket 强制覆写为 0x11)
-//
-// Payload: 32-byte binary，由 type-3 解码器从 ASCII 十进制字符串转换而来
-
-bool PenEventBridge::SendScanMode(uint8_t freq1, uint8_t freq2, uint8_t mode) {
-    if (!IsTransportOpen()) {
-        LOG_WARN("PenEvent", __func__, "MCU", "Transport not open, cannot send SetScanMode.");
-        return false;
-    }
-
-    const auto packet = BuildScanModeCommandBuffer(freq1, freq2, mode);
-    LOG_INFO("PenEvent", __func__, "MCU",
-             "Sending 0x7D01 scan mode payload: freq1={} freq2={} mode={}.",
-             freq1, freq2, mode);
-    return SendRawPacket(packet.view());
-}
-
 // ── 协议辅助 ───────────────────────────────────────────────────────────────
-int PenEventBridge::GetAckCode(uint8_t eventCode) {
-    return GetFactoryBtMcuAckCode(eventCode);
-}
-
 bool PenEventBridge::SendRawPacket(std::span<const uint8_t> pkt) {
     std::lock_guard<std::mutex> txLock(m_txMutex);
     if (!IsTransportOpen()) {
@@ -139,28 +103,6 @@ bool PenEventBridge::SendRawPacket(std::span<const uint8_t> pkt) {
     }
 
     return true;
-}
-
-void PenEventBridge::SendAck(uint8_t, uint8_t ackCode) {
-    const auto pkt = BuildPenUsbEventAckBuffer(ackCode);
-    (void)SendRawPacket(pkt.view());
-}
-
-void PenEventBridge::ExecuteInitAction(PenUsbInitAction action) {
-    switch (action) {
-    case PenUsbInitAction::None:
-        return;
-    case PenUsbInitAction::SendInitialQueries:
-        (void)SendQueryPenStatus();
-        (void)SendFirstMcuStatusQuery();
-        return;
-    case PenUsbInitAction::SendSecondMcuStatusQuery:
-        (void)SendSecondMcuStatusQuery();
-        return;
-    case PenUsbInitAction::SendFactoryInitProtocolParams:
-        (void)SendFactoryInitProtocolParams();
-        return;
-    }
 }
 
 bool PenEventBridge::SendQueryPenModule() {
@@ -204,66 +146,6 @@ bool PenEventBridge::SendQueryFirmwareVersion() {
     }
 
     LOG_INFO("PenEvent", __func__, "MCU", "Sent 0x0301 QueryFirmwareVersion.");
-    return true;
-}
-
-bool PenEventBridge::SendQueryPenStatus() {
-    const auto query = BuildPenUsbCommandBuffer(PenUsbCommandId::QueryPenStatus);
-    if (!SendRawPacket(query.view())) {
-        LOG_WARN("PenEvent", __func__, "MCU", "Failed to send 0x7101 CheckPenStatus.");
-        return false;
-    }
-
-    LOG_INFO("PenEvent", __func__, "MCU", "Sent 0x7101 CheckPenStatus.");
-    return true;
-}
-
-bool PenEventBridge::SendFirstMcuStatusQuery() {
-    const auto query = BuildPenUsbCommandBuffer(PenUsbCommandId::QueryPenInfo);
-    if (!SendRawPacket(query.view())) {
-        LOG_WARN("PenEvent", __func__, "MCU", "Failed to send first 0x7701 CheckMcuStatus.");
-        return false;
-    }
-
-    LOG_INFO("PenEvent", __func__, "MCU", "Sent 0x7701 CheckMcuStatus (#1/2).");
-    return true;
-}
-
-bool PenEventBridge::SendSecondMcuStatusQuery() {
-    const auto query = BuildPenUsbCommandBuffer(PenUsbCommandId::QueryPenInfo);
-    if (!SendRawPacket(query.view())) {
-        LOG_WARN("PenEvent", __func__, "MCU", "Failed to send second 0x7701 CheckMcuStatus.");
-        return false;
-    }
-
-    LOG_INFO("PenEvent", __func__, "MCU", "Sent 0x7701 CheckMcuStatus (#2/2).");
-    return true;
-}
-
-bool PenEventBridge::SendPairInfoSet(uint8_t value) {
-    if (!IsTransportOpen()) {
-        LOG_WARN("PenEvent", __func__, "MCU", "Transport not open, cannot send 0x7E01 PairInfoSet.");
-        return false;
-    }
-
-    PenUsbPacketBuffer pkt{};
-    pkt.bytes[0] = 0x07;
-    pkt.bytes[1] = 0x01;
-    pkt.bytes[2] = 0x02;
-    pkt.bytes[3] = 0x00;
-    pkt.bytes[4] = 0x01; // CMD_LO
-    pkt.bytes[5] = 0x7E; // CMD_HI
-    pkt.bytes[6] = 0x11;
-    pkt.bytes[7] = 0x01; // payload tag = 0x01 (Match-Info 专用 payload tag)
-    pkt.bytes[8] = value;
-    pkt.size = 9;
-
-    if (!SendRawPacket(pkt.view())) {
-        LOG_WARN("PenEvent", __func__, "MCU", "PairInfoSet send failed.");
-        return false;
-    }
-
-    LOG_INFO("PenEvent", __func__, "MCU", "Sent 0x7E01 PairInfoSet: value={}", value);
     return true;
 }
 
@@ -507,20 +389,6 @@ bool PenEventBridge::SendKbdStatusQueries() {
 }
 
 namespace {
-// 电量变化很慢，而每次查询都要占用 MCU 的一个往返，所以间隔取分钟量级。
-constexpr auto kBatteryPollInterval = std::chrono::seconds(60);
-} // namespace
-
-void PenEventBridge::MaybePollBattery() {
-    const auto now = std::chrono::steady_clock::now();
-    if (now < m_nextBatteryPollAt) {
-        return;
-    }
-    m_nextBatteryPollAt = now + kBatteryPollInterval;
-    (void)SendQueryPenBattery();
-}
-
-namespace {
 // 重发间隔。读循环的超时是 1 秒，链路安静时补发实际落在下一次 idle tick 上，所以这个值只是
 // 下限，不必调细——它是连接时的一次性收敛，不在延迟敏感路径上。
 constexpr auto kPenModuleRetryDelay = std::chrono::milliseconds(500);
@@ -547,23 +415,18 @@ void PenEventBridge::MaybeRetryPenModuleQuery() {
 
 void PenEventBridge::OnIdleTick() {
     MaybeRetryPenModuleQuery();
-    MaybePollBattery();
     TickKbdAbsentDebounce();
 }
 
-void PenEventBridge::AdvanceSessionFromEvent(uint8_t eventCode) {
-    PenUsbInitAction action = PenUsbInitAction::None;
-    {
-        std::lock_guard<std::mutex> sessionLock(m_sessionMutex);
-        action = m_initSession.OnEvent(static_cast<PenUsbEventCode>(eventCode));
-    }
-
-    ExecuteInitAction(action);
-}
-
 // ── BtHidChannel hooks ────────────────────────────────────────────────────
+//
+// 本类是 MCU 端点上的被动读者。握手（0x7101、两次 0x7701）、每个事件的 0x8001 ACK 和
+// 0x7D01 初始化参数都由 THP_Service.dll 在它的宿主进程里完成——触控在我们手上时那是
+// GaokunThpHost，交还华为时是 HuaweiThpService，两者装的是同一个 DLL。这里曾经把这一套
+// 再做一遍，结果 MCU 在笔唤醒重协商的那一刻收到两份 ACK 外加我们的查询，之后 TSACore 就
+// 间歇性地收不到蓝牙压力，笔尖在信号弱的区域被当成手指。原厂选件中心的 PenService.dll
+// 同样只读不发，除了下面这些一次性查询和用户触发的命令。
 void PenEventBridge::OnConnected() {
-    RunHandshake();
     m_penModuleAnswered = false;
     m_penModuleAttempts = 1;
     m_penModuleRetryAt = std::chrono::steady_clock::now() + kPenModuleRetryDelay;
@@ -572,10 +435,10 @@ void PenEventBridge::OnConnected() {
     (void)SendQueryHardwareVersion();
     (void)SendQueryFirmwareVersion();
     // 服务可能在笔已经吸附时启动；MCU 不会为既有状态补发吸附边沿，因此主动取一次当前
-    // 充电状态建立基线。只在每次 USB 通道建立时发这一条，不加入任何周期轮询。
+    // 充电状态和电量建立基线。只在每次 USB 通道建立时发这两条，不加入任何周期轮询：
+    // 之后的电量由 MCU 在笔重连时推送的 0x2C 和 0x28 顶部电量窗事件维持。
     (void)SendQueryChargingStatus();
-    // 让下一次 tick 立刻取一次电量，而不是等满一个轮询周期。
-    m_nextBatteryPollAt = {};
+    (void)SendQueryPenBattery();
     // 连接建立时取一次键盘 detach support 的初始状态，供上层显示当前开关位置。
     (void)SendKbdDetachSupportGet();
     // 键盘的连接、分离与固件版本同样只在这里主动问一次；之后靠 MCU 的事件推送维持，
@@ -621,13 +484,6 @@ void PenEventBridge::OnPacketReceived(std::span<const uint8_t> packet) {
                      "PenModule answered on attempt {}.", m_penModuleAttempts);
         }
     }
-
-    int ackCode = GetAckCode(eventCode);
-    if (ackCode >= 0) {
-        SendAck(eventCode, static_cast<uint8_t>(ackCode));
-    }
-
-    AdvanceSessionFromEvent(eventCode);
 
     PenEvent ev;
     bool hasEvent = false;
@@ -765,58 +621,8 @@ void PenEventBridge::OnPacketReceived(std::span<const uint8_t> packet) {
     }
 
     // OnIdleTick 只在读超时时触发，而 MCU 会成串地广播状态；光靠 OnIdleTick，链路一忙
-    // 轮询就被饿死。放在这里保证轮询按墙钟走，与流量无关。
+    // 补发就被饿死。放在这里保证补发按墙钟走，与流量无关。
     MaybeRetryPenModuleQuery();
-    MaybePollBattery();
-}
-
-// ── 握手 ──────────────────────────────────────────────────────────────────
-// API Monitor 抓包验证的原厂初始化序列:
-//   0x7101 CheckPenStatus
-//   0x7701 CheckMcuStatus
-//        ← 0x77 PEN_SCREEN_STATUS, ACK 0x06
-//   0x7701 CheckMcuStatus (重发)
-//        ← 等待 0x7B PEN_REP_PARAM
-//   0x7D01 InitProtocolParams (40B = 8 header + 32 payload, USB HID)
-void PenEventBridge::RunHandshake() {
-    if (!IsRunning() || !IsTransportOpen()) {
-        LOG_INFO("PenEvent", __func__, "MCU",
-                 "Handshake skipped because channel is not running/open.");
-        return;
-    }
-
-    LOG_INFO("PenEvent", __func__, "MCU",
-             "Starting event-driven init sequence: 0x7101 → 0x7701 → 0x7701, with 0x7D01 deferred until MCU 0x7B.");
-
-    PenUsbInitAction action = PenUsbInitAction::None;
-    {
-        std::lock_guard<std::mutex> sessionLock(m_sessionMutex);
-        action = m_initSession.OnConnected();
-    }
-    ExecuteInitAction(action);
-}
-
-// ── 初始协议参数 ──────────────────────────────────────────────────────────
-// 原厂 ApDaemon::GetProtocolPrmtMode1/2 → GetProtocolInfo → ReportBluetoothPenInfo
-// 输出: "3333,3333,2e7,412,258,411a,10f,1,"
-// 这些参数通过 BtPen_GetReportInfo(event_class=2) → HandleInitParamEvent
-// 被编码为 0x7D01 二进制包发送给 MCU。
-//
-// 该路径发送抓包确认的固定 factory payload；动态扫描模式使用 SendScanMode。
-bool PenEventBridge::SendFactoryInitProtocolParams() {
-    if (!IsTransportOpen()) {
-        LOG_WARN("PenEvent", __func__, "MCU", "Transport not open, cannot send 0x7D01 InitProtocolParams.");
-        return false;
-    }
-
-    const auto pkt = BuildFactoryInitProtocolParamsCommandBuffer();
-
-    if (!SendRawPacket(pkt.view())) {
-        LOG_WARN("PenEvent", __func__, "MCU", "Failed to send 0x7D01 InitProtocolParams.");
-        return false;
-    }
-
-    return true;
 }
 
 } // namespace Himax::Pen

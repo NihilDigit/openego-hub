@@ -126,28 +126,6 @@ void TestMalformedKnownEventsAreRejectedBeforeDispatch() {
             "unknown events should not inherit a fabricated payload requirement");
 }
 
-void TestFactoryAckTable() {
-    using Himax::Pen::GetFactoryBtMcuAckCode;
-
-    Require(GetFactoryBtMcuAckCode(0x2F) == 0x0B, "0x2F should ACK 0x0B");
-    Require(GetFactoryBtMcuAckCode(0x70) == 0x00, "0x70 should ACK 0");
-    Require(GetFactoryBtMcuAckCode(0x71) == 0x01, "0x71 should ACK 1");
-    Require(GetFactoryBtMcuAckCode(0x72) == 0x02, "0x72 should ACK 2");
-    Require(GetFactoryBtMcuAckCode(0x73) == 0x0D, "0x73 should ACK 0x0D");
-    Require(GetFactoryBtMcuAckCode(0x74) == 0x03, "0x74 should ACK 3");
-    Require(GetFactoryBtMcuAckCode(0x75) == 0x04, "0x75 should ACK 4");
-    Require(GetFactoryBtMcuAckCode(0x76) == 0x05, "0x76 should ACK 5");
-    Require(GetFactoryBtMcuAckCode(0x77) == 0x06, "0x77 should ACK 6");
-    Require(GetFactoryBtMcuAckCode(0x78) == 0x07, "0x78 should ACK 7");
-    Require(GetFactoryBtMcuAckCode(0x79) == 0x08, "0x79 should ACK 8");
-    Require(GetFactoryBtMcuAckCode(0x7B) == 0x0A, "0x7B should ACK 0x0A");
-    Require(GetFactoryBtMcuAckCode(0x7C) == 0x0C, "0x7C should ACK 0x0C");
-    Require(GetFactoryBtMcuAckCode(0x7F) == 0x09, "0x7F should ACK 9");
-    Require(GetFactoryBtMcuAckCode(0x00) == -1, "PenModule 0x00 should not be ACKed without factory evidence");
-    Require(GetFactoryBtMcuAckCode(0x28) == -1, "Open event 0x28 should not be ACKed without factory evidence");
-    Require(GetFactoryBtMcuAckCode(0x6F) == -1, "0x6F should not be ACKed without factory evidence");
-}
-
 void TestEventCodeNames() {
     using Himax::Pen::PenUsbEventCode;
     using Himax::Pen::PenUsbEventCodeFromRaw;
@@ -183,7 +161,6 @@ void TestEventCodeNames() {
 
 void TestCommandPacketBuilders() {
     using Himax::Pen::BuildPenUsbCommand;
-    using Himax::Pen::BuildPenUsbEventAck;
     using Himax::Pen::BuildPenUsbPayloadCommand;
     using Himax::Pen::PenUsbCommandId;
 
@@ -220,10 +197,6 @@ void TestCommandPacketBuilders() {
     Require(BuildPenUsbCommand(PenUsbCommandId::PairInfoSet) ==
                 std::vector<uint8_t>({0x07, 0x00, 0x02, 0x00, 0x01, 0x7E, 0x11, 0x00}),
             "0x7E01 command packet should use little-endian command id");
-    Require(BuildPenUsbEventAck(0x0A) ==
-                std::vector<uint8_t>({0x07, 0x01, 0x02, 0x00, 0x01, 0x80, 0x11, 0x20, 0x0A}),
-            "0x8001 ACK packet should match factory bytes");
-
     const std::array<uint8_t, 3> payload{0xAA, 0xBB, 0xCC};
     Require(BuildPenUsbPayloadCommand(PenUsbCommandId::InitParamSet, payload) ==
                 std::vector<uint8_t>({0x07, 0x01, 0x02, 0x00, 0x01, 0x7D, 0x11, 0x20, 0xAA, 0xBB, 0xCC}),
@@ -294,20 +267,6 @@ void TestType3Encoding() {
 
     const auto offPayload = Himax::Pen::BuildScanModePayload(51, 68, 0);
     Require(offPayload[4] == 0x00, "zero scan mode should encode as mode 0");
-}
-
-void TestFactoryInitParamsPacket() {
-    const auto packet = Himax::Pen::BuildFactoryInitProtocolParamsCommand();
-    const std::vector<uint8_t> expected{
-        0x07, 0x01, 0x02, 0x00, 0x01, 0x7D, 0x11, 0x20,
-        0x33, 0x33, 0x33, 0x33, 0xE7, 0x02, 0x12, 0x04,
-        0x58, 0x02, 0x1A, 0x41, 0x0F, 0x01, 0x01, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    };
-    Require(packet == expected, "factory init params packet should remain exact capture");
-    Require(packet != Himax::Pen::BuildScanModeCommand(0, 0, 0),
-            "factory init packet must remain distinct from an all-zero scan-mode command");
 }
 
 // ── 键盘 detach support ──────────────────────────────────────────────────
@@ -450,12 +409,10 @@ int main() {
         TestHardwareVersionEventFrameParses();
         TestInvalidFactoryEventFramesAreRejected();
         TestMalformedKnownEventsAreRejectedBeforeDispatch();
-        TestFactoryAckTable();
         TestEventCodeNames();
         TestCommandPacketBuilders();
         TestUtf8PayloadDecoding();
         TestType3Encoding();
-        TestFactoryInitParamsPacket();
         TestKbdDetachSupportCommandBytes();
         TestKbdDetachSupportReplyParsing();
         TestKbdChargingProtocol();

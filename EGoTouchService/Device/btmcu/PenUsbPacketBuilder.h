@@ -227,28 +227,9 @@ inline PenUsbPacketBuffer BuildKbdFirmwareVersionGetBuffer() noexcept {
                                  Kbd::kCmdFirmwareVersion, {});
 }
 
-inline PenUsbPacketBuffer BuildPenUsbEventAckBuffer(uint8_t ackCode) noexcept {
-    PenUsbPacketBuffer packet{};
-    const std::array<uint8_t, 1> payload{ackCode};
-    (void)BuildPenUsbPayloadCommandBuffer(PenUsbCommandId::EventAck, payload, packet);
-    return packet;
-}
-
 inline PenUsbPacketBuffer BuildScanModeCommandBuffer(uint8_t freq1, uint8_t freq2, uint8_t mode) noexcept {
     PenUsbPacketBuffer packet{};
     const auto payload = BuildScanModePayload(freq1, freq2, mode);
-    (void)BuildPenUsbPayloadCommandBuffer(PenUsbCommandId::InitParamSet, payload, packet);
-    return packet;
-}
-
-inline PenUsbPacketBuffer BuildFactoryInitProtocolParamsCommandBuffer() noexcept {
-    const std::array<uint8_t, 0x20> payload{
-        0x33, 0x33, 0x33, 0x33, 0xE7, 0x02, 0x12, 0x04,
-        0x58, 0x02, 0x1A, 0x41, 0x0F, 0x01, 0x01, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    };
-    PenUsbPacketBuffer packet{};
     (void)BuildPenUsbPayloadCommandBuffer(PenUsbCommandId::InitParamSet, payload, packet);
     return packet;
 }
@@ -264,11 +245,6 @@ inline std::vector<uint8_t> BuildPenUsbPayloadCommand(PenUsbCommandId commandId,
     if (!BuildPenUsbPayloadCommandBuffer(commandId, payload, packet)) {
         return {};
     }
-    return std::vector<uint8_t>(packet.view().begin(), packet.view().end());
-}
-
-inline std::vector<uint8_t> BuildPenUsbEventAck(uint8_t ackCode) {
-    const auto packet = BuildPenUsbEventAckBuffer(ackCode);
     return std::vector<uint8_t>(packet.view().begin(), packet.view().end());
 }
 
@@ -292,11 +268,6 @@ inline std::array<uint8_t, 0x20> BuildScanModePayload(uint8_t freq1,
 
 inline std::vector<uint8_t> BuildScanModeCommand(uint8_t freq1, uint8_t freq2, uint8_t mode) {
     const auto packet = BuildScanModeCommandBuffer(freq1, freq2, mode);
-    return std::vector<uint8_t>(packet.view().begin(), packet.view().end());
-}
-
-inline std::vector<uint8_t> BuildFactoryInitProtocolParamsCommand() {
-    const auto packet = BuildFactoryInitProtocolParamsCommandBuffer();
     return std::vector<uint8_t>(packet.view().begin(), packet.view().end());
 }
 

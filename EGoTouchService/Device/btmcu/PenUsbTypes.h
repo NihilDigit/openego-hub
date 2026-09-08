@@ -201,26 +201,6 @@ inline std::optional<ParsedPenUsbEventFrame> TryParsePenUsbEventFrame(
     };
 }
 
-constexpr int GetFactoryBtMcuAckCode(uint8_t eventCode) noexcept {
-    switch (eventCode) {
-    case 0x2F: return 0x0B;
-    case 0x70: return 0x00;
-    case 0x71: return 0x01;
-    case 0x72: return 0x02;
-    case 0x73: return 0x0D;
-    case 0x74: return 0x03;
-    case 0x75: return 0x04;
-    case 0x76: return 0x05;
-    case 0x77: return 0x06;
-    case 0x78: return 0x07;
-    case 0x79: return 0x08;
-    case 0x7B: return 0x0A;
-    case 0x7C: return 0x0C;
-    case 0x7F: return 0x09;
-    default: return -1;
-    }
-}
-
 enum class PenUsbEventCode : uint8_t {
     PenModule = 0x00,               // PenService PenModule / ModelId 上报
     PenSerialNumber = 0x01,         // PenService serial number ASCII 上报
