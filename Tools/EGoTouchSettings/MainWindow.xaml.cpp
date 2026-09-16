@@ -30,6 +30,10 @@ namespace winrt::EGoTouchSettings::implementation {
 namespace {
 
 constexpr wchar_t kSettingsRegistryKey[] = L"Software\\OpenEGoHub";
+// 设备页空状态的两个图标。写成码位而不是字面字符：Segoe Fluent 的这两个字形落在私用区，
+// 直接嵌进源码就是两个不可见的方块，读代码时认不出是哪一个。E946 信息，E7BA 警告。
+constexpr wchar_t kEmptyStateInfoGlyph[]    = {0xE946, 0};
+constexpr wchar_t kEmptyStateWarningGlyph[] = {0xE7BA, 0};
 // 默认尺寸要装得下全部四个分组共六张卡片，否则一打开就得滚动才能看全。内容区 MaxWidth 是
 // 640，宽度取它加上左右各 24 的内边距。
 constexpr int32_t kWindowWidth = 688;
@@ -911,16 +915,45 @@ void MainWindow::SyncFrameTheme() {
 
 void MainWindow::DeviceCardsSizeChanged(IInspectable const&,
                                         SizeChangedEventArgs const& args) {
+    m_deviceCardsWidth = args.NewSize().Width;
+    ApplyDeviceCardLayout();
+}
+
+void MainWindow::ApplyDeviceCardLayout() {
+    const auto show = [](bool visible) {
+        return visible ? Visibility::Visible : Visibility::Collapsed;
+    };
+
+    PenGroup().Visibility(show(m_penSeen));
+    KeyboardGroup().Visibility(show(m_kbdSeen));
+    // 设置项跟着各自的卡片走。设备不在场时留着它们，页面就不空，调的还是一台不存在的设备。
+    PenSettingsGroup().Visibility(show(m_penSeen));
+    KeyboardSettingsGroup().Visibility(show(m_kbdSeen));
+    DeviceEmptyState().Visibility(show(!m_penSeen && !m_kbdSeen));
+
     // 两张设备卡片在够宽时并排。阈值按「一张卡片本身需要的宽度」定：低于它并排只会把两边
     // 都挤扁，不如继续堆叠。用代码切换而不是 AdaptiveTrigger，是因为触发条件要看的是内容区
     // 宽度，而 AdaptiveTrigger 只认窗口宽度——左侧导航栏展开与折叠会让两者差出 180。
     constexpr double kSideBySideMinWidth = 900.0;
-    const bool sideBySide = args.NewSize().Width >= kSideBySideMinWidth;
+    const bool sideBySide =
+        m_penSeen && m_kbdSeen && m_deviceCardsWidth >= kSideBySideMinWidth;
 
     DeviceSecondColumn().Width(sideBySide ? GridLength{1.0, GridUnitType::Star}
                                           : GridLength{0.0, GridUnitType::Pixel});
-    Controls::Grid::SetRow(KeyboardGroup(), sideBySide ? 0 : 1);
+    // 笔卡片不在时键盘回到第一行：Grid 的 RowSpacing 照样会在空行之后留出 24，卡片会被
+    // 顶下去一截。
+    Controls::Grid::SetRow(KeyboardGroup(), (m_penSeen && !sideBySide) ? 1 : 0);
     Controls::Grid::SetColumn(KeyboardGroup(), sideBySide ? 1 : 0);
+}
+
+void MainWindow::PenDismissClicked(IInspectable const&, RoutedEventArgs const&) {
+    m_penSeen = false;
+    ApplyDeviceCardLayout();
+}
+
+void MainWindow::KeyboardDismissClicked(IInspectable const&, RoutedEventArgs const&) {
+    m_kbdSeen = false;
+    ApplyDeviceCardLayout();
 }
 
 // 型号变化要去抖。服务应用完一项设置后会重发状态，型号在那一瞬可能跳一下，而换型号的
@@ -1055,6 +1088,12 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
         KeyboardBatteryIndicator().SetState(false, 0, false);
         KeyboardIdentityGroup().Visibility(Visibility::Collapsed);
         AccessoryVendorMissingBar().IsOpen(false);
+        // 状态未知时不提供移除：这一帧说不清设备在不在场。
+        PenDismissButton().Visibility(Visibility::Collapsed);
+        KeyboardDismissButton().Visibility(Visibility::Collapsed);
+        DeviceEmptyStateText().Text(L"服务未运行");
+        DeviceEmptyStateIcon().Glyph(kEmptyStateWarningGlyph);
+        ApplyDeviceCardLayout();
         return;
     }
 
@@ -1161,6 +1200,37 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
                                                           : Visibility::Collapsed);
         if (hasKbdFirmware) KeyboardFirmwareText().Text(to_hstring(state->kbdFirmware));
     }
+
+    // ── 卡片可见性 ──
+    // 在场即置真，只增不减；清回假的只有用户点叉。充电算在场：笔吸在机身上时链路位会暂时
+    // 为假，那并不是把笔拿走了。
+    const bool penPresent = (state->hasStylusLink && state->stylusLinked) ||
+                            (state->hasChargingState && state->charging);
+    if (penPresent) m_penSeen = true;
+    if (present) m_kbdSeen = true;
+
+    const bool penDismissable = m_penSeen && !penPresent;
+    const bool kbdDismissable = m_kbdSeen && !present;
+    PenDismissButton().Visibility(penDismissable ? Visibility::Visible
+                                                 : Visibility::Collapsed);
+    KeyboardDismissButton().Visibility(kbdDismissable ? Visibility::Visible
+                                                      : Visibility::Collapsed);
+    // 叉号和电量共用右侧那一格。设备不在场时 MCU 一般也不报电量，两者不会同时出现；万一
+    // 报了，那是上一次连接留下的残值，让位给叉号。
+    if (penDismissable) PenBatteryIndicator().SetState(false, 0, false);
+    if (kbdDismissable) KeyboardBatteryIndicator().SetState(false, 0, false);
+
+    // 宿主读不到 MCU 时「未接入」这句就不可靠，设备可能好端端接着。厂商组件缺失不走这里，
+    // 那一路由 AccessoryVendorMissingBar 交代。
+    const bool hostsUnreadable =
+        state->hasHostHealth &&
+        ((!state->penHostHealthy && !state->penVendorMissing) ||
+         (!state->kbdHostHealthy && !state->kbdVendorMissing));
+    DeviceEmptyStateText().Text(hostsUnreadable ? L"无法读取设备状态" : L"未接入笔或键盘");
+    DeviceEmptyStateIcon().Glyph(hostsUnreadable ? kEmptyStateWarningGlyph
+                                                 : kEmptyStateInfoGlyph);
+
+    ApplyDeviceCardLayout();
 }
 
 void MainWindow::RefreshState() {

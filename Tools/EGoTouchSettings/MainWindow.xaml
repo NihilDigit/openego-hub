@@ -216,11 +216,13 @@
                     Grid.Row="1"
                     SizeChanged="DeviceCardsSizeChanged"
                     VerticalScrollBarVisibility="Auto"
-                    HorizontalScrollBarVisibility="Disabled">
+                    HorizontalScrollBarVisibility="Disabled"
+                    VerticalContentAlignment="Stretch">
+                    <Grid>
                     <!-- 提示条与卡片网格并列放进 StackPanel，而不是给网格加一行：网格的
                          RowSpacing 是 24，空行照样占那 24，提示条收起时页顶会多出一块空白。
                          StackPanel 则会连同 Margin 一起跳过收起的 InfoBar。 -->
-                    <StackPanel>
+                    <StackPanel VerticalAlignment="Top">
                     <InfoBar
                         x:Name="AccessoryVendorMissingBar"
                         Margin="24,8,24,0"
@@ -247,7 +249,7 @@
 
                         <!-- 笔 -->
                         <StackPanel x:Name="PenGroup" Grid.Row="0" Grid.Column="0" Spacing="4"
-                                    VerticalAlignment="Top">
+                                    VerticalAlignment="Top" Visibility="Collapsed">
                             <TextBlock Text="笔" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardCompactStyle}">
                                 <StackPanel Spacing="12">
@@ -275,6 +277,19 @@
                                                                 Grid.Column="2"
                                                                 HorizontalAlignment="Right"
                                                                 VerticalAlignment="Center" />
+                                        <!-- 与电量指示器共用右侧这一格：叉号只在未连接时出现，而那时
+                                             读不到电量，指示器本来就是空的。另起一列会让连接着的卡片
+                                             右侧永远留一段空白。 -->
+                                        <Button x:Name="PenDismissButton" Grid.Column="2"
+                                                Visibility="Collapsed"
+                                                MinWidth="0" Padding="6"
+                                                Background="Transparent" BorderThickness="0"
+                                                HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                ToolTipService.ToolTip="移除"
+                                                Click="PenDismissClicked">
+                                            <FontIcon Glyph="&#xE711;" FontSize="12"
+                                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </Button>
                                     </Grid>
 
                                     <StackPanel x:Name="PenIdentityGroup" Spacing="6" Visibility="Collapsed">
@@ -314,7 +329,7 @@
 
                         <!-- 键盘 -->
                         <StackPanel x:Name="KeyboardGroup" Grid.Row="1" Grid.Column="0" Spacing="4"
-                                    VerticalAlignment="Top">
+                                    VerticalAlignment="Top" Visibility="Collapsed">
                             <TextBlock Text="键盘" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardCompactStyle}">
                                 <StackPanel Spacing="12">
@@ -340,6 +355,16 @@
                                                                 Grid.Column="2"
                                                                 VerticalAlignment="Center"
                                                                 HorizontalAlignment="Right" />
+                                        <Button x:Name="KeyboardDismissButton" Grid.Column="2"
+                                                Visibility="Collapsed"
+                                                MinWidth="0" Padding="6"
+                                                Background="Transparent" BorderThickness="0"
+                                                HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                ToolTipService.ToolTip="移除"
+                                                Click="KeyboardDismissClicked">
+                                            <FontIcon Glyph="&#xE711;" FontSize="12"
+                                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </Button>
                                     </Grid>
 
                                     <StackPanel x:Name="KeyboardIdentityGroup" Spacing="6" Visibility="Collapsed">
@@ -361,7 +386,7 @@
                         <!-- 笔与键盘的设置项。放在两张状态卡片下面而不是单独一页：它们要改的
                              正是上面这两个设备，隔一页去调整会让人先怀疑自己找错了地方。 -->
                         <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Spacing="24">
-                            <StackPanel Spacing="4">
+                            <StackPanel x:Name="PenSettingsGroup" Spacing="4" Visibility="Collapsed">
                                 <TextBlock Text="笔" Style="{StaticResource SettingsGroupHeaderStyle}" />
                                 <Border Style="{StaticResource SettingsCardStyle}">
                                     <Grid ColumnSpacing="16" VerticalAlignment="Center">
@@ -417,7 +442,7 @@
                                 </Border>
                             </StackPanel>
 
-                            <StackPanel Spacing="4">
+                            <StackPanel x:Name="KeyboardSettingsGroup" Spacing="4" Visibility="Collapsed">
                                 <TextBlock Text="键盘" Style="{StaticResource SettingsGroupHeaderStyle}" />
                                 <Border Style="{StaticResource SettingsCardStyle}">
                                     <Grid ColumnSpacing="16" VerticalAlignment="Center">
@@ -450,6 +475,21 @@
                         </StackPanel>
                     </Grid>
                     </StackPanel>
+
+                    <!-- 两张卡片都不显示时的占位。摆在卡片那一层之外、视口正中：跟着卡片放进
+                         StackPanel 就只能贴着页顶，下面整页空白，孤零零的一块。
+                         图标按文案在信息与警告之间切换，见 RefreshDevicePage。不要改用
+                         PathIcon，同上面第 98 行的说明：窗口一显示就抛 0xC000027B。 -->
+                    <StackPanel x:Name="DeviceEmptyState" Spacing="12"
+                                HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <FontIcon x:Name="DeviceEmptyStateIcon" Glyph="&#xE946;" FontSize="36"
+                                  HorizontalAlignment="Center"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock x:Name="DeviceEmptyStateText" Text="未接入笔或键盘"
+                                   HorizontalAlignment="Center"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    </Grid>
                 </ScrollViewer>
 
                 <!-- ── 电池页 ── -->

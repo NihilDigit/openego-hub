@@ -47,6 +47,8 @@ struct MainWindow : MainWindowT<MainWindow> {
     void ThemeSelected(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void DeviceCardsSizeChanged(
         IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
+    void PenDismissClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void KeyboardDismissClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void ColorReferenceSizeChanged(
         IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
 
@@ -87,6 +89,9 @@ private:
         bool present,
         const char* utf8);
     void UpdateOneNoteRow(bool eraserMode);
+    // 卡片可见性与两列布局是同一件事：只剩一张卡片时它要回到左列，否则宽窗口下会孤零零
+    // 挂在右半边。尺寸变化和可见性变化都经由这里。
+    void ApplyDeviceCardLayout();
     void SetInteractiveEnabled(bool enabled);
     // 提交充电上限之后进入等回显的状态，见实现处的说明。
     void BeginChargeLimitEcho(uint8_t requested);
@@ -140,6 +145,13 @@ private:
     // 色温滑条的防抖。每条命令要拉起一个进程写 PCC，逐 tick 发就是几十个进程连续写，画面会抖。
     Microsoft::UI::Xaml::DispatcherTimer m_colorTemperatureTimer{nullptr};
     int m_pendingColorTemperature = 0;
+    // 设备卡片显示与否，取本次运行期间是否连接过。点叉移除就是把它清回假，下次连接重新
+    // 置真——所以移除不需要第二位状态，也不需要落盘：没配过键盘的机器永远不置真，拔掉的
+    // 键盘保持真直到用户点叉，而重启本身已经把卡片清掉了。
+    bool m_penSeen = false;
+    bool m_kbdSeen = false;
+    // 最近一次的内容区宽度。可见性变化时要重算两列布局，而那时手上没有 SizeChangedEventArgs。
+    double m_deviceCardsWidth = 0.0;
     // 构造完成前不接受任何控件事件：XAML 解析本身就会触发它们，那时控件还没备齐，
     // 而滑块此刻的值是 Minimum，照单提交等于替用户改设置。
     bool m_uiReady = false;
