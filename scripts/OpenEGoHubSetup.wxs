@@ -252,6 +252,29 @@
 
       <Component Id="GaokunThpHostComp" Guid="F2B02781-F81C-4A90-9A70-4E2F07585CE7">
         <File Id="GaokunThpHostEXE" Source="$(var.HalOutputDir)\GaokunThpHost.exe" KeyPath="yes" />
+
+        <!--
+          触控宿主必须作为服务运行，不能由服务进程 CreateProcess 拉起：THP_Service.dll 内部
+          另有一个 ServiceMain，它要先向 SCM 注册控制处理器才会订阅电源通知，非服务进程注册
+          必然失败，原厂的 ApDaemon 随即挂起整条算法链。详见 hal/docs/thp-power-gate.md。
+
+          Start 为 demand：接管由 OpenEGoHubService 按租约发起，不能开机自启，否则它会在服务
+          还没决定由谁提供触控之前就抢走设备。HostController 在服务缺失时会自行注册同名服务
+          （开发环境用不到安装包），这里注册的意义在于卸载时能被 ServiceControl 一并删除。
+        -->
+        <ServiceInstall
+            Id="GaokunThpHostInstaller"
+            Type="ownProcess"
+            Name="OpenEGoHubThpHost"
+            DisplayName="!(loc.ThpHostServiceDisplayName)"
+            Description="!(loc.ThpHostServiceDescription)"
+            Start="demand"
+            Account="LocalSystem"
+            ErrorControl="ignore" />
+
+        <ServiceControl Id="RemoveThpHostService" Name="OpenEGoHubThpHost"
+                        Stop="both"
+                        Remove="uninstall" />
       </Component>
 
       <Component Id="GaokunPenHostComp" Guid="2639816E-2DD8-4FB0-B67F-C1A31DCC0212">

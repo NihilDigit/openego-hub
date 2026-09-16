@@ -126,7 +126,9 @@ $ecTargets = @(
 # ExtraDirs 里的源文件一并编进来，用于让 hostctl 复用控制器实现。
 $nativeTargets = @(
     @{ Name = 'GaokunPower.exe'; Dir = 'power'; Libs = @('ole32.lib', 'oleaut32.lib', 'wbemuuid.lib') },
-    @{ Name = 'GaokunCtl.exe'; Dir = 'ctl'; ExtraDirs = @('host'); Libs = @() }
+    # advapi32 来自 host/HostController.cpp：宿主是作为服务启停的，走 SCM 而不是
+    # CreateProcess，原因见 hal/docs/thp-power-gate.md。
+    @{ Name = 'GaokunCtl.exe'; Dir = 'ctl'; ExtraDirs = @('host'); Libs = @('advapi32.lib') }
 )
 
 foreach ($t in $ecTargets) {

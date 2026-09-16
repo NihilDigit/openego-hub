@@ -63,6 +63,12 @@ void EnsureEventSource() noexcept {
 int __cdecl PrintEventLogCallback(int) noexcept {
     // 原厂取回消息后不做任何处理就返回。消息内容不落盘，但这次调用本身是必要的：
     // GetMESSAGE 会把 DLL 内部的待发消息取走，不调用则队列不前进。
+    //
+    // 不要为了拿厂商的诊断信息把 buffer 记进宿主日志。THP_Service 只有 SetPrintEventLog
+    // 而没有对应的 getter，全模块没有一处调用这个回调，实测接管 20 秒内一次都没触发。
+    // 厂商的诊断走的是另一条路：Log_Print 经 LogFile::WriteLog 落到
+    // C:\ProgramData\Huawei\HuaweiTHP\Service_LogFile-<账户>-<日期>.txt，由 ThpFuncStart
+    // 里无条件置 1 的 logFlag 控制；配置里的 LogFunction 写进全局之后无人读，开关不了它。
     char buffer[Thp::kMessageLength]{};
     int length = Thp::kMessageLength;
     g_module.GetMessage(buffer, &length);
@@ -156,15 +162,55 @@ bool StartThp() noexcept {
     return true;
 }
 
-void WINAPI ServiceMain(DWORD, LPWSTR *) noexcept {
+void RestoreVendorService() noexcept;
+
+// 控制方消失后的收尾。服务之间没有父子关系，控制方崩溃时 SCM 不会停掉我们，而设备还占在
+// 手里；这条线是唯一的兜底。--hosted 时同样的等待由主线程做，服务模式下 ServiceMain 必须
+// 尽快返回，只能挪进单独的线程。
+DWORD WINAPI ParentWatchThread(LPVOID param) noexcept {
+    HANDLE parent = static_cast<HANDLE>(param);
+    (void)WaitForSingleObject(parent, INFINITE);
+    CloseHandle(parent);
+
+    HOST_LOG_INFO("control process exited; stopping and restoring the vendor service");
+    ReportStatus(SERVICE_STOP_PENDING);
+    StopService();
+    RestoreVendorService();
+    ReportStatus(SERVICE_STOPPED);
+
+    // 收尾已经做完，这里不再回到 SCM 的停止流程：ExitProcess 之后服务自然进入 STOPPED。
+    ExitProcess(0);
+}
+
+void WINAPI ServiceMain(DWORD argc, LPWSTR *argv) noexcept {
     g_statusHandle = RegisterServiceCtrlHandlerExW(kServiceName, ServiceCtrlHandler, nullptr);
     if (!g_statusHandle) return;
 
     ReportStatus(SERVICE_START_PENDING);
 
+    // StartService 传进来的参数，argv[0] 是服务名。日志级别走 ImagePath，不在这里。
+    DWORD parentPid = 0;
+    for (DWORD i = 1; i + 1 < argc; i += 2) {
+        if (_wcsicmp(argv[i], L"--parent") == 0) {
+            parentPid = static_cast<DWORD>(_wtoi(argv[i + 1]));
+        }
+    }
+
     if (!StartThp()) {
         ReportStatus(SERVICE_STOPPED, ERROR_FILE_NOT_FOUND);
         return;
+    }
+
+    if (parentPid != 0) {
+        HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+        if (!parent) {
+            HOST_LOG_ERROR("cannot open control process %lu (err=%lu); running unsupervised",
+                           parentPid, GetLastError());
+        } else if (HANDLE thread = CreateThread(nullptr, 0, ParentWatchThread, parent, 0, nullptr)) {
+            CloseHandle(thread);
+        } else {
+            CloseHandle(parent);
+        }
     }
 
     ReportStatus(SERVICE_RUNNING);
@@ -248,77 +294,9 @@ void RestoreVendorService() noexcept {
     CloseServiceHandle(manager);
 }
 
-// 托管模式。OpenEGoHub 拉起本进程接管触控，切走或自身退出时再把设备交还原厂。
-//
-// 停止有两条来路，都必须走到 ThpFuncStop：父进程主动置位停止事件，或父进程自己没了。
-// 后者不能只靠 Job Object 的 KILL_ON_JOB_CLOSE 兜底——那是直接终止，DLL 没有机会复位 AFE，
-// 设备会停在中间状态，随后原厂服务接手时要多一次恢复。等父进程句柄把这条路径也收干净：
-// 停止事件那条由父进程自己负责交还，父进程没了那条则由 RestoreVendorService 收尾。
-int RunHosted(DWORD parentPid, const wchar_t *stopEventName) noexcept {
-    HANDLE stopEvent = nullptr;
-    if (stopEventName && *stopEventName) {
-        // 由父进程创建，这里只打开。名字对不上时视为参数错误，不静默降级成「永不停止」。
-        stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
-        if (!stopEvent) {
-            // 先取 err 再打印：wprintf 自己会调用 Win32，晚一步取到的可能已经是它的错误码。
-            const DWORD err = GetLastError();
-            HOST_LOG_ERROR("cannot open stop event %ls (err=%lu)", stopEventName, err);
-            wprintf(L"[hwthpec] cannot open stop event %ls (err=%lu)\n", stopEventName, err);
-            return 2;
-        }
-    }
-
-    HANDLE parent = nullptr;
-    if (parentPid != 0) {
-        parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
-        if (!parent) {
-            const DWORD err = GetLastError();
-            HOST_LOG_ERROR("cannot open parent process %lu (err=%lu)", parentPid, err);
-            wprintf(L"[hwthpec] cannot open parent process %lu (err=%lu)\n", parentPid, err);
-            if (stopEvent) CloseHandle(stopEvent);
-            return 2;
-        }
-    }
-
-    if (!StartThp()) {
-        HOST_LOG_ERROR("hosted start failed; exiting with 1");
-        if (stopEvent) CloseHandle(stopEvent);
-        if (parent) CloseHandle(parent);
-        return 1;
-    }
-
-    HOST_LOG_INFO("hosted and running (parent=%lu)", parentPid);
-
-    HANDLE waits[2];
-    DWORD count = 0;
-    if (stopEvent) waits[count++] = stopEvent;
-    if (parent) waits[count++] = parent;
-
-    if (count == 0) {
-        // 两者都没给，退化成一直运行，只能靠外部终止。允许这种用法便于手工试验。
-        for (;;) Sleep(1000);
-    }
-
-    const DWORD signalled = WaitForMultipleObjects(count, waits, FALSE, INFINITE);
-    // 哪个句柄先亮决定了这次退出是「被要求停」还是「父进程没了」，两者的后续排查方向不同，
-    // 也决定了下面要不要替父进程把华为请回来。
-    const bool stopRequested = stopEvent && signalled == WAIT_OBJECT_0;
-    const char *reason = "parent exited";
-    if (stopRequested) reason = "stop event";
-    else if (signalled == WAIT_FAILED) reason = "wait failed";
-    HOST_LOG_INFO("wait returned %lu (%s)", signalled, reason);
-
-    StopService();
-
-    // 父进程主动要求停止时不插手：服务自己会处理交还，宿主再去启动华为只会和它抢同一个
-    // 服务。等待本身失败也走恢复——那说明这条链已经不可靠，宁可把触控还给原厂。
-    if (!stopRequested) RestoreVendorService();
-
-    if (stopEvent) CloseHandle(stopEvent);
-    if (parent) CloseHandle(parent);
-    return 0;
-}
-
+// 控制台模式。只跑得起来，驱动不了触控：THP_Service.dll 内部的 ServiceMain 拿不到 SCM 的
+// 控制处理器，也就订阅不到电源通知，原厂那条链会停在 WaitForResume。用于手工观察加载、
+// 配置解析与 MCU 报文，不要拿它判断触控是否正常。见 hal/docs/thp-power-gate.md。
 int RunConsole() noexcept {
     wprintf(L"[hwthpec] console mode; Ctrl+C to stop\n");
     if (!StartThp()) {
@@ -375,20 +353,6 @@ int wmain(int argc, wchar_t **argv) {
         wprintf(L"OOB (7)  : %d   (vendor returns 0 for out-of-range)\n",
                 config.GetPenEleValue(7));
         return 0;
-    }
-
-    if (argc > 1 && _wcsicmp(argv[1], L"--hosted") == 0) {
-        g_consoleMode = true; // 不向 SCM 汇报状态：本进程不是服务。
-        DWORD parentPid = 0;
-        const wchar_t *stopEvent = nullptr;
-        for (int i = 2; i + 1 < argc; i += 2) {
-            if (_wcsicmp(argv[i], L"--parent") == 0) {
-                parentPid = static_cast<DWORD>(_wtoi(argv[i + 1]));
-            } else if (_wcsicmp(argv[i], L"--stop-event") == 0) {
-                stopEvent = argv[i + 1];
-            }
-        }
-        return RunHosted(parentPid, stopEvent);
     }
 
     if (argc > 1 && _wcsicmp(argv[1], L"--console") == 0) {

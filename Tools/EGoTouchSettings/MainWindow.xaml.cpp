@@ -1746,12 +1746,17 @@ winrt::fire_and_forget MainWindow::ExportLogsAsync() {
 
     m_exportInProgress = true;
     ExportLogsButton().IsEnabled(false);
-    ShowExportResult(InfoBarSeverity::Informational, L"正在导出日志", L"正在打包，请稍候。",
+
+    // 控件只能在 UI 线程上读，取到值再切后台。
+    const bool includeVendor = ExportVendorLogsToggle().IsOn();
+    ShowExportResult(InfoBarSeverity::Informational, L"正在导出日志",
+                     includeVendor ? L"正在打包，附带厂商日志需要更长时间。"
+                                   : L"正在打包，请稍候。",
                      false);
 
     const auto ui = winrt::apartment_context();
     co_await winrt::resume_background();
-    const auto result = LogExport::WriteArchive(*destination);
+    const auto result = LogExport::WriteArchive(*destination, includeVendor);
     co_await ui;
 
     m_exportInProgress = false;

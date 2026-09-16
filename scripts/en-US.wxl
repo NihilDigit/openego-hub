@@ -20,6 +20,8 @@
        ═══════════════════════════════════════════════════════════ -->
   <String Id="ServiceDisplayName" Value="OpenEGo Hub Touch Service" />
   <String Id="ServiceDescription" Value="OpenEGo Hub Touch Service — hands touch between the vendor provider and OpenEGo Hub, and aggregates pen and keyboard state. This service starts automatically with Windows and runs under the SYSTEM account." />
+  <String Id="ThpHostServiceDisplayName" Value="OpenEGo Hub Touch Host" />
+  <String Id="ThpHostServiceDescription" Value="OpenEGo Hub Touch Host — hosts the vendor touch pipeline. The touch service starts it on demand when it takes over; it does not start with Windows and runs under the SYSTEM account." />
 
   <!-- ═══════════════════════════════════════════════════════════
        WixUI_InstallDir — Welcome

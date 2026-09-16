@@ -20,6 +20,8 @@
        ═══════════════════════════════════════════════════════════ -->
   <String Id="ServiceDisplayName" Value="OpenEGo Hub 触控服务" />
   <String Id="ServiceDescription" Value="OpenEGo Hub 触控服务 — 管理触控提供方的接管与交还，并汇总笔与键盘的状态。该服务随系统自动启动，以 SYSTEM 账户运行，无需用户干预。" />
+  <String Id="ThpHostServiceDisplayName" Value="OpenEGo Hub 触控宿主" />
+  <String Id="ThpHostServiceDescription" Value="OpenEGo Hub 触控宿主 — 承载原厂触控算法链，由触控服务在接管时按需启动。该服务不随系统自启，以 SYSTEM 账户运行。" />
 
   <!-- ═══════════════════════════════════════════════════════════
        WixUI_InstallDir 欢迎页

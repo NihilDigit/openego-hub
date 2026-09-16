@@ -45,16 +45,24 @@ load config 中的 `CHPEMetadataPointer` 非零。而控制器库若被误编译
 模拟层内。托管代码无法编译为 ARM64EC，所以这层薄壳以原生 C++ 重写，逐条对照原厂 IL，
 连同那些看起来像缺陷的行为一并保留。完整记录见 [`docs/vendor-service.md`](docs/vendor-service.md)。
 
-宿主由上层拉起，不替换任何文件、不注册服务：
+宿主必须作为服务运行，由上层经 SCM 启停，服务名 `OpenEGoHubThpHost`。它不替换任何文件，
+也不占用原厂的服务名。
 
 ```
-GaokunThpHost.exe --hosted --parent <pid> --stop-event <name>
-GaokunThpHost.exe --console      # 独立运行，便于本机调试
+GaokunThpHost.exe                # 由 SCM 启动；上层用 Gaokun::Thp::HostController 驱动
+GaokunThpHost.exe --console      # 加载与配置自检，驱动不了触控，见下
 GaokunThpHost.exe --check        # 只读自检，不加载 THP_Service.dll
 ```
 
-停止有两条路径，都会走到 `ThpFuncStop`：上层置位停止事件，或上层进程本身消失。
-后者不用 Job Object 的 `KILL_ON_JOB_CLOSE` 兜底，因为那是直接终止，DLL 没有机会复位 AFE。
+作为服务运行不是部署上的偏好，而是这条链路的前提：`THP_Service.dll` 内部另有一个 ServiceMain，
+它要先向 SCM 注册控制处理器才会订阅电源通知，非服务进程注册必然失败，原厂的 ApDaemon 随即
+把系统当成没通电并挂起，触摸帧一帧都不处理。因此 `--console` 只能用来观察加载、配置解析与
+MCU 报文，不能用来判断触控是否正常。来龙去脉见
+[`docs/thp-power-gate.md`](docs/thp-power-gate.md)。
+
+停止有两条路径，都会走到 `ThpFuncStop`：上层经 SCM 停止本服务，或上层进程本身消失——服务之间
+没有父子关系，SCM 不会因为上层消失而停掉宿主，所以宿主自己看护上层的进程句柄，据此收尾并把
+原厂服务请回来。
 
 集成方式见 [`docs/integration.md`](docs/integration.md)。
 

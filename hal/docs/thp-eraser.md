@@ -388,9 +388,25 @@ DEVICE FOR PRESSURE` 找的就是它，对应本项目的 `PenPressureReader`（
 
 | 偏移 | 名称 | 判读 |
 |---|---|---|
-| `+0xB6A8C` | `eraserToggle` | 写报告时必须等于 1 才会置 Invert/Eraser |
+| `+0xB6A8C` | `penStatus` | 写报告时必须等于 1 才会置 Invert/Eraser |
+| `+0xB6A90` | `penkitErase` | **不通向 HID**，见下 |
 | `+0xC938C` | `vhfSuppress` | 非 0 时笔和手指报告都不写 |
 | `+0xC9380` | `vhfHandle` | VHF 注入器句柄，0 表示没打开 |
+
+**本文此前把 `+0xB6A8C` 记作 `eraserToggle`，那个名字掩盖了一处关键区分。** 工程版随包的
+`THP_Service.pdb` 与 `.map` 给出了真实符号：
+
+- `?penStatus@@3HA`（零售版 `+0xB6A8C`）由操作码 `0x7F` `ERASER_TOGGLE` 写入。笔报告写入
+  函数经 `GetPenStatus()` 读的是它，这一个才通向 HID。
+- `?penkitErase@@3HA`（零售版 `+0xB6A90`）由操作码 `0x2F` `PEN_CURRENT_FUNC` 写入，载荷为 1
+  时改写成 3 并起线程调 `RunThreadProcess`。全模块没有任何读取点通向 VHF：它连同
+  `penkitDoubleClick`、`penkitConnect` 一起只喂给 `SendMsgToPenKitApp`，是给 PenKit 应用发
+  消息的通道。
+
+两者相邻，只差 4 字节。本文第八节记录的实测——"全局确实是 1，且在 `CommandSendPenCurrentFunc(0)`
+时翻回 0"——描述的正是 `penkitErase` 的行为：`CommandSendPenCurrentFunc` 走的是 `0x2F`，它
+不写 `penStatus`。**因此那次观测并不能证明 `penStatus` 也曾为 1，本文"全局为 1 期间划笔"
+这个前提需要按 `0xB6A8C` 重测一次才算成立。** 重测不需要断点，按上表读即可。
 
 做法：`Get-Process GaokunThpHost` 取到进程，从 `.Modules` 里找 `THP_Service.dll` 拿基址，
 `OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION)` 后按上表偏移读。同时打印进程的

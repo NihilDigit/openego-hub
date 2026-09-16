@@ -226,9 +226,15 @@ build.
   possible route, just the only one that works today. See `hal/docs/thp-eraser.md`,
   `docs/onenote_ink_eraser.md`, `docs/pen_eraser_flow.md` and `docs/penservice_events.md`.
 - **Side-button events depend on a handshake that only `THP_Service.dll` performs.** The
-  MCU reports nothing until a host has sent `0x7101` + two `0x7701`, answered `0x7B` with
-  a `0x7D01` InitParam and ACKs every frame. `THP_Service.dll` does all of that in
-  `Usb_Start`, so it is covered whenever either touch provider is running. The vendor's
+  MCU reports nothing until a host has completed it, and `THP_Service.dll` starts that from
+  `Usb_Start`, so it is covered whenever either touch provider is running. The exact frames
+  are only partly pinned down: `0x7101` comes from `FirstPenConnected`, which `Usb_Start`
+  spawns once the USB read thread is up, and the 32-byte `0x7D01` InitParam comes from
+  `PenParamEvent`, which the vendor core triggers through the `GetReportBluetoothPenInfo`
+  callback rather than directly from the `0x7B` branch — that branch only logs and ACKs.
+  **`0x7701` appears nowhere in `THP_Service.dll`'s `.text`** (neither build), so whatever
+  sends it lives in `ApDaemon.dll` or `himax_thp_drv.dll`; the "two `0x7701`" in earlier
+  notes was never verified against the binary. The vendor's
   `PenService.dll` does not do it, and neither does `PenEventBridge` any more: it used to,
   and the duplicate handshake and ACKs on the same endpoint left the pen intermittently
   reporting no pressure after waking, which TSACore turns into the pen tip being reported
@@ -249,6 +255,11 @@ build.
 - `hal/docs/` — the vendor DLL reverse engineering: display colour management, the OSD,
   battery and the vendor services. `display-manage.md` also records two negative results
   worth not repeating.
+- `hal/docs/thp-power-gate.md` — why the vendor chain stalls when our host loads it:
+  `THP_Service.dll` has a ServiceMain of its own that must register with the SCM before it
+  subscribes to power notifications, and the engineering-build ApDaemon holds the whole
+  pipeline when that subscription is missing. Also lists probes that work without a
+  debugger, and corrects two globals that look informative but are not.
 
 A number of documents under `docs/` describe the removed solver stack, the DVR recorder
 and the IPC control channel. They are history, not current behaviour.

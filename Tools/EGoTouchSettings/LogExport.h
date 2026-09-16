@@ -24,6 +24,10 @@ bool HasLogs();
 
 // 把日志目录、logging.ini 和一份 export-info.txt 打包到 destinationZip。
 // 阻塞若干百毫秒（复制加起子进程），调用方应放在后台线程。
-Result WriteArchive(const std::wstring& destinationZip);
+//
+// includeVendorLogs 额外收进华为触控服务与面板驱动的日志。触控完全不工作时，原因只存在
+// 于那份日志里：我们这侧只看得到宿主起没起来，面板 ID、总线状态、固件刷写都在厂商那边。
+// 默认不收，因为它按天分文件、目录里常年堆着上百 MB，而多数反馈用不到。
+Result WriteArchive(const std::wstring& destinationZip, bool includeVendorLogs = false);
 
 } // namespace LogExport
