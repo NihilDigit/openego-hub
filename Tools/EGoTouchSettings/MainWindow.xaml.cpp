@@ -525,9 +525,12 @@ void MainWindow::LoadStoredSettings() {
     // 也不要让滑块停在 Minimum：那看起来像「当前上限是 50%」。
     //
     // 色域仍然读不回：那是把 LUT 推给面板，硬件不提供查询，所以显示的是上次由本程序设定的值。
-    const DWORD chargeLimit = ReadUserSetting(L"ChargeLimit", 100);
+    // 吸附一次再显示：滑块现在只有六档，而这份记录可能是旧版本按 5 步进存下的 55。不吸附
+    // 的话滑块自己会跳到 60，旁边的数字却还印着 55。
+    const int chargeLimit = Gaokun::Power::SnapChargeLimit(
+        static_cast<int>(ReadUserSetting(L"ChargeLimit", 100)));
     ChargeLimitSlider().Value(static_cast<double>(chargeLimit));
-    ChargeLimitValueText().Text(winrt::to_hstring(static_cast<int>(chargeLimit)) + L"%");
+    ChargeLimitValueText().Text(winrt::to_hstring(chargeLimit) + L"%");
 
     // 未设定过时选中 Native（索引 0）：那正是没套任何 LUT 的状态，与开机后的实际情况一致。
     ColorModeCombo().SelectedIndex(static_cast<int>(ReadUserSetting(L"ColorMode", 0)));

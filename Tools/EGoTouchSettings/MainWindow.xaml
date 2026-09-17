@@ -598,7 +598,7 @@
                                             Width="160"
                                             Minimum="50"
                                             Maximum="100"
-                                            StepFrequency="5"
+                                            StepFrequency="10"
                                             TickFrequency="10"
                                             TickPlacement="Outside"
                                             VerticalAlignment="Center"

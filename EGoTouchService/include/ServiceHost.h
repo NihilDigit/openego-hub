@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ChargePolicy.h"
 #include "ConfigRuntime.h"
 #include "PenButtonConfig.h"
 #include "ServiceConfigCore.h"
@@ -136,6 +137,10 @@ private:
     void ClosePenChannels();
     // 键盘接上的边沿。只在 AccessoryLoop 这一个线程上调用。
     void DetectKeyboardArrival();
+    // 充电阈值：下发一份意图，以及按周期核对 EC 里的真值与用户的设定是否还一致。
+    // 对账只在 AccessoryLoop 这一个线程上调用，下发两条线程都会走，实现处有锁。
+    [[nodiscard]] bool ApplyChargeIntent(const ChargePolicy::Intent& intent);
+    void ReconcileChargeLimit();
     // 状态快照的唯一构造点，见实现处的说明。
     void PublishStatusSnapshot();
 

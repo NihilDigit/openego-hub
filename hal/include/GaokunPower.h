@@ -136,6 +136,35 @@ inline constexpr int kMaxChargeLimit = 100;
 // 起充固定比停充低 5，这是原厂的取值方式：两者相等会让电池在阈值附近反复小幅充放。
 inline constexpr int kChargeStartOffset = 5;
 
+// 停充上限的六个取值。EC 只校验 0..100，六档是厂商软件侧的限制：SmartChargePlugin.dll 的
+// EnsureCapacityValid（RVA 0x2dc60）把任意上限吸附到这六个值之一，等距时取小。
+//
+// 跟随它不是因为硬件有此限制，而是因为那个插件会在自己启动与系统唤醒时，按
+// HKLM\Software\PCManager\MBAPowerManager 里的档位重写 EC，且不看 EC 当前是什么
+// （docs/charge-control.md）。取同一组值之后，我们写下的 03 15 01 48 (cap-5) cap 与它
+// 写下的逐字节相同，谁后写都不改变结果；取 55 这类值则会在下一次唤醒后被它改掉。
+inline constexpr uint8_t kChargeLimitSteps[] = {50, 60, 70, 80, 90, 100};
+
+// 把任意上限吸附到最近的一档，等距取小——与 EnsureCapacityValid 的取舍一致，85 落到 80。
+//
+// 越界值按最近一档处理（40 → 50，120 → 100），这也是 EnsureCapacityValid 自己的行为。厂商
+// 在它之外还有一层预夹：InitSmartChargeMode 读到的上限不在 50..100 时先改成 100 再吸附。
+// 那一层不在这里复制——本仓库的调用方在吸附之前就把越界值挡掉了，把「40 变成 100」搬进来
+// 只会让一个本不可达的分支去调高用户的上限。
+[[nodiscard]] constexpr int SnapChargeLimit(int percent) noexcept {
+    int best = kChargeLimitSteps[0];
+    int bestDistance = percent > best ? percent - best : best - percent;
+    for (const uint8_t step : kChargeLimitSteps) {
+        const int distance = percent > step ? percent - step : step - percent;
+        // 严格小于：等距时留住先遇到的那一档，而这个表是升序的。
+        if (distance < bestDistance) {
+            best = step;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
 // 用户设定的手动阈值。此时阈值立即硬性生效。
 inline constexpr uint8_t kChargeModeManual = 1;
 // 智能充电。阈值同样硬性生效，但要等连续接电达到 kSmartChargeDelayHours 之后；在那之前

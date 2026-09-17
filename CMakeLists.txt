@@ -296,6 +296,7 @@ add_executable(EGoTouchService
     "${SERVICE_ROOT}/source/PenSettingsStore.cpp"
     "${SERVICE_ROOT}/source/TouchProviderCoordinator.cpp"
     "${SERVICE_ROOT}/source/VendorServices.cpp"
+    "${SERVICE_ROOT}/source/ChargePolicy.cpp"
     "${SERVICE_ROOT}/Service.rc"
 )
 # 与托盘同理：rc.exe 没有 /showIncludes，CMake 不为 .rc 生成 depfile，改了 AppVersion.h

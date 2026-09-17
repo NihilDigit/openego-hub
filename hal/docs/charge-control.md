@@ -118,8 +118,14 @@ Manager 按智能档写下的原值，电池充到 100% 的原因只是连续接
 **EC 接受任意 DELY 与任意阈值，厂商界面的六档是软件侧的限制。** `EnsureCapacityValid`
 把上限吸附到 50/60/70/80/90/100 之一，下限取上限减 5。这个吸附发生在 PC 管家的 UI 层，
 ACPI 的 `SBCM` 只校验 0..100，固件对 83 和 85 一视同仁——它是产品决策，不是硬件约束。
-本仓库不跟随，滑块按 5 步进放行 50..100，实测写 80 生效，写 3、1、0 到 DELY 也都留住了。
-后续若要对齐六档，需要另有理由，不能以「厂商这么切」当作硬件限制。
+实测写 80 生效，写 3、1、0 到 DELY 也都留住了。
+
+**本仓库仍然跟随这六档，理由不是硬件而是插件。** `SmartChargePlugin.dll` 在自己启动与系统
+唤醒时按注册表里的档位重写 EC，写什么只看 `MBAPowerManager` 下那几个值，不看 EC 当前是
+什么（下一节）。取同一组值之后，我们写下的 `03 15 01 48 (cap-5) cap` 与它写下的逐字节
+相同，谁后写都不改变结果；取 55 这类值则会在下一次唤醒后被它改掉，而用户看不出原因。
+吸附规则实现在 `GaokunPower.h` 的 `SnapChargeLimit`，与 `EnsureCapacityValid` 一致：取最近
+一档，等距取小。
 
 ## 厂商侧做了什么
 
@@ -140,6 +146,26 @@ mode4..6 = 65/70）。插件六处调用全部传 `false` 加显式 `0x48`，与
 档位持久化在 `HKLM\Software\PCManager\MBAPowerManager`：`PowerSafeManagerStatus` 总开关、
 `CustomChargeCapacity` 自定义上限、`SmartChargeMode` 与 `PowerSafeManagerMode` 两个旧档
 序号。值不存在时按缺省分支走。
+
+**插件写什么完全由这几个值决定，它连 EC 当前是什么都不看**：`InitChargeMode`（0x2e440）读
+一次当前模式只为判断这台机器支不支持，非 0 即支持，此后不参与决策。`PowerSafeManagerStatus`
+缺失或为 0 时无条件写 `CHMD=4, DELY=72, 65/70`。这正是「手动上限自己变回智能充电」的来源：
+一台从没在 PC 管家里用过智能充电的机器，这几个值根本不存在，于是插件每次启动、每次唤醒都
+把 EC 改回智能档。
+
+分支顺序：`CustomChargeCapacity` 只要存在就走手动那一支，不再看两个旧档序号。内容用
+`_wtoi` 解析，非法串当 0，随后被该支的预夹改成 100（`if (cap<50||cap>100) cap=100`），再过
+`EnsureCapacityValid`。本仓库据此把用户的选择镜像进这两个值，见
+`EGoTouchService/source/ChargePolicy.cpp`。
+
+**0x90003 发不出去：管道对所有人开放，但接收端验签。** 这条消息走 `IPCMessage.dll` 的
+命名管道 `\\.\Pipe\iMateBookAssistant`（华为整套 PC 管家的公共总线，服务端由
+`MateBookService.exe` 与 `BasicService.exe` 承载），载荷只有两字节 `{modeFlag, capacity}`，
+无魔数、无版本号、无校验，`srcId` 接收端也不核对。不经过任何窗口，UIPI 与 session 0 在这一层
+无关。但服务端接受连接时调 `VerifyClientProcess`（0x14670）：取对端 exe 路径做
+`WinVerifyTrust`，要求证书主体是 `Huawei Device Co., Ltd.` 或 `Huawei Technologies Co., Ltd.`，
+否则拒绝。本程序的服务与托盘都不是华为签名，因此「发一条 IPC 让插件立刻按我们的值写一次」
+这条路走不通，只能靠镜像注册表等它自己下一次运行。
 
 `Battery::GetChargeThreshold` 是坏的（hardware-hal.md:157-188），这是读路径自行逆向的原因。
 
@@ -174,15 +200,12 @@ AML，再用 ACPICA 的 `iasl -e DSDT.aml -d SSDT.aml`。SSDT 需要 DSDT 作为
 1. **界面无法显示智能充电是否正在限充。** 厂商没有提供这个状态位——`WmiUtil.dll` 的
    十二个相关导出里只有模式加阈值，没有「当前是否受限」。要显示只能自己拿 `GAIT` 与
    `DELY` 比较推导。
-2. **`SetSmartCharge` 写的 DELY 与厂商不一致。** ChargeLimit.cpp:80 恒写 0x18 = 24，厂商写
-   72。EC 接受这个值，因此走过这条路的机器会在接电一天后就开始限充，而不是三天。阈值同样
-   与厂商不同：厂商固定 65/70，本仓库沿用读回的当前值。
-3. **写入无回读校验**：RunHalTool 只看退出码；写后虽会重读（ServiceHost.cpp:1517-1519）
+2. **写入无回读校验**：RunHalTool 只看退出码；写后虽会重读（ServiceHost.cpp:1517-1519）
    但只更新缓存，不与写入值比较。ExecMethod 成功而 EC 拒绝的情形没有任何一层能发现。
-4. **缓存陈旧**：无周期重读，外部改了模式后界面一直显示服务启动那一刻的值，直到下次写入
+3. **缓存陈旧**：无周期重读，外部改了模式后界面一直显示服务启动那一刻的值，直到下次写入
    或重启服务。`GAIT` 若要进界面，则必须周期重读。
-5. `SBAC`/`GBAC`（`03 12` / `03 13`）的确切语义未定。本机 `GBAC` 返回 2（EC 原值 0），
+4. `SBAC`/`GBAC`（`03 12` / `03 13`）的确切语义未定。本机 `GBAC` 返回 2（EC 原值 0），
    `SBAC` 的 RID 1 写 1、RID 2 写 0。`WmiUtil` 里的导出名指向「恢复充电标志」，插件侧的
    `BatterySuperCharge` 指向超级快充开关，两者未对上。
-6. `CHMD` 取值 2、3、5、6 的固件行为未测。BIOS 侧 4、5、6 的默认阈值相同，差别只在 PC
+5. `CHMD` 取值 2、3、5、6 的固件行为未测。BIOS 侧 4、5、6 的默认阈值相同，差别只在 PC
    Manager 的策略层；1、2、3 是旧档位的三组阈值。

@@ -11,6 +11,7 @@
 #include "PenSettingsStore.h"
 #include "TouchProviderCoordinator.h"
 #include "VendorServices.h"
+#include "ChargePolicy.h"
 #include "PenControlChannel.h"
 #include "PenStatusChannel.h"
 // gaokun-hal 的电池读取。充电阈值只有服务读得到——那条 WMI 通道要管理员权限，而设置窗
@@ -167,6 +168,17 @@ struct ServiceHost::Impl {
     static constexpr uint32_t kChargeLimitValid = 1u << 16;
     static constexpr uint32_t kChargeLimitManual = 1u << 8;
     std::atomic<uint32_t> m_chargeLimitCache{0};
+
+    // 充电阈值的对账状态。只被 AccessoryLoop 那个线程读写，不需要同步；真正要护住的是
+    // 下发动作本身，那把锁在 m_chargeApplyMutex。
+    HostSupervisor::Clock::time_point m_lastChargeRead{};
+    HostSupervisor::Clock::time_point m_lastChargeReapply{};
+    bool m_chargeIntentLoaded = false;
+    ChargePolicy::Intent m_chargeIntent{};
+
+    // 下发充电阈值要拉起 GaokunPower.exe 去写 WMI。用户提交走控制线程，对账走
+    // AccessoryLoop，两边同时写同一份 EC 记录没有意义，用这把锁串起来。
+    std::mutex m_chargeApplyMutex;
 
     // 重读充电阈值并更新缓存。读不到时清空而不是保留旧值：读不到的常见原因是权限或固件
     // 不支持，这两种情况下继续显示上一次的数字会让界面看起来还在正常工作。
@@ -914,16 +926,11 @@ void ServiceHost::CloseIpcResources() {
 // 用轮询而不是等宿主的通知：快照本身可重复读，错过一轮没有代价，而少一条跨进程唤醒路径
 // 就少一处可能卡住的地方。事件那侧是管道，Poll 不阻塞，同一个循环里一并取走。
 void ServiceHost::AccessoryLoop() {
-    // 充电阈值的首读挪到了这里。它走 WMI，一次往返在实测里可以花掉几秒，放在启动路径上
-    // 就把 ServiceMain 报 RUNNING 的时刻一起推后，安装程序于是停在「正在启动服务」。
-    // 设置窗第一次打开时滑块仍能停在真实位置：这一轮在 250 毫秒内就跑到了。
-    bool chargeLimitRead = false;
-
     while (!m_accessoryStop.load(std::memory_order_acquire)) {
-        if (!chargeLimitRead) {
-            m_impl->RefreshChargeLimit();
-            chargeLimitRead = true;
-        }
+        // 充电阈值的首读也在这里，不在启动路径上：它走 WMI，一次往返在实测里可以花掉几秒，
+        // 放进 Start 就把 ServiceMain 报 RUNNING 的时刻一起推后，安装程序于是停在「正在
+        // 启动服务」。设置窗第一次打开时滑块仍能停在真实位置——第一轮在 250 毫秒内就跑到。
+        ReconcileChargeLimit();
 
         SuperviseAccessoryHosts();
         OpenAccessoryChannels();
@@ -1292,6 +1299,108 @@ namespace {
 }
 } // namespace
 
+// 下发一份充电意图，成功之后把它记下来并镜像给 PC Manager。
+//
+// 用户提交与对账走同一条路：两者只是意图的来源不同，落地动作、日志和善后完全一样。
+bool ServiceHost::ApplyChargeIntent(const ChargePolicy::Intent& intent) {
+    std::lock_guard<std::mutex> lk(m_impl->m_chargeApplyMutex);
+
+    const std::wstring host = ResolveHostPath(L"GaokunPower.exe");
+    wchar_t args[64];
+    if (intent.manual) {
+        swprintf_s(args, L"--limit %u", static_cast<unsigned>(intent.limit));
+    } else {
+        swprintf_s(args, L"--smart");
+    }
+
+    const bool ok = !host.empty() && RunHalTool(host, args);
+    if (!ok) {
+        if (intent.manual) {
+            LOG_WARN("Service", __func__, "PenControl", "Charge limit {} failed to apply.",
+                     static_cast<unsigned>(intent.limit));
+        } else {
+            LOG_WARN("Service", __func__, "PenControl",
+                     "Handing charging back to the vendor failed.");
+        }
+    } else if (intent.manual) {
+        LOG_INFO("Service", __func__, "PenControl", "Charge limit set to {}.",
+                 static_cast<unsigned>(intent.limit));
+    } else {
+        LOG_INFO("Service", __func__, "PenControl",
+                 "Charging handed back to the vendor's smart mode.");
+    }
+
+    // 无论成功与否都重读一次。失败时缓存要跟上硬件的真实值，否则界面会一直显示用户刚才
+    // 拖到的那个数字，而机器根本没有按它执行。
+    m_impl->RefreshChargeLimit();
+    if (!ok) return false;
+
+    // 没生效就不记。记下去会让对账此后每隔一段时间重试同一条失败的命令。
+    ChargePolicy::Store(intent);
+    ChargePolicy::MirrorToVendor(intent);
+    m_impl->m_chargeIntent = intent;
+    m_impl->m_chargeIntentLoaded = true;
+    return true;
+}
+
+// 充电阈值的对账。
+//
+// EC 里的值不止我们在写：厂商的 SmartChargePlugin.dll 在自己启动与系统唤醒时按注册表里的
+// 档位重写一次，连 EC 当前是什么都不看（hal/docs/charge-control.md）。先前这份阈值只在服务
+// 启动和用户提交之后各读一次，于是外部改掉之后界面一直显示服务启动那一刻的值，而设置窗在
+// 回显超时后照着这个陈旧值把开关弹回去——issue #6 看到的正是这个。
+//
+// 对账放在这里而不是挂在唤醒事件上：唤醒只是外部改动的一种来源，按周期读真值能一并覆盖
+// 开机、装卸载、用户自己跑命令行这些情形，也不必和插件抢唤醒时的先后。两次补写之间留出
+// kReapplyInterval，真打起来时日志里看得见，而不是闷头刷 WMI。
+void ServiceHost::ReconcileChargeLimit() {
+    using Clock = HostSupervisor::Clock;
+    // 读一次 WMI 往返约 6 毫秒，而这个循环每 250 毫秒一轮；五秒一读既不占这条 ACPI 通道，
+    // 界面跟上外部改动也在用户察觉不到的范围内。
+    constexpr auto kReadInterval = std::chrono::seconds(5);
+    constexpr auto kReapplyInterval = std::chrono::seconds(30);
+
+    const auto now = Clock::now();
+    if (m_impl->m_lastChargeRead != Clock::time_point{} &&
+        now - m_impl->m_lastChargeRead < kReadInterval) {
+        return;
+    }
+    m_impl->m_lastChargeRead = now;
+    m_impl->RefreshChargeLimit();
+
+    ChargePolicy::Intent intent{};
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_chargeApplyMutex);
+        if (!m_impl->m_chargeIntentLoaded) {
+            m_impl->m_chargeIntent = ChargePolicy::Load();
+            m_impl->m_chargeIntentLoaded = true;
+        }
+        intent = m_impl->m_chargeIntent;
+    }
+    // 用户从未设过充电上限，EC 是什么就是什么，不替他做决定。
+    if (!intent.valid) return;
+
+    const uint32_t packed = m_impl->m_chargeLimitCache.load(std::memory_order_relaxed);
+    if ((packed & Impl::kChargeLimitValid) == 0) return;  // 读不到就没有对账的依据
+
+    const bool manual = (packed & Impl::kChargeLimitManual) != 0;
+    const auto limit = static_cast<unsigned>(packed & 0xFF);
+    if (manual == intent.manual && (!manual || limit == intent.limit)) return;
+
+    if (m_impl->m_lastChargeReapply != Clock::time_point{} &&
+        now - m_impl->m_lastChargeReapply < kReapplyInterval) {
+        return;
+    }
+    m_impl->m_lastChargeReapply = now;
+
+    const std::string wanted =
+        intent.manual ? "manual " + std::to_string(intent.limit) + "%" : std::string("smart");
+    LOG_INFO("Service", __func__, "Charge",
+             "Charge threshold was changed behind us (now {} {}%); restoring {}.",
+             manual ? "manual" : "smart", limit, wanted);
+    (void)ApplyChargeIntent(intent);
+}
+
 // 把 hal 的两份快照组装成托盘要读的那一份。
 //
 // 型号名直接用厂商固件串里带的那个，不再按 modelId 查本地表：本地表维护不动，也曾出过错。
@@ -1650,32 +1759,24 @@ void ServiceHost::HandlePenControlCommand(const PenControl::Command& command) {
                      "Rejecting out-of-range charge limit {}.",
                      static_cast<unsigned>(command.chargeLimit));
         } else {
-            const std::wstring host = ResolveHostPath(L"GaokunPower.exe");
-            wchar_t args[64];
-            if (handBack) {
-                swprintf_s(args, L"--smart");
-            } else {
-                swprintf_s(args, L"--limit %u", static_cast<unsigned>(command.chargeLimit));
-            }
-            if (host.empty() || !RunHalTool(host, args)) {
-                if (handBack) {
-                    LOG_WARN("Service", __func__, "PenControl",
-                             "Handing charging back to the vendor failed.");
-                } else {
-                    LOG_WARN("Service", __func__, "PenControl",
-                             "Charge limit {} failed to apply.",
-                             static_cast<unsigned>(command.chargeLimit));
-                }
-            } else if (handBack) {
+            // 吸附到厂商的六档再下发。设置窗的滑块本来就只停在这六个位置，这一步是为
+            // 版本不一致的那一对可执行文件准备的：旧版设置窗送来的 55 若原样写下去，会在
+            // 厂商插件下一次运行时被改成别的值，而用户完全看不出为什么。
+            const unsigned limit =
+                handBack ? 0u
+                         : static_cast<unsigned>(
+                               Gaokun::Power::SnapChargeLimit(command.chargeLimit));
+            if (!handBack && limit != command.chargeLimit) {
                 LOG_INFO("Service", __func__, "PenControl",
-                         "Charging handed back to the vendor's smart mode.");
-            } else {
-                LOG_INFO("Service", __func__, "PenControl", "Charge limit set to {}.",
-                         static_cast<unsigned>(command.chargeLimit));
+                         "Charge limit {} snapped to {}.",
+                         static_cast<unsigned>(command.chargeLimit), limit);
             }
-            // 无论成功与否都重读一次。失败时缓存要跟上硬件的真实值，否则界面会一直显示
-            // 用户刚才拖到的那个数字，而机器根本没有按它执行。
-            m_impl->RefreshChargeLimit();
+
+            ChargePolicy::Intent intent{};
+            intent.valid = true;
+            intent.manual = !handBack;
+            intent.limit = static_cast<uint8_t>(limit);
+            (void)ApplyChargeIntent(intent);
         }
     }
 
