@@ -346,16 +346,20 @@
 
       <!--
         只在卸载时跑，且必须早于 RemoveFiles：它要执行的正是马上要被删掉的那个托盘 exe。
-        REMOVE="ALL" 把升级排除在外——升级时 REP 也会走一遍卸载序列，那时把自启项还回去，
-        新版本装完就得让用户再禁用一次。
+        REMOVE="ALL" 单独挡不住升级：RemoveExistingProducts 移除旧版时，旧版的卸载序列同样
+        以 REMOVE=ALL 运行，条件照样成立，于是升级也把自启项还了回去，用户得再禁用一次。
+        分辨升级的是 UPGRADINGPRODUCTCODE——只有 REP 移除旧产品时 Windows Installer 才设它。
       -->
-      <Custom Action="RestoreVendorAutorun" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="RestoreVendorAutorun" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
 
       <!--
-        同样只在卸载时跑，同样必须早于 RemoveFiles——它执行的是即将被删掉的服务 exe。排在
-        自启项那条之后：两者互不依赖，但恢复服务要动 SCM，慢一些，放后面不挡住前一条。
+        同样只在真实卸载时跑，同样必须早于 RemoveFiles——它执行的是即将被删掉的服务 exe。
+        排在自启项那条之后：两者互不依赖，但恢复服务要动 SCM，慢一些，放后面不挡住前一条。
+        升级的排除理由同上。
       -->
-      <Custom Action="RestoreVendorServices" After="RestoreVendorAutorun" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="RestoreVendorServices" After="RestoreVendorAutorun"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
