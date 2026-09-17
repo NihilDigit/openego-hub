@@ -112,9 +112,24 @@ bool EqualsAsciiNoCase(std::wstring_view lhs, std::wstring_view rhs) {
 // redirectLocation 非空时要的不是响应体而是重定向目标：关掉自动跟随，只取回 Location。
 // 镜像那条路的版本号就藏在这个头里——ghfast 不代理 API（实测 403），能用的只有 github.com
 // 的 releases/latest 那一跳。
+// 超时分两档，判据是这次请求要搬多少字节。
+//
+// 直连不通在国内的典型形态不是立刻被拒，而是连上之后不回数据，或者干脆黑洞掉。等满一档
+// 大超时才落到镜像，用户点「检查更新」就会盯着「正在检查…」一分钟，再点也没用。所以解析
+// 与连接一律给 5 秒——5 秒内连不上的主机，也不可能好好地把两兆的安装包传完。
+//
+// 接收那一段才分档：查版本和取校验和都只有几十 KB，10 秒还没有数据就是不通了；下载慢链路
+// 上一段数据等上半分钟属于正常，仍留 60 秒。
+constexpr DWORD kResolveTimeoutMs = 5000;
+constexpr DWORD kConnectTimeoutMs = 5000;
+constexpr DWORD kSendTimeoutMs = 30000;
+constexpr DWORD kReceiveMetadataTimeoutMs = 10000;
+constexpr DWORD kReceiveBulkTimeoutMs = 60000;
+
 bool HttpGet(const std::wstring& url,
              const wchar_t* extraHeaders,
              uint64_t maxBytes,
+             bool bulkTransfer,
              const std::function<bool(const char*, DWORD)>& sink,
              std::wstring* redirectLocation,
              uint32_t& error) {
@@ -163,9 +178,8 @@ bool HttpGet(const std::wstring& url,
         error = GetLastError();
         return false;
     }
-    // 解析 / 连接 / 发送 / 接收。接收一段留 60 秒：下载走的是同一条路径，而慢链路上一段
-    // 数据等上半分钟是正常的。
-    WinHttpSetTimeouts(session.get(), 15000, 15000, 30000, 60000);
+    WinHttpSetTimeouts(session.get(), kResolveTimeoutMs, kConnectTimeoutMs, kSendTimeoutMs,
+                       bulkTransfer ? kReceiveBulkTimeoutMs : kReceiveMetadataTimeoutMs);
 
     InternetHandle connect(WinHttpConnect(session.get(), components.lpszHostName,
                                           components.nPort, 0));
@@ -288,7 +302,7 @@ bool HttpGet(const std::wstring& url,
 bool HttpGetText(const std::wstring& url, const wchar_t* extraHeaders, uint64_t maxBytes,
                  std::string& body, uint32_t& error) {
     body.clear();
-    return HttpGet(url, extraHeaders, maxBytes,
+    return HttpGet(url, extraHeaders, maxBytes, /*bulkTransfer=*/false,
                    [&body](const char* data, DWORD size) {
                        body.append(data, size);
                        return true;
@@ -298,7 +312,7 @@ bool HttpGetText(const std::wstring& url, const wchar_t* extraHeaders, uint64_t 
 
 bool HttpGetRedirect(const std::wstring& url, std::wstring& location, uint32_t& error) {
     location.clear();
-    return HttpGet(url, nullptr, 0, nullptr, &location, error);
+    return HttpGet(url, nullptr, 0, /*bulkTransfer=*/false, nullptr, &location, error);
 }
 
 bool HttpGetFile(const std::wstring& url, const std::wstring& path, uint64_t maxBytes,
@@ -310,7 +324,7 @@ bool HttpGetFile(const std::wstring& url, const std::wstring& path, uint64_t max
         return false;
     }
 
-    const bool ok = HttpGet(url, nullptr, maxBytes,
+    const bool ok = HttpGet(url, nullptr, maxBytes, /*bulkTransfer=*/true,
                             [file](const char* data, DWORD size) {
                                 DWORD written = 0;
                                 return WriteFile(file, data, size, &written, nullptr) != FALSE &&
