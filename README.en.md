@@ -51,6 +51,9 @@ disabled.
   comfort mode. The values reach the panel through the display driver, from its factory
   calibration.
 - **Services.** Status and start/stop control for Huawei's background services.
+- **Updates.** A periodic check for new releases; once you confirm, the download,
+  checksum and install happen inside the app, with no installer to fetch by hand. The
+  check can be turned off, and a version you do not want can be skipped.
 - **Device information.** Live battery level, charge state, attach state, firmware
   version and serial number for the pen and the keyboard; model, processor, memory and OS
   build for the machine itself.
@@ -145,6 +148,12 @@ come with them.
   automatically, with no manual uninstall needed first.
 - User configuration survives an upgrade: settings, logs, and the records needed to
   restore any Huawei services and autostart entries you disabled.
+- You can upgrade from the settings window: the background service downloads, verifies
+  and installs, the tray and the window step aside while it does, and both come back
+  afterwards.
+- Huawei components you disabled stay disabled across an upgrade. Coming from v0.4.0 or
+  earlier they are restored once more, because those versions' uninstall sequence is
+  already recorded on the machine.
 - Uninstalling hands touch back to the Huawei touch service and re-enables any Huawei
   background services and logon autostart entries that were disabled from the
   settings window.
