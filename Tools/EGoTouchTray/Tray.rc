@@ -25,7 +25,7 @@ BEGIN
         BLOCK "080404b0"
         BEGIN
             VALUE "CompanyName",      "OpenEGo Hub"
-            VALUE "FileDescription",  "OpenEGo Hub 托盘"
+            VALUE "FileDescription",  "OpenEGo Hub"
             VALUE "FileVersion",      OPENEGO_VERSION_STRING
             VALUE "InternalName",     "OpenEGoHubTray"
             VALUE "LegalCopyright",   "MIT License"
