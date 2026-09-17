@@ -347,6 +347,10 @@ bool Writer::Publish(const State& state) {
     staged.kbdBatteryLevel = state.kbdBatteryLevel;
     staged.chargeLimit = state.chargeLimit;
     staged.notificationKind = static_cast<uint8_t>(state.notificationKind);
+    staged.updateState = static_cast<uint8_t>(state.updateState);
+    staged.updateMajor = state.updateMajor;
+    staged.updateMinor = state.updateMinor;
+    staged.updatePatch = state.updatePatch;
     if (state.hasHostHealth) {
         staged.hostHealth = kHostHealthValid;
         if (state.penHostHealthy) staged.hostHealth |= kHostHealthPen;
@@ -479,6 +483,14 @@ bool Reader::Read(State& out) const {
             candidate.modelId = copy.modelId;
             candidate.notificationSequence = copy.notificationSequence;
             candidate.notificationKind = static_cast<NotificationKind>(copy.notificationKind);
+            // 越界值按 Idle 处理：这份字节来自共享内存，新服务加了状态而旧读者不认识时，
+            // 「没有更新」比一个越界的枚举安全。
+            candidate.updateState = copy.updateState <= static_cast<uint8_t>(UpdateState::Failed)
+                                        ? static_cast<UpdateState>(copy.updateState)
+                                        : UpdateState::Idle;
+            candidate.updateMajor = copy.updateMajor;
+            candidate.updateMinor = copy.updateMinor;
+            candidate.updatePatch = copy.updatePatch;
             candidate.updatedAtUnixMs = copy.updatedAtUnixMs;
             std::memcpy(candidate.modelName, copy.modelName, sizeof(candidate.modelName));
             candidate.modelName[kModelNameCapacity - 1] = '\0';

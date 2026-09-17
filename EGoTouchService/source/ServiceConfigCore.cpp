@@ -74,6 +74,8 @@ void RegisterServiceConfigBindings(Config::ConfigBinder& binder, ServiceConfigSt
                     PenButtonMode::WindowsInk, PenButtonModeMapping(), "Pen button semantic mode", runtimeBinding);
     binder.bindEnum("service.pen_button_route", &ServiceConfigState::penButtonRoute, state,
                     PenButtonRoute::VhfOnly, PenButtonRouteMapping(), "Pen button injection route", runtimeBinding);
+    binder.bind("service.auto_update_check", &ServiceConfigState::autoUpdateCheck, state,
+                true, {}, "Check GitHub for updates once a day", runtimeBinding);
 }
 
 const char* ServiceModeToConfig(ServiceMode mode) {
@@ -134,6 +136,7 @@ void ApplyConfig(ServiceConfigState& state, const Config::ConfigStore& store) {
     state.stylusVhfEnabled = store.getOr<bool>("service.stylus_vhf_enabled", state.stylusVhfEnabled);
     state.penButtonMode = ParsePenButtonMode(store, state.penButtonMode);
     state.penButtonRoute = ParsePenButtonRoute(store, state.penButtonRoute, state.penButtonRouteExplicit);
+    state.autoUpdateCheck = store.getOr<bool>("service.auto_update_check", state.autoUpdateCheck);
 }
 
 ReloadServiceConfigResult DiffServiceConfig(const ServiceConfigState& current,
@@ -148,6 +151,7 @@ ReloadServiceConfigResult DiffServiceConfig(const ServiceConfigState& current,
     const bool penButtonRouteChanged =
         (current.penButtonRoute != reloaded.penButtonRoute) ||
         (current.penButtonRouteExplicit != reloaded.penButtonRouteExplicit);
+    const bool autoUpdateCheckChanged = (current.autoUpdateCheck != reloaded.autoUpdateCheck);
 
     if (modeChanged) {
         result.changedFields |= ToServiceConfigFieldBit(ServiceConfigField::Mode);
@@ -164,6 +168,15 @@ ReloadServiceConfigResult DiffServiceConfig(const ServiceConfigState& current,
     }
     if (penButtonRouteChanged) {
         result.changedFields |= ToServiceConfigFieldBit(ServiceConfigField::PenButtonRoute);
+    }
+    if (autoUpdateCheckChanged) {
+        result.changedFields |= ToServiceConfigFieldBit(ServiceConfigField::AutoUpdateCheck);
+    }
+
+    // 自动检查开关不经 DeviceRuntime：它只影响更新线程下一轮要不要自己醒来，运行时在不在
+    // 都能生效，所以不在下面那个 runtimeAvailable 的门里。
+    if (autoUpdateCheckChanged) {
+        result.appliedFields |= ToServiceConfigFieldBit(ServiceConfigField::AutoUpdateCheck);
     }
 
     if (runtimeAvailable) {

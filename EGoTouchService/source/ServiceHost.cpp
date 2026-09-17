@@ -12,6 +12,7 @@
 #include "TouchProviderCoordinator.h"
 #include "VendorServices.h"
 #include "ChargePolicy.h"
+#include "UpdateChecker.h"
 #include "PenControlChannel.h"
 #include "PenStatusChannel.h"
 // gaokun-hal 的电池读取。充电阈值只有服务读得到——那条 WMI 通道要管理员权限，而设置窗
@@ -34,6 +35,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <cwchar>
 #include <exception>
@@ -233,6 +235,28 @@ struct ServiceHost::Impl {
     // 就是无条件的。放进去会让 Release 编译不过。
     std::mutex m_lastWakeEventMutex;
     std::optional<Host::SystemStateEvent> m_lastWakeEvent;
+
+    // ── 更新 ──
+    // 工作线程与它的命令信箱。信箱只留最后一条：连点两次「立即检查」没有排队的意义，
+    // 而排队会让第二次在第一次刚结束时立刻再打一遍 GitHub。
+    std::thread m_updateThread;
+    std::mutex m_updateMutex;
+    std::condition_variable m_updateCv;
+    bool m_updateStop = false;
+    PenControl::UpdateCommand m_updateRequest = PenControl::UpdateCommand::None;
+    // 最近一次查到、且尚未被跳过的版本。Install 要用它的下载地址，所以整份留着而不是
+    // 只留版本号——再查一次才能拿到地址的话，用户点安装到真的开始下载之间又多一处会失败
+    // 的网络往返。由 m_updateMutex 保护。
+    Update::ReleaseInfo m_updateRelease;
+    bool m_updateReleaseValid = false;
+
+    // 发布给托盘的两项。工作线程写，状态发布路径读。
+    std::atomic<PenStatus::UpdateState> m_updateState{PenStatus::UpdateState::Idle};
+    // major<<16 | minor<<8 | patch。打包成一个原子而不是三个字节，理由与充电阈值缓存
+    // 相同：拆开会让界面读到一个新旧混合的版本号。
+    std::atomic<uint32_t> m_updateVersion{0};
+    // service.auto_update_check 的镜像。配置路径写，工作线程读。
+    std::atomic<bool> m_autoUpdateCheck{true};
 };
 
 // ── 设备路径 ──
@@ -563,6 +587,10 @@ bool ServiceHost::InitializeConfigStores() {
 }
 // ── 模式解析 ──────────────────────────────────────────
 void ServiceHost::ApplyServiceConfigToRuntime(const ServiceConfigState& config) {
+    // 更新开关先落，再看运行时在不在：它只影响更新线程要不要自己醒来，与 DeviceRuntime
+    // 无关。放在下面那个 return 之后会让运行时缺席时这个键永远应用不上。
+    m_impl->m_autoUpdateCheck.store(config.autoUpdateCheck, std::memory_order_release);
+
     if (!m_deviceRuntime) return;
 
     m_deviceRuntime->ApplyServicePolicy(
@@ -707,6 +735,9 @@ bool ServiceHost::StartRuntimeAndPipeline() {
 
     // 控制线程在 runtime 对象和 provider coordinator 都发布之后才启动。
     StartPenControlChannel();
+    StartUpdateWorker();
+    // 托盘要向 coordinator 申请租约，所以拉它之前上面两步必须都已就绪。
+    RelaunchTrayAfterUpdate();
 
     LOG_INFO("Service", __func__, "Boot",
              "Touch provider supervisor ready; awaiting tray lease.");
@@ -1509,6 +1540,14 @@ void ServiceHost::PublishStatusSnapshot() {
     out.vendorServicesRunning = vendor.running > 0;
     out.vendorServicesAllRunning = vendor.total > 0 && vendor.running == vendor.total;
 
+    // 更新。版本号无条件转发：Idle 与 Checking 之外的状态才要求它有意义，而清零一次反而
+    // 会让界面在 Available 到 Downloading 的切换中间闪一下 0.0.0。
+    out.updateState = m_impl->m_updateState.load(std::memory_order_acquire);
+    const uint32_t updateVersion = m_impl->m_updateVersion.load(std::memory_order_acquire);
+    out.updateMajor = static_cast<uint8_t>((updateVersion >> 16) & 0xFF);
+    out.updateMinor = static_cast<uint8_t>((updateVersion >> 8) & 0xFF);
+    out.updatePatch = static_cast<uint8_t>(updateVersion & 0xFF);
+
     // 充电阈值读缓存，不在这条路径上走 WMI，理由见 m_chargeLimitCache 的说明。
     const uint32_t charge = m_impl->m_chargeLimitCache.load(std::memory_order_relaxed);
     if ((charge & Impl::kChargeLimitValid) != 0) {
@@ -1824,6 +1863,316 @@ void ServiceHost::HandlePenControlCommand(const PenControl::Command& command) {
             }
         }
     }
+
+    // 更新。这里只把命令投进工作线程的信箱：检查要一次网络往返，下载按分钟计，而本线程
+    // 同时在给触控租约打点，阻塞几十秒就会让触控当场交还原厂。
+    if (command.hasUpdate) {
+        switch (command.update) {
+        case PenControl::UpdateCommand::CheckNow:
+        case PenControl::UpdateCommand::Install:
+        case PenControl::UpdateCommand::Skip: {
+            {
+                std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+                m_impl->m_updateRequest = command.update;
+            }
+            m_impl->m_updateCv.notify_one();
+            break;
+        }
+        // 开关不走信箱：信箱只有一格，把它塞进去会顶掉一条还没执行的 CheckNow。落地动作
+        // 只是一次注册表写，在这条线程上做完不会把租约打点拖住。
+        case PenControl::UpdateCommand::EnableAutoCheck:
+            ApplyAutoUpdateCheck(true, "PenControl");
+            break;
+        case PenControl::UpdateCommand::DisableAutoCheck:
+            ApplyAutoUpdateCheck(false, "PenControl");
+            break;
+        default:
+            LOG_WARN("Service", __func__, "Update", "Rejecting unknown update command {}.",
+                     static_cast<unsigned>(command.update));
+            break;
+        }
+    }
+}
+
+// ── 更新 ─────────────────────────────────────────────────────────────────────
+//
+// 状态机只有一条主线：Idle -> Checking -> Available -> Downloading -> Installing。
+// 任何一步失败都落到 Failed，下一次检查把它带回 Checking。Failed 不带原因，界面只说失败
+// ——WinHTTP 的错误码对用户没有可操作性，要查的人看这里的日志。
+
+void ServiceHost::PublishUpdateState(PenStatus::UpdateState state) {
+    m_impl->m_updateState.store(state, std::memory_order_release);
+    RepublishPenStatus();
+}
+
+void ServiceHost::RunUpdateCheck(bool manual) {
+    PublishUpdateState(PenStatus::UpdateState::Checking);
+
+    uint32_t error = 0;
+    const auto release = Update::FetchLatestRelease(error);
+    if (!release) {
+        LOG_WARN("Service", __func__, "Update", "Update check failed (err={}).", error);
+        PublishUpdateState(PenStatus::UpdateState::Failed);
+        return;
+    }
+
+    const auto current = Update::CurrentVersion();
+    if (!(release->version > current)) {
+        LOG_INFO("Service", __func__, "Update", "Already up to date ({} >= {}).",
+                 Update::ToString(current), Update::ToString(release->version));
+        {
+            std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+            m_impl->m_updateReleaseValid = false;
+        }
+        m_impl->m_updateVersion.store(0, std::memory_order_release);
+        PublishUpdateState(PenStatus::UpdateState::Idle);
+        return;
+    }
+
+    // 跳过的是某一个版本，不是「以后都别提示了」。比它更新的版本照常提示。
+    const auto skipped = Update::LoadSkippedVersion();
+    if (skipped && *skipped >= release->version) {
+        LOG_INFO("Service", __func__, "Update", "Version {} is available but skipped.",
+                 Update::ToString(release->version));
+        {
+            std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+            m_impl->m_updateReleaseValid = false;
+        }
+        m_impl->m_updateVersion.store(0, std::memory_order_release);
+        PublishUpdateState(PenStatus::UpdateState::Idle);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+        m_impl->m_updateRelease = *release;
+        m_impl->m_updateReleaseValid = true;
+    }
+    m_impl->m_updateVersion.store(
+        (static_cast<uint32_t>(release->version.major) << 16) |
+            (static_cast<uint32_t>(release->version.minor) << 8) |
+            static_cast<uint32_t>(release->version.patch),
+        std::memory_order_release);
+
+    LOG_INFO("Service", __func__, "Update", "Version {} is available (current {}, {} check).",
+             Update::ToString(release->version), Update::ToString(current),
+             manual ? "manual" : "scheduled");
+    PublishUpdateState(PenStatus::UpdateState::Available);
+}
+
+void ServiceHost::RunUpdateInstall() {
+    Update::ReleaseInfo release{};
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+        if (!m_impl->m_updateReleaseValid) {
+            LOG_WARN("Service", __func__, "Update",
+                     "Dropping the install command: no update has been found.");
+            return;
+        }
+        release = m_impl->m_updateRelease;
+    }
+
+    PublishUpdateState(PenStatus::UpdateState::Downloading);
+
+    uint32_t error = 0;
+    std::wstring msiPath;
+    if (!Update::DownloadAndVerify(release, msiPath, error)) {
+        LOG_ERROR("Service", __func__, "Update",
+                  "Download or verification of version {} failed (err={}).",
+                  Update::ToString(release.version), error);
+        PublishUpdateState(PenStatus::UpdateState::Failed);
+        return;
+    }
+
+    // 托盘和设置窗各自锁着自己的 exe，安装前必须退出，那一步由界面侧在提交 Install 之后
+    // 自己做。这里只把开始安装的时刻记下来：事后要判断「MSI 是不是在服务被停掉时半途而废」，
+    // 靠的就是这条与服务停止日志的先后。
+    LOG_INFO("Service", __func__, "Update", "Starting the silent install of version {}.",
+             Update::ToString(release.version));
+    PublishUpdateState(PenStatus::UpdateState::Installing);
+
+    // 标记必须在拉起之前落下：msiexec 随时会停掉本服务，之后这条线程还能不能跑到下一行
+    // 是没有保证的。
+    Update::MarkTrayRelaunchPending();
+
+    if (!Update::LaunchInstaller(msiPath, error)) {
+        // 没装成就把标记撤掉，否则此后任何一次普通重启都会把用户主动退掉的托盘拉回来。
+        Update::ClearTrayRelaunchPending();
+        LOG_ERROR("Service", __func__, "Update", "Cannot start msiexec (err={}).", error);
+        PublishUpdateState(PenStatus::UpdateState::Failed);
+        return;
+    }
+    // 这里不再改状态：msiexec 接下来会停掉本服务，Installing 是托盘能看到的最后一帧。
+}
+
+void ServiceHost::SkipAvailableUpdate() {
+    Update::Version version{};
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+        if (!m_impl->m_updateReleaseValid) {
+            LOG_WARN("Service", __func__, "Update",
+                     "Dropping the skip command: no update has been found.");
+            return;
+        }
+        version = m_impl->m_updateRelease.version;
+        m_impl->m_updateReleaseValid = false;
+    }
+
+    Update::StoreSkippedVersion(version);
+    m_impl->m_updateVersion.store(0, std::memory_order_release);
+    LOG_INFO("Service", __func__, "Update", "Version {} skipped.", Update::ToString(version));
+    PublishUpdateState(PenStatus::UpdateState::Idle);
+}
+
+void ServiceHost::ApplyAutoUpdateCheck(bool enabled, const char* source) {
+    {
+        // 这把锁护的是 m_configState 的读改写，不只是侧键那一项（名字比职责窄了一点）。
+        // 另起一把会让两条路径各改 m_configState 的一半，回写时互相盖掉。
+        std::lock_guard<std::mutex> lk(m_impl->m_penButtonApplyMutex);
+        m_configState.autoUpdateCheck = enabled;
+        // 与 ApplyPenButtonMode 走同一个入口：配置状态改完要回写，否则下一次配置重载会
+        // 拿旧值把它盖回去。
+        m_configRuntime.WriteServiceState(m_configState);
+        ApplyServiceConfigToRuntime(m_configState);
+    }
+
+    // 落盘用 HKLM 而不是配置体系：持久化配置文件在这棵树上已经取消（ConfigRuntime 里那两条
+    // WARN），而跳过的版本本来就记在 HKLM\SOFTWARE\OpenEGoHub\Update 下，更新相关的持久化
+    // 状态放在同一个键里，比再开一处少一条要对齐的路径。
+    Update::StoreAutoCheck(enabled);
+
+    // 关掉时工作线程等在一个没有到期时间的 wait 上，不叫醒它，开关要等下一条命令才生效。
+    // 叫醒之后它重读镜像：到期时间早已过去，于是开启这个开关顺带触发一次检查，这正是用户
+    // 打开它时想看到的结果。
+    m_impl->m_updateCv.notify_one();
+
+    LOG_INFO("Service", __func__, "Update", "{}: automatic update check {}.", source,
+             enabled ? "enabled" : "disabled");
+}
+
+// 升级装完之后把托盘拉回来。
+//
+// 安装包那侧做不到：LaunchTray 挂在安装向导结束页的 Finish 按钮上，而 /qn 没有那个页面。
+// 丢的不只是托盘图标——触控租约在托盘手里，没有托盘就没人续租，装完之后触控一直停在
+// 交还状态。
+//
+// 只在标记置位时拉，不做成「托盘不在就拉起」：用户可以主动退出托盘，无条件重启会跟那个
+// 意图打架。标记只由本服务拉起 msiexec 的那一次置位。
+void ServiceHost::RelaunchTrayAfterUpdate() {
+    if (!Update::TakeTrayRelaunchPending()) return;
+
+    const std::wstring tray = ResolveHostPath(L"OpenEGoHubTray.exe");
+    if (tray.empty()) {
+        LOG_WARN("Service", __func__, "Update",
+                 "Update finished but OpenEGoHubTray.exe was not found next to the service.");
+        return;
+    }
+
+    uint32_t error = 0;
+    if (Update::LaunchTrayInActiveSession(tray, error)) {
+        LOG_INFO("Service", __func__, "Update", "Tray relaunched after the update.");
+    } else if (error == 0) {
+        // 没人登录。托盘的 HKCU 自启项会在下次登录时把它带回来，这里不重试也不报错。
+        LOG_INFO("Service", __func__, "Update",
+                 "Update finished with no interactive session; the tray will start at the "
+                 "next logon.");
+    } else {
+        LOG_WARN("Service", __func__, "Update",
+                 "Cannot relaunch the tray after the update (err={}).", error);
+    }
+}
+
+void ServiceHost::UpdateWorkerMain() {
+    using Clock = std::chrono::steady_clock;
+
+    constexpr auto kInterval = std::chrono::hours(24);
+    // 检查失败后一小时再来，不等满 24 小时：最常见的失败是开机那一刻网络还没就绪，
+    // 而那种失败下让用户一整天看不到新版本没有道理。
+    constexpr auto kRetryInterval = std::chrono::hours(1);
+    // 启动后的首查推迟这么久，同样是为了不撞上网络栈还没起来的那一段。首查不放在 Start
+    // 的同步路径上：那条路径上多一次网络往返，ServiceMain 报 RUNNING 就要晚那么久，
+    // 安装程序会停在「正在启动服务」（充电阈值首读挪进 AccessoryLoop 是同一个理由）。
+    constexpr auto kInitialDelay = std::chrono::seconds(30);
+
+    auto nextCheck = Clock::now() + kInitialDelay;
+
+    std::unique_lock<std::mutex> lock(m_impl->m_updateMutex);
+    while (!m_impl->m_updateStop) {
+        const bool autoCheck = m_impl->m_autoUpdateCheck.load(std::memory_order_acquire);
+        if (m_impl->m_updateRequest == PenControl::UpdateCommand::None) {
+            // 自动检查关掉时不设到期时间，只等命令：留一个 24 小时的空转唤醒没有意义。
+            if (autoCheck) {
+                m_impl->m_updateCv.wait_until(lock, nextCheck);
+            } else {
+                m_impl->m_updateCv.wait(lock);
+            }
+            if (m_impl->m_updateStop) break;
+        }
+
+        const auto request = m_impl->m_updateRequest;
+        m_impl->m_updateRequest = PenControl::UpdateCommand::None;
+
+        const bool due = autoCheck && Clock::now() >= nextCheck;
+        if (request == PenControl::UpdateCommand::None && !due) {
+            continue;  // 伪唤醒
+        }
+
+        // 动作本身不能持锁：一次检查是几秒的网络往返，一次下载按分钟计，而控制线程要拿
+        // 这把锁才投得进下一条命令。
+        lock.unlock();
+        bool checked = false;
+        switch (request) {
+        case PenControl::UpdateCommand::Install:
+            RunUpdateInstall();
+            break;
+        case PenControl::UpdateCommand::Skip:
+            SkipAvailableUpdate();
+            break;
+        default:
+            RunUpdateCheck(request == PenControl::UpdateCommand::CheckNow);
+            checked = true;
+            break;
+        }
+        lock.lock();
+
+        if (checked) {
+            const bool failed =
+                m_impl->m_updateState.load(std::memory_order_acquire) ==
+                PenStatus::UpdateState::Failed;
+            nextCheck = Clock::now() + (failed ? kRetryInterval : kInterval);
+        }
+    }
+}
+
+void ServiceHost::StartUpdateWorker() {
+    // 落盘的选择优先于配置里的默认值：用户在托盘里关掉过自动检查，重启之后必须还是关的。
+    // 从未设过时 LoadAutoCheck 返回 nullopt，这时才用 service.auto_update_check。
+    if (const auto persisted = Update::LoadAutoCheck()) {
+        m_configState.autoUpdateCheck = *persisted;
+    }
+    // 开关在这里取一次基线。此后配置路径改它会经 ApplyServiceConfigToRuntime 的镜像生效。
+    m_impl->m_autoUpdateCheck.store(m_configState.autoUpdateCheck, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+        m_impl->m_updateStop = false;
+        m_impl->m_updateRequest = PenControl::UpdateCommand::None;
+    }
+    m_impl->m_updateThread = std::thread([this] { UpdateWorkerMain(); });
+    LOG_INFO("Service", __func__, "Update", "Update worker started (auto check: {}).",
+             m_configState.autoUpdateCheck);
+}
+
+void ServiceHost::StopUpdateWorker() {
+    {
+        std::lock_guard<std::mutex> lk(m_impl->m_updateMutex);
+        m_impl->m_updateStop = true;
+    }
+    m_impl->m_updateCv.notify_all();
+    if (m_impl->m_updateThread.joinable()) {
+        // 一次下载最长能拖到超时上限，停机要等它走完。这条线程不碰任何别的子系统，等在
+        // 这里只是让停止慢一点，而中途丢下一个写了一半的 MSI 更难收拾。
+        m_impl->m_updateThread.join();
+    }
 }
 
 namespace {
@@ -1909,6 +2258,10 @@ void ServiceHost::StopPenControlChannel() {
 }
 
 void ServiceHost::StopRuntimeSubsystem() {
+    // 更新线程只碰自己的成员，但它会调 RepublishPenStatus，所以必须在状态通道还活着的
+    // 时候退掉，位置与 StartRuntimeAndPipeline 里的创建对称。
+    StopUpdateWorker();
+
     // 控制通道的线程会调进 DeviceRuntime，必须先于它退出，且与 StartRuntimeAndPipeline
     // 里的创建位置对称。DeviceRuntime 不在时这里是空操作。
     StopPenControlChannel();

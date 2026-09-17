@@ -42,6 +42,9 @@ inline constexpr uint32_t kFlagHasChargeLimit = 1u << 4;
 inline constexpr uint32_t kFlagHasColorMode = 1u << 5;
 // 华为后台服务的总开关。只有服务有权改 SCM 配置，托盘做不到。
 inline constexpr uint32_t kFlagHasVendorServices = 1u << 6;
+// 自动更新。检查、下载和安装都由服务做：它在 LocalSystem 下常驻、有网络，也是唯一能执行
+// msiexec 的进程。托盘只负责把用户的决定送过来。
+inline constexpr uint32_t kFlagHasUpdate = 1u << 7;
 
 enum class ProviderLeaseCommand : uint8_t {
     None = 0,
@@ -78,6 +81,23 @@ enum class VendorServicesCommand : uint8_t {
     Restore,
 };
 
+// 更新。同样用 None 表示「这条提交与更新无关」，与 flags 位构成双重判据。
+//
+// Skip 跳过的是服务此刻已经查到的那个版本，命令本身不带版本号：托盘看到的版本正是服务
+// 发布的那一个，再送回来只会多出一处可能对不上的地方。更新的版本出现时照常提示。
+enum class UpdateCommand : uint8_t {
+    None = 0,
+    CheckNow,  // 立即查一次，不受自动检查开关影响
+    Install,   // 下载、校验哈希、静默安装
+    Skip,      // 记下当前这个版本，之后不再为它提示
+    // 自动检查的开关。它不是一次性命令，但仍然得走这条通道：开关要落进服务的配置
+    // （service.auto_update_check），而服务跑在 LocalSystem，读不到用户 hive 里的那一份。
+    // 拆成两个值而不是加一个字节的参数，是因为 Payload 的对齐空隙已经被 update 用掉了，
+    // 再加字段会撑破 Snapshot 那条 32 字节的 static_assert。取值只追加、不插入。
+    EnableAutoCheck,
+    DisableAutoCheck,
+};
+
 struct Payload {
     uint32_t flags = 0;
     // 写者每次提交递增。Host 只在看到新值时应用一次，重启后的服务把当前值当作已消费,
@@ -96,7 +116,9 @@ struct Payload {
     uint8_t  chargeLimit = 0;
     uint8_t  colorMode = 0;        // ColorModeCommand，valid with kFlagHasColorMode
     uint8_t  vendorServices = 0;   // VendorServicesCommand，valid with kFlagHasVendorServices
-    uint8_t  _reserved = 0;        // 对齐空隙的最后一个字节，留给下一个开关
+    // 对齐空隙里的最后一个字节。用掉它之后 Payload 再加字段就会撑大 Snapshot，
+    // 那时必须递增 kAbiVersion——32 字节这条 static_assert 会先拦下来。
+    uint8_t  update = 0;           // UpdateCommand，valid with kFlagHasUpdate
     uint64_t submittedAtUnixMs = 0;
 };
 static_assert(std::is_trivially_copyable_v<Payload>,
@@ -135,6 +157,8 @@ struct Command {
     ColorModeCommand colorMode = ColorModeCommand::None;
     bool     hasVendorServices = false;
     VendorServicesCommand vendorServices = VendorServicesCommand::None;
+    bool     hasUpdate = false;
+    UpdateCommand update = UpdateCommand::None;
     uint32_t revision = 0;
     uint64_t submittedAtUnixMs = 0;
 };
@@ -199,6 +223,7 @@ public:
     bool SubmitChargeLimit(uint8_t percent);
     bool SubmitColorMode(ColorModeCommand command);
     bool SubmitVendorServices(VendorServicesCommand command);
+    bool SubmitUpdate(UpdateCommand command);
 
 private:
     HANDLE m_mapping = nullptr;

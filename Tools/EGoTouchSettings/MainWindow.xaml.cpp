@@ -4,6 +4,7 @@
 #include "AccessoryImageLoader.h"
 #include "AppIconResource.h"
 #include "DeviceInfo.h"
+#include "AppVersion.h"
 #include "LogExport.h"
 // gaokun-hal 的电池读取。电量、容量、健康度、循环次数都不需要提权，本进程直接读；
 // 只有充电阈值要管理员权限，那一项由服务读了经状态通道送回来。
@@ -143,6 +144,27 @@ IAsyncOperation<Media::Imaging::BitmapImage> DecodeImageAsync(std::span<const ui
 winrt::hstring ChargeLimitStatusFor(bool smart) {
     return smart ? L"智能充电固定为 70%，连续接电满 72 小时后生效。"
                  : L"长期插电时限制充电上限可以减缓电池老化。";
+}
+
+// 版本号在状态通道里是三个字节。打包成一个整数只为回答「还是不是同一个版本」，不参与显示。
+uint32_t PackUpdateVersion(PenStatus::State const& state) {
+    return (static_cast<uint32_t>(state.updateMajor) << 16) |
+           (static_cast<uint32_t>(state.updateMinor) << 8) |
+           static_cast<uint32_t>(state.updatePatch);
+}
+
+winrt::hstring FormatUpdateVersion(PenStatus::State const& state) {
+    return winrt::to_hstring(static_cast<int>(state.updateMajor)) + L"." +
+           winrt::to_hstring(static_cast<int>(state.updateMinor)) + L"." +
+           winrt::to_hstring(static_cast<int>(state.updatePatch));
+}
+
+// 本程序自己的版本。取 AppVersion.h 的三个数而不是读 exe 的 VERSIONINFO：那份资源读得到
+// 与否取决于构建，而这三个数与安装包同源，配置阶段有断言盯着。
+winrt::hstring CurrentVersionText() {
+    return winrt::to_hstring(OPENEGO_VERSION_MAJOR) + L"." +
+           winrt::to_hstring(OPENEGO_VERSION_MINOR) + L"." +
+           winrt::to_hstring(OPENEGO_VERSION_PATCH);
 }
 
 // SMBIOS 的日期是 MM/DD/YYYY。它紧挨着 BIOS 版本号显示，原样留着容易被当成另一个版本号。
@@ -485,6 +507,9 @@ void MainWindow::ActivateWindow() {
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
     Activate();
     SetForegroundWindow(hwnd);
+    // 托盘的「有新版本」气泡就是经这条路把窗口叫起来的，而更新的弹窗要等窗口真的显示出来
+    // 才敢弹。立刻刷一次，用户不必对着面板再等一拍轮询。
+    if (m_uiReady) RefreshState();
 }
 
 DWORD MainWindow::ReadUserSetting(const wchar_t* name, DWORD fallback) {
@@ -518,6 +543,10 @@ void MainWindow::LoadStoredSettings() {
         ReadUserSetting(L"OneNoteCompatibility", 1) != 0);
     AutoStartToggle().IsOn(ReadUserSetting(L"AutoStart", 1) != 0);
     DeviceNotificationsToggle().IsOn(ReadUserSetting(L"DeviceNotifications", 1) != 0);
+    // 生效的那份在服务的配置里（service.auto_update_check），但服务不把它发布到状态通道，
+    // 这里读不回来。显示的是托盘每次改动时记下的那一份，与色域、色温几项同理——不要误以为
+    // 这个开关的显示值来自回读，绕过界面改服务配置时两边就会不一致。
+    AutoUpdateCheckToggle().IsOn(ReadUserSetting(L"AutoUpdateCheck", 1) != 0);
     ApplyTheme(ThemeFromSetting(ReadUserSetting(kThemeSettingName, 0)));
 
     // 充电阈值这里只放一个占位值，真实值随后由状态通道送来（见 RefreshControls）——读它
@@ -1429,6 +1458,10 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
         HideStatus();
     }
 
+    // 放在最后：更新那一格可能在安装开始时把窗口关掉，后面再碰控件就是对着正在销毁的
+    // 视觉树操作。
+    RefreshUpdateRow(state);
+
     m_updatingControls = false;
 }
 
@@ -1451,6 +1484,205 @@ void MainWindow::BeginChargeLimitEcho(uint8_t requested) {
     m_chargeLimitEchoDeadline = GetTickCount64() + 2000;
 }
 
+// UpdateState 到界面的唯一映射：状态文字、两个按钮的可用性、三个动作的显隐都从同一份状态
+// 算出来。分散到各个点击处理里各改一处的话，每加一个状态都要记得改四个地方。
+void MainWindow::RefreshUpdateRow(const PenStatus::State* state) {
+    const bool interactive = m_trayConnected && !m_exitPending;
+
+    if (!state) {
+        // 检查、下载、安装，以及自动检查这个开关本身，全都要经控制通道送给服务，读不到
+        // 状态通道就说明服务不在，四件事一件也做不成。开关一并置灰：提交必然失败，而失败
+        // 的表现是开关自己弹回去，不如一开始就不让点。
+        UpdateStatusText().Text(L"未连接服务。");
+        UpdateCheckButton().IsEnabled(false);
+        AutoUpdateCheckToggle().IsEnabled(false);
+        return;
+    }
+
+    // 安装期间必须退出：MSI 要覆盖的正是本进程锁着的 exe。按进入 Installing 的那一次边沿
+    // 判断，不按状态本身——服务若停在这个状态上，按状态判会让设置窗每次打开都立刻自己关掉。
+    if (m_lastUpdateStateValid &&
+        state->updateState == PenStatus::UpdateState::Installing &&
+        m_lastUpdateState != PenStatus::UpdateState::Installing) {
+        Close();
+        return;
+    }
+    m_lastUpdateState = state->updateState;
+    m_lastUpdateStateValid = true;
+    m_updateVersion = PackUpdateVersion(*state);
+
+    if (m_updateAwaitingEcho &&
+        (state->updateState != m_updatePendingFrom ||
+         GetTickCount64() >= m_updateEchoDeadline)) {
+        m_updateAwaitingEcho = false;
+    }
+
+    // 版本号为 0 表示服务没发布过版本，那不是一个可以被「稍后」关掉的东西。
+    const bool dismissed =
+        m_updateVersion != 0 && m_updateVersion == m_updateDismissedVersion;
+    // 等回显期间不弹：那一小段显示的是本地意图，此时再弹一次询问等于问用户刚刚答过的问题。
+    const bool available = state->updateState == PenStatus::UpdateState::Available &&
+                           !dismissed && !m_updateAwaitingEcho;
+    // 服务正在做事的三个状态，加上刚提交还没回显的那一小段。手动检查在这期间不可点：
+    // 再发一次只会排在后面，而按钮亮着看起来像上一次没生效。
+    const bool busy = m_updateAwaitingEcho ||
+                      state->updateState == PenStatus::UpdateState::Checking ||
+                      state->updateState == PenStatus::UpdateState::Downloading ||
+                      state->updateState == PenStatus::UpdateState::Installing;
+
+    if (m_updateAwaitingEcho) {
+        UpdateStatusText().Text(m_updatePendingText);
+    } else {
+        switch (state->updateState) {
+        case PenStatus::UpdateState::Checking:
+            UpdateStatusText().Text(L"正在检查…");
+            break;
+        case PenStatus::UpdateState::Available:
+            // 弹窗关掉之后这一行仍然写着有哪一版可装，入口因此不会丢——再点一次「检查更新」
+            // 就能把弹窗叫回来。
+            UpdateStatusText().Text(
+                hstring{L"新版本 "} + FormatUpdateVersion(*state) + L" 可以安装。");
+            break;
+        case PenStatus::UpdateState::Downloading:
+            // 只报进度，不在这里预告窗口会关。安装期间的交代全部由托盘的气泡承担：窗口在
+            // 安装一开始就没了，写在它上面的话读不读得到全看时机。
+            UpdateStatusText().Text(L"正在下载…");
+            break;
+        case PenStatus::UpdateState::Installing:
+            UpdateStatusText().Text(L"正在安装…");
+            break;
+        case PenStatus::UpdateState::Failed:
+            // 不摆错误码：用户能做的只有再试一次，WinHTTP 的返回值帮不上忙，要查的人看服务日志。
+            UpdateStatusText().Text(L"检查失败。");
+            break;
+        default:
+            UpdateStatusText().Text(L"已是最新版本。");
+            break;
+        }
+    }
+
+    UpdateCheckButton().IsEnabled(interactive && !busy);
+    AutoUpdateCheckToggle().IsEnabled(interactive);
+
+    // 弹窗的触发点只有这一处，自动检查发现的和手动检查查到的走同一条路。
+    //
+    // 两个前置条件不能省：窗口没显示出来时不弹——托盘为了弹接入提示会用 --background 起一个
+    // 不激活的实例，那时弹出的对话框用户看不见，却会占住「同一时刻只能有一个 ContentDialog」
+    // 这个名额，等用户真的打开面板时反而弹不出来；XamlRoot 为空时同样不弹，构造过程中
+    // 第一次刷新就落在这个窗口里，那时视觉树还没挂上，ShowAsync 会直接抛。两种情况都只是
+    // 这一拍不弹，下一拍轮询照旧。
+    if (available && m_updateVersion != m_updatePromptedVersion && !m_updateDialogOpen &&
+        IsWindowVisible(WindowHandle()) && RootLayout().XamlRoot()) {
+        m_updatePromptedVersion = m_updateVersion;
+        ShowUpdateDialog(m_updateVersion, FormatUpdateVersion(*state));
+    }
+}
+
+// 兜底期限取 3 秒：服务每 250 ms 轮询一次控制通道，而检查本身还要发一次网络请求，比充电
+// 阈值那条长。到期之后无论有没有回显都交还给状态通道，免得界面一直停在本地意图上。
+void MainWindow::BeginUpdateEcho(PenStatus::UpdateState from, hstring const& text) {
+    m_updatePendingFrom = from;
+    m_updatePendingText = text;
+    m_updateAwaitingEcho = true;
+    m_updateEchoDeadline = GetTickCount64() + 3000;
+}
+
+void MainWindow::AutoUpdateCheckToggled(IInspectable const&, RoutedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    const bool requested = AutoUpdateCheckToggle().IsOn();
+    if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetAutoUpdateCheck, requested)) {
+        m_updatingControls = true;
+        AutoUpdateCheckToggle().IsOn(!requested);
+        m_updatingControls = false;
+        ShowError(L"无法修改自动检查更新", L"托盘没有响应，设置没有生效。");
+        return;
+    }
+    // 说明文字里写着这个开关的状态，立刻刷一次，不等下一拍轮询。
+    RefreshState();
+}
+
+void MainWindow::CheckForUpdatesClicked(IInspectable const&, RoutedEventArgs const&) {
+    if (!m_uiReady) return;
+    if (!SendTrayCommand(EGoTouchTrayIpc::Command::CheckForUpdates)) {
+        ShowError(L"无法检查更新", L"托盘没有响应，请求没有送达。");
+        return;
+    }
+    // 手动检查同时也是「把弹窗叫回来」的入口：两个记号一起清掉，查到的版本即便是刚才被
+    // 「稍后」关掉的那一个，也会重新问一次。用户主动点了这个按钮，就是想看到结果。
+    m_updateDismissedVersion = 0;
+    m_updatePromptedVersion = 0;
+    // 服务要过一轮才把状态发布成 Checking，这段时间里通道里还是旧值；不挡住的话按钮会
+    // 立刻亮回来，看起来像是没点上。
+    BeginUpdateEcho(m_lastUpdateState, L"正在检查…");
+    RefreshState();
+}
+
+// 升级、稍后、跳过三个动作做成对话框，而不是卡片里并排的三个按钮：这是一次要当场回答的
+// 询问，摆在卡片上就成了一排随时都在、也随时可以不理的选项。
+//
+// 关掉弹窗按「稍后」处理。ContentDialog 的 CloseButton、ESC 和标题栏都归到同一个结果上，
+// 三条路的语义本来就是同一个「现在不装」。
+winrt::fire_and_forget MainWindow::ShowUpdateDialog(uint32_t version, hstring versionText) {
+    if (m_updateDialogOpen) co_return;
+    const auto lifetime = get_strong();
+    m_updateDialogOpen = true;
+
+    ContentDialog dialog;
+    dialog.XamlRoot(RootLayout().XamlRoot());
+    // 对话框挂在 XamlRoot 上，不在 RootLayout 的子树里，主题得单独给。
+    dialog.RequestedTheme(RootLayout().RequestedTheme());
+    dialog.Title(box_value(hstring{L"有新版本 "} + versionText));
+    // 正文只给决策要用的另一半信息：当前装的是哪一版。升级之后会发生什么由托盘的两条气泡
+    // 交代，写在这里等于让用户读一段他做完选择就看不到的说明。
+    dialog.Content(box_value(hstring{L"当前版本 "} + CurrentVersionText() + L"。"));
+    dialog.PrimaryButtonText(L"升级");
+    dialog.SecondaryButtonText(L"跳过此版本");
+    dialog.CloseButtonText(L"稍后");
+    dialog.DefaultButton(ContentDialogButton::Primary);
+
+    const ContentDialogResult result = co_await dialog.ShowAsync();
+    m_updateDialogOpen = false;
+
+    switch (result) {
+    case ContentDialogResult::Primary:
+        RequestUpdateInstall();
+        break;
+    case ContentDialogResult::Secondary:
+        RequestUpdateSkip();
+        break;
+    default:
+        // 「稍后」不提交任何命令，也不落盘：只把这一版的提示收起来，下一轮检查照常再问。
+        m_updateDismissedVersion = version;
+        RefreshState();
+        break;
+    }
+}
+
+void MainWindow::RequestUpdateInstall() {
+    if (!SendTrayCommand(EGoTouchTrayIpc::Command::InstallUpdate)) {
+        ShowError(L"无法开始升级", L"托盘没有响应，请求没有送达。");
+        return;
+    }
+    // 下载与安装都在服务那侧。窗口要等状态进入 Installing 才关（见 RefreshUpdateRow）——
+    // 立刻关掉的话下载的那几十秒里用户看不到任何进度。
+    //
+    // 这一小段回显期沿用「正在下载…」而不另起一句：它只有几百毫秒，紧接着就是真的在下载，
+    // 为它单造一句措辞只会多一个要维护的字符串。
+    BeginUpdateEcho(PenStatus::UpdateState::Available, L"正在下载…");
+    RefreshState();
+}
+
+void MainWindow::RequestUpdateSkip() {
+    if (!SendTrayCommand(EGoTouchTrayIpc::Command::SkipUpdate)) {
+        ShowError(L"无法跳过此版本", L"托盘没有响应，请求没有送达。");
+        return;
+    }
+    // 记住这一版是服务那边的事，本地也先收起提示：否则要等服务把状态改回 Idle 才消失。
+    m_updateDismissedVersion = m_updateVersion;
+    BeginUpdateEcho(PenStatus::UpdateState::Available, L"已跳过此版本。");
+    RefreshState();
+}
+
 void MainWindow::SetInteractiveEnabled(bool enabled) {
     PenModeSelector().IsEnabled(enabled);
     ColorModeCombo().IsEnabled(enabled);
@@ -1465,6 +1697,10 @@ void MainWindow::SetInteractiveEnabled(bool enabled) {
     ChargeLimitSlider().IsEnabled(enabled && !SmartChargeToggle().IsOn());
     VendorServicesToggle().IsEnabled(enabled);
     AutoStartToggle().IsEnabled(enabled);
+    // 更新那一格的可用性随后由 RefreshUpdateRow 再收紧一次：服务正在检查或下载时，手动
+    // 检查按钮要另外置灰。这里只管托盘断开这一层。
+    AutoUpdateCheckToggle().IsEnabled(enabled);
+    UpdateCheckButton().IsEnabled(enabled);
     ExitButton().IsEnabled(enabled);
 }
 

@@ -20,6 +20,7 @@ const std::pair<ConfigKeyId, std::string_view> kStaticKeyMap[] = {
     {ConfigKeyId::SvcStylusVhfEnabled, "service.stylus_vhf_enabled"},
     {ConfigKeyId::SvcPenButtonMode, "service.pen_button_mode"},
     {ConfigKeyId::SvcPenButtonRoute, "service.pen_button_route"},
+    {ConfigKeyId::SvcAutoUpdateCheck, "service.auto_update_check"},
 
     {ConfigKeyId::TouchBaselineBgAlphaShift, "touch.signal_cond.baseline_bg_alpha_shift"},
     {ConfigKeyId::TouchBaselineBgMaxStep, "touch.signal_cond.baseline_bg_max_step"},

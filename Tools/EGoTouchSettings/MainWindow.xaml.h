@@ -35,6 +35,8 @@ struct MainWindow : MainWindowT<MainWindow> {
     void ChargeLimitChanged(
         IInspectable const&,
         Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const&);
+    void AutoUpdateCheckToggled(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void CheckForUpdatesClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void ExitClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void ExportLogsClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void ExportLogsRevealClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
@@ -93,6 +95,15 @@ private:
     // 挂在右半边。尺寸变化和可见性变化都经由这里。
     void ApplyDeviceCardLayout();
     void SetInteractiveEnabled(bool enabled);
+    // 更新那一格。状态、按钮可用性与三个动作的显隐都在这里一次定完，见实现处的说明。
+    void RefreshUpdateRow(const PenStatus::State* state);
+    // 提交更新命令之后进入等回显的状态，机制同 BeginChargeLimitEcho。
+    void BeginUpdateEcho(PenStatus::UpdateState from, winrt::hstring const& text);
+    // 升级/稍后/跳过。事件处理函数要返回 void，协程与两个动作本身分开——对话框与卡片上的
+    // 按钮都要用得上同一套提交。
+    winrt::fire_and_forget ShowUpdateDialog(uint32_t version, winrt::hstring versionText);
+    void RequestUpdateInstall();
+    void RequestUpdateSkip();
     // 提交充电上限之后进入等回显的状态，见实现处的说明。
     void BeginChargeLimitEcho(uint8_t requested);
     bool SendTrayCommand(EGoTouchTrayIpc::Command command, LPARAM value = 0);
@@ -169,6 +180,26 @@ private:
     // 服务当前生效的侧键模式，跟着状态通道走。提交前与它比对，避免把刚读回来的值再发一遍——
     // 详见 RefreshControls 里的说明。0xFF 表示还没读到过。
     uint8_t m_effectivePenMode = 0xFF;
+    // 更新。三个动作提交出去之后，状态通道要过一轮才反映过来，这段时间里显示本地意图，
+    // 机制与充电阈值那组相同：m_updatePendingFrom 是提交那一刻的状态，离开它即视为已回显。
+    winrt::hstring m_updatePendingText;
+    PenStatus::UpdateState m_updatePendingFrom = PenStatus::UpdateState::Idle;
+    bool m_updateAwaitingEcho = false;
+    ULONGLONG m_updateEchoDeadline = 0;
+    // 「稍后」关掉的是哪一个版本。服务会一直发布 Available，不记下来的话下一轮刷新就把
+    // 弹窗原样弹回来。只在本次运行期间有效——「稍后」不留任何持久状态。
+    uint32_t m_updateDismissedVersion = 0;
+    // 已经为哪一版弹过对话框。与 m_updateDismissedVersion 分开：前者由用户的选择清除，
+    // 后者只防同一版在每一拍轮询里重复弹。
+    uint32_t m_updatePromptedVersion = 0;
+    bool m_updateDialogOpen = false;
+    // 状态通道里最近一次发布的版本号，打包成 major<<16|minor<<8|patch。「稍后」和「跳过」
+    // 要知道自己关掉的是哪一版，而那两个处理函数手上没有快照。
+    uint32_t m_updateVersion = 0;
+    // 安装按边沿判定，见 RefreshUpdateRow：服务停在 Installing 上时，按状态判会让每次
+    // 打开设置窗都立刻自己关掉。
+    PenStatus::UpdateState m_lastUpdateState = PenStatus::UpdateState::Idle;
+    bool m_lastUpdateStateValid = false;
     bool m_exitPending = false;
     bool m_trayConnected = false;
     bool m_exitDialogOpen = false;

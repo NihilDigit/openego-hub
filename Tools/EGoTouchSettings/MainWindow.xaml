@@ -1010,6 +1010,49 @@
                                         Toggled="AutoStartToggled" />
                                 </Grid>
                             </Border>
+                            <!-- 卡片上只有开关、一次手动检查，以及一行随进度变化的状态文字。
+                                 升级/稍后/跳过三个动作在 ContentDialog 里，见 ShowUpdateDialog：
+                                 那是一次要当场回答的询问，摆成卡片里的三个按钮就成了一排随时
+                                 都在的选项。状态文字在弹窗关掉之后仍然写着有哪一版可装，入口
+                                 因此不会丢——再点一次「检查更新」就能把弹窗叫回来。 -->
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- E895 是 Sync，系统设置里的「Windows 更新」用的也是它。 -->
+                                    <FontIcon Glyph="&#xE895;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="自动检查更新" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="UpdateStatusText"
+                                            Text="已是最新版本。"
+                                            TextWrapping="Wrap"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <!-- 手动检查不受开关影响，所以它是一个独立的按钮而不是
+                                         开关打开后才出现的入口。 -->
+                                    <Button
+                                        x:Name="UpdateCheckButton"
+                                        Grid.Column="2"
+                                        VerticalAlignment="Center"
+                                        Content="检查更新"
+                                        Click="CheckForUpdatesClicked" />
+                                    <ToggleSwitch
+                                        x:Name="AutoUpdateCheckToggle"
+                                        Grid.Column="3"
+                                        MinWidth="0"
+                                        OnContent=""
+                                        OffContent=""
+                                        Margin="12,0,-12,0"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        Toggled="AutoUpdateCheckToggled" />
+                                </Grid>
+                            </Border>
                             <Border Style="{StaticResource SettingsCardStyle}">
                                 <Grid ColumnSpacing="16" VerticalAlignment="Center">
                                     <Grid.ColumnDefinitions>

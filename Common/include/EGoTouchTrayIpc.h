@@ -57,6 +57,15 @@ enum class Command : uint32_t {
     SetEyeComfort,
     // 自然色彩显示，lParam 非零表示开启。
     SetNaturalColor,
+    // 自动检查更新的开关，lParam 非零表示开启。落地在服务的配置里，不在 HKCU：检查由
+    // 服务执行，它读不到用户 hive。
+    SetAutoUpdateCheck,
+    // 立即检查一次，不受上面那个开关影响。
+    CheckForUpdates,
+    // 安装服务已经查到的那个版本。lParam 不用。
+    InstallUpdate,
+    // 跳过服务已经查到的那个版本，之后不再为它提示。lParam 不用。
+    SkipUpdate,
 };
 
 } // namespace EGoTouchTrayIpc

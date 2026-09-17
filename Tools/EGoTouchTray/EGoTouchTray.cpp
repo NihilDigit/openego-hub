@@ -19,6 +19,7 @@
 // 与只读的状态广播分开，两者都不需要提权。菜单上的对勾取自状态广播回报的当前模式，不是
 // 本进程提交过什么——提交可能被服务按枚举校验拒绝，也可能被别处的配置改写。
 
+#include "AppVersion.h"
 #include "ManagedResource.h"
 #include "PenButtonConfig.h"
 #include "PenControlChannel.h"
@@ -67,6 +68,8 @@ constexpr wchar_t kSettingsRegistryKey[] = L"Software\\OpenEGoHub";
 constexpr wchar_t kRunRegistryKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValueName[] = L"OpenEGoHubTray";
+// 上一次跑起来时本程序的版本。只用来判断「这次启动是不是刚升级完」，见 ReportVersionChange。
+constexpr wchar_t kLastVersionValueName[] = L"LastVersion";
 
 // Design metrics, expressed at 96 DPI. Everything drawn is scaled from these by the DPI
 // of the monitor the panel currently sits on — with PER_MONITOR_AWARE_V2 the process gets
@@ -106,6 +109,7 @@ constexpr UINT_PTR kTimerPoll   = 1;   // channel poll / reconnect
 constexpr UINT_PTR kTimerAnim   = 2;   // fade animation
 constexpr UINT_PTR kTimerDwell  = 3;   // visible hold
 constexpr UINT_PTR kTimerLease  = 4;   // provider lease heartbeat / safe exit
+constexpr UINT_PTR kTimerUpdateExit = 5;   // 安装开始，弹完提示再退出
 
 constexpr UINT kPollIntervalMs = 400;
 constexpr UINT kAnimIntervalMs = 16;
@@ -113,6 +117,9 @@ constexpr UINT kDwellMs        = 3000;
 constexpr UINT kFadeInMs       = 150;
 constexpr UINT kFadeOutMs      = 300;
 constexpr UINT kLeaseIntervalMs = 1000;
+// 安装开始到托盘退出之间留的那点时间。见 BeginUpdateInstallExit：图标一删气泡就跟着消失，
+// 不留这一段，那条「正在安装」等于没弹过。
+constexpr UINT kUpdateExitDelayMs = 2000;
 constexpr ULONGLONG kSafeExitTimeoutMs = 20000;
 constexpr ULONGLONG kReaderReconnectMs = 5000;
 // 键盘开关等待回读确认的上限。服务下发命令后由宿主读回 MCU 再经快照回来，实测一秒以内；
@@ -163,10 +170,24 @@ struct App {
     bool kbdDetachPendingValue = false;
     ULONGLONG kbdDetachPendingDeadline = 0;
 
+    // 更新。notifiedUpdateVersion 记的是已经提示过的那一版，打包成
+    // major<<16|minor<<8|patch——服务会一直发布 Available，不记版本就会每轮都提示一次。
+    // prevUpdateState 只为求「进入 Installing」的那一次边沿，那是托盘退出的判据。
+    uint32_t notifiedUpdateVersion = 0;
+    PenStatus::UpdateState prevUpdateState = PenStatus::UpdateState::Idle;
+    bool prevUpdateValid = false;
+    // 当前这条气泡提示点下去要不要打开控制面板，见 ShowTrayBalloon。
+    bool balloonOpensSettings = false;
+    // 安装已经开始，退出在途。Installing 这个状态会连着读到好几轮，没有它就会反复弹提示。
+    bool updateExitPending = false;
+
     bool providerDesired = true;
     bool autoStart = true;
     bool oneNoteCompatibility = true;
     bool deviceNotifications = true;
+    // 真正生效的那份在服务的配置里。这里这一份只是本地记录，供设置窗显示——服务跑在
+    // LocalSystem，读不到用户 hive，所以两边各存一份。
+    bool autoUpdateCheck = true;
     bool exitPending = false;
     ULONGLONG exitDeadlineTick = 0;
 
@@ -234,6 +255,32 @@ bool WriteUserSetting(const wchar_t* name, DWORD value) {
     return result == ERROR_SUCCESS;
 }
 
+// 版本号存成字符串而不是拆成三个 DWORD：它只参与相等比较，不参与大小比较——降级安装
+// 同样应当提示。
+std::wstring ReadUserStringSetting(const wchar_t* name) {
+    wchar_t value[64]{};
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsRegistryKey, name, RRF_RT_REG_SZ, &type,
+                     value, &size) != ERROR_SUCCESS) {
+        return {};
+    }
+    return value;
+}
+
+bool WriteUserStringSetting(const wchar_t* name, const std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsRegistryKey, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const LONG result = RegSetValueExW(
+        key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+        static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+
 bool SetLoginAutoStart(bool enabled) {
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunRegistryKey, 0, nullptr, 0,
@@ -284,6 +331,7 @@ void LoadUserSettings() {
         ReadUserSetting(L"OneNoteCompatibility", 1) != 0;
     g_oneNoteCompatibility.store(g_app.oneNoteCompatibility, std::memory_order_release);
     g_app.deviceNotifications = ReadUserSetting(L"DeviceNotifications", 1) != 0;
+    g_app.autoUpdateCheck = ReadUserSetting(L"AutoUpdateCheck", 1) != 0;
 
     // 默认值也立即落到 Run：安装包只负责放置文件，具体用户是否登录后启用由这个非提权
     // 伴随进程维护，避免 per-machine MSI 把启动项写进安装管理员而非实际用户的 HKCU。
@@ -1293,7 +1341,15 @@ void GestureWatcherThread() {
 void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload = 0);
 // 失败提示走托盘自己的气泡，不经 WinUI 那条通知链：那条链只有设置窗在跑时才有宿主，而
 // 「设置没生效」正是用户最可能只在托盘菜单里操作的一刻。
-void ShowTrayBalloon(const wchar_t* title, const wchar_t* text);
+// 提示的图标默认是警告：这个函数原先只报「设置没生效」。有新版本是一条中性消息，
+// 由调用方传 NIIF_INFO。
+//
+// opensSettings 决定点这条提示会不会打开控制面板。逐条指定而不是一律打开：「键盘设置未
+// 生效」那几条在面板上没有对应的去处，点开一个无关页面比什么都不做更让人困惑。
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* text, DWORD infoFlags = NIIF_WARNING,
+                     bool opensSettings = false);
+// 安装开始时托盘要退出，定义在 SubmitProviderLease 之后——它要先把租约放掉。
+void BeginUpdateInstallExit(uint8_t major, uint8_t minor, uint8_t patch);
 
 // 键盘开关没落地时的说明。分成两条是因为用户能做的事不同。
 void ReportKbdDetachFailure(bool unsupported) {
@@ -1386,6 +1442,44 @@ void PollChannel() {
         // 服务不再发布这一位（换了侧键模式，或笔断开）。基线作废，恢复发布时的第一份快照
         // 只用来重建基线——否则切回 ToggleEraser 就会凭空弹一次提示。
         g_app.prevEraserValid = false;
+    }
+
+    // 更新。这一位同样是可重复读的状态而不是边沿，所以判据是「还是不是同一个版本」而不是
+    // 「状态变没变」：服务每轮都在发布 Available，按状态变化判会在服务重启之后为同一个版本
+    // 再提示一次。
+    if (fresh.updateState == PenStatus::UpdateState::Available) {
+        const uint32_t version = (static_cast<uint32_t>(fresh.updateMajor) << 16) |
+                                 (static_cast<uint32_t>(fresh.updateMinor) << 8) |
+                                 static_cast<uint32_t>(fresh.updatePatch);
+        if (version != 0 && version != g_app.notifiedUpdateVersion) {
+            g_app.notifiedUpdateVersion = version;
+            wchar_t text[160]{};
+            std::swprintf(text, std::size(text), L"版本 %u.%u.%u 可以安装。",
+                          unsigned(fresh.updateMajor), unsigned(fresh.updateMinor),
+                          unsigned(fresh.updatePatch));
+            // 不归「设备提示弹窗」那个开关管：那一条说的是配件接入。
+            // 气泡是入口不是告示：点下去打开控制面板，升级的决定在那边的对话框里做。
+            ShowTrayBalloon(L"OpenEGo Hub", text, NIIF_INFO, true);
+        }
+    } else if (fresh.updateState == PenStatus::UpdateState::Idle) {
+        // 装完或跳过之后服务回到 Idle。记录作废，下一个版本照常提示；被跳过的那一版服务
+        // 不会再发布 Available，不必在这边也记一份。
+        g_app.notifiedUpdateVersion = 0;
+    }
+
+    // 安装开始，托盘退出。按进入 Installing 的那一次边沿判断，不按状态本身：服务若停在这个
+    // 状态上，按状态判会让 MSI 重新拉起的托盘一起来就退，反复循环。
+    //
+    // 先记账再动手：退出是延后的（见 BeginUpdateInstallExit），这两秒里还会再轮询几轮，
+    // 状态没更新的话每一轮都是同一条边沿。
+    const bool installStarted =
+        g_app.prevUpdateValid && fresh.updateState == PenStatus::UpdateState::Installing &&
+        g_app.prevUpdateState != PenStatus::UpdateState::Installing;
+    g_app.prevUpdateState = fresh.updateState;
+    g_app.prevUpdateValid = true;
+    if (installStarted) {
+        BeginUpdateInstallExit(fresh.updateMajor, fresh.updateMinor, fresh.updatePatch);
+        return;
     }
 
     // 在途的键盘开关：等快照翻转到用户选的那个值才算落地。超时才回弹，回弹时说明原因——
@@ -1582,22 +1676,55 @@ void AddTrayIcon() {
     RefreshTrayIconImage(ReadTaskbarDarkMode());
 
     g_app.trayIconAdded = Shell_NotifyIconW(NIM_ADD, &g_app.trayIcon) != FALSE;
+
+    // 不声明版本的话 shell 按最早的那套行为发消息，气泡的 NIN_BALLOON* 一条都不会来，
+    // 点提示就没有任何反应。取 NOTIFYICON_VERSION 而不是 _4：前者只是多出这几条通知，
+    // 鼠标仍是 WM_LBUTTONUP / WM_RBUTTONUP；_4 会把右键换成 WM_CONTEXTMENU、左键换成
+    // NIN_SELECT，本窗口过程是按前者写的，换过去菜单就打不开了。
+    if (g_app.trayIconAdded) {
+        g_app.trayIcon.uVersion = NOTIFYICON_VERSION;
+        (void)Shell_NotifyIconW(NIM_SETVERSION, &g_app.trayIcon);
+    }
 }
 
 // 气泡另填一份 NOTIFYICONDATA，不复用 g_app.trayIcon：那一份还带着 NIF_ICON 与 NIF_TIP，
 // 每次换图标都要拿它去 NIM_MODIFY，把 NIF_INFO 留在里面会让同一条提示随后再弹一次。
-void ShowTrayBalloon(const wchar_t* title, const wchar_t* text) {
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* text, DWORD infoFlags,
+                     bool opensSettings) {
     if (!g_app.trayIconAdded) return;
+
+    // 同一时刻只有一条提示，所以一个标志就够：新的一条覆盖上一条的去处。
+    g_app.balloonOpensSettings = opensSettings;
 
     NOTIFYICONDATAW balloon{};
     balloon.cbSize = sizeof(balloon);
     balloon.hWnd = g_app.trayIcon.hWnd;
     balloon.uID = g_app.trayIcon.uID;
     balloon.uFlags = NIF_INFO;
-    balloon.dwInfoFlags = NIIF_WARNING;
+    balloon.dwInfoFlags = infoFlags;
     wcsncpy_s(balloon.szInfoTitle, title, _TRUNCATE);
     wcsncpy_s(balloon.szInfo, text, _TRUNCATE);
     Shell_NotifyIconW(NIM_MODIFY, &balloon);
+}
+
+// 升级装完之后托盘由安装包重新拉起，而用户上一眼看到的是控制面板自己消失。不给一句收尾，
+// 整件事看起来就是「点了升级，然后界面没了」。
+//
+// 判据是本程序的版本与上次跑起来时记下的那个不同，不问服务——服务那侧也在自升级，两边
+// 谁先起来不确定，而这条提示说的本来就是「你现在用的这一份是新的」。首次运行没有记录，
+// 只记不弹：那是新装，不是升级。
+void ReportVersionChange() {
+    const std::wstring current = Widen(OPENEGO_VERSION_STRING);
+    if (current.empty()) return;
+
+    const std::wstring previous = ReadUserStringSetting(kLastVersionValueName);
+    if (previous == current) return;
+    if (!previous.empty()) {
+        // 与「有新版本」那条一样点了能进设置：升级完多半就是想看看新版本里有什么。
+        const std::wstring text = L"已更新到 " + current + L"。";
+        ShowTrayBalloon(L"OpenEGo Hub", text.c_str(), NIIF_INFO, true);
+    }
+    (void)WriteUserStringSetting(kLastVersionValueName, current);
 }
 
 void ReleaseTrayIcon() {
@@ -1631,6 +1758,56 @@ bool SubmitProviderLease(PenControl::ProviderLeaseCommand command) {
         return false;
     }
     return true;
+}
+
+// 检查、下载与安装都由服务执行：它常驻、有网络，也是唯一能拉起 msiexec 的进程。托盘只把
+// 用户的决定送过去，理由与充电阈值那几条相同。
+bool SubmitUpdateCommand(PenControl::UpdateCommand command) {
+    std::lock_guard<std::mutex> submitLock(g_controlSubmitMutex);
+    g_app.control.Close();
+    if (!g_app.control.Open() || !g_app.control.SubmitUpdate(command)) {
+        g_app.control.Close();
+        return false;
+    }
+    return true;
+}
+
+// 安装开始，托盘必须退出：MSI 要覆盖的正是本进程锁着的 exe。
+//
+// 不走 RequestSafeExit：那条路要等服务确认 HuaweiTHP 已经起回来，最长二十秒，确认不了还会
+// 弹一个模态框——安装程序会一直等在那里。这里只把租约放掉就走，交还本身交给服务：租约五秒
+// 后过期，它自己会把触控切回去。设置窗不用管，它读同一条通道，在同一个边沿上自己关闭。
+void BeginUpdateInstallExit(uint8_t major, uint8_t minor, uint8_t patch) {
+    if (g_app.updateExitPending) return;
+    g_app.updateExitPending = true;
+
+    // 安装这几秒里没有任何本程序的界面活着：设置窗已经关掉，托盘马上也要退，而 msiexec 由
+    // 服务在 session 0 里拉起，它的进度条画在用户看不见的桌面上。所以退之前先说一句。
+    //
+    // 这条气泡随图标一起消失，留不住——真正的收尾是托盘重新起来之后那条「已更新到」，
+    // 两条都要有。
+    wchar_t text[160]{};
+    std::swprintf(text, std::size(text),
+                  L"正在安装 %u.%u.%u。",
+                  unsigned(major), unsigned(minor), unsigned(patch));
+    // 这一条不给入口：安装期间打开设置窗只会再锁住一个要被覆盖的 exe。
+    ShowTrayBalloon(L"OpenEGo Hub", text, NIIF_INFO);
+
+    // 租约立刻放掉，不等退出：交还触控与本进程还活着多久无关，早一秒下发，服务就早一秒
+    // 开始切回 Huawei。
+    g_app.providerDesired = false;
+    (void)SubmitProviderLease(PenControl::ProviderLeaseCommand::Release);
+
+    // 退出推迟两秒。立刻退的话 WM_DESTROY 会把托盘图标删掉，刚弹出的气泡随宿主图标一起
+    // 消失，用户一眼都看不到——那这条提示就等于没弹过，而它是静默安装期间唯一的可见反馈。
+    //
+    // 不会卡住安装：msiexec 走到替换文件那一步不止两秒，安装包里另有
+    // util:CloseApplication 兜底。定时器万一没能建起来就退回原来的行为，立刻退出——
+    // 丢一条提示，总好过托盘留在那里锁着自己的 exe。
+    if (!g_app.hwnd) return;
+    if (!SetTimer(g_app.hwnd, kTimerUpdateExit, kUpdateExitDelayMs, nullptr)) {
+        DestroyWindow(g_app.hwnd);
+    }
 }
 
 bool SubmitPenButtonModeCommand(uint8_t mode) {
@@ -2226,6 +2403,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PollChannel();
         } else if (wParam == kTimerLease) {
             MaintainProviderLease();
+        } else if (wParam == kTimerUpdateExit) {
+            // 「正在安装」那条气泡已经露过面，可以让出 exe 了。
+            KillTimer(hwnd, kTimerUpdateExit);
+            DestroyWindow(hwnd);
         } else if (wParam == kTimerAnim) {
             const DWORD elapsed = GetTickCount() - g_app.phaseStartTick;
             if (g_app.phase == Phase::FadeIn) {
@@ -2292,6 +2473,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ShowTrayMenu();
         } else if (LOWORD(lParam) == WM_LBUTTONUP) {
             ShowSettingsPanel();
+        } else if (LOWORD(lParam) == NIN_BALLOONUSERCLICK) {
+            // 「有新版本」那条点开控制面板，升级的选项在那边的对话框里。其余几条提示没有
+            // 对应的去处，不处理。标志用完即清：提示已经消失，同一条不该被再点一次。
+            if (g_app.balloonOpensSettings) {
+                g_app.balloonOpensSettings = false;
+                ShowSettingsPanel();
+            }
         }
         return 0;
 
@@ -2416,6 +2604,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.deviceNotifications = requested;
             return 1;
         }
+
+        // 这个开关要落两处，缺一不可：真正生效的那份在服务的配置里
+        // （service.auto_update_check，由服务持久化），而 HKCU 这份是设置窗唯一的显示来源
+        // ——服务不把这个开关发布到状态通道，界面读不回来。两处不一致会让界面显示成一回事、
+        // 实际是另一回事，所以送不到服务时把 HKCU 也改回去，让开关弹回原位。
+        case EGoTouchTrayIpc::Command::SetAutoUpdateCheck: {
+            const bool requested = lParam != 0;
+            const bool previous = g_app.autoUpdateCheck;
+            if (!WriteUserSetting(L"AutoUpdateCheck", requested ? 1u : 0u)) return 0;
+            if (!SubmitUpdateCommand(requested ? PenControl::UpdateCommand::EnableAutoCheck
+                                               : PenControl::UpdateCommand::DisableAutoCheck)) {
+                (void)WriteUserSetting(L"AutoUpdateCheck", previous ? 1u : 0u);
+                return 0;
+            }
+            g_app.autoUpdateCheck = requested;
+            return 1;
+        }
+
+        case EGoTouchTrayIpc::Command::CheckForUpdates:
+            return SubmitUpdateCommand(PenControl::UpdateCommand::CheckNow) ? 1 : 0;
+
+        case EGoTouchTrayIpc::Command::InstallUpdate:
+            // 只提交，不在这里退出：服务还要下载和校验，退早了用户看不到任何进度。退出的
+            // 判据是状态通道进入 Installing，见 PollChannel。
+            return SubmitUpdateCommand(PenControl::UpdateCommand::Install) ? 1 : 0;
+
+        case EGoTouchTrayIpc::Command::SkipUpdate:
+            return SubmitUpdateCommand(PenControl::UpdateCommand::Skip) ? 1 : 0;
 
         case EGoTouchTrayIpc::Command::RequestSafeExit:
             RequestSafeExit();
@@ -2661,6 +2877,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
 
     if (ready) {
         AddTrayIcon();
+        // 紧跟在图标加进托盘之后：气泡要有宿主图标才显示得出来。
+        ReportVersionChange();
         g_app.reader.Open();      // may fail if the service is not up yet; poll retries
         // 第一次轮询自己就会建立充电边沿的基线，且因为当时还没有基线所以不会弹窗——已经在
         // 充电的笔不会在托盘启动的瞬间弹一个面板出来。这里曾经额外抄了一份 seeding，条件与

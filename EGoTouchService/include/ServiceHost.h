@@ -32,6 +32,7 @@ struct Command;
 
 namespace PenStatus {
 enum class TouchProviderState : uint8_t;
+enum class UpdateState : uint8_t;
 }
 
 namespace Service {
@@ -164,6 +165,25 @@ private:
     void TickInputSuppressionTimeout();
     void PublishTouchProviderState(PenStatus::TouchProviderState state,
                                    uint8_t error);
+
+    // 更新。检查要走一次网络往返，下载和安装要按分钟计，三者都不能占住控制线程——租约
+    // 打点也在那条线程上，阻塞几十秒就会让触控当场交还原厂。所以单开一条线程：控制线程
+    // 只投递命令，它自己按到期时间醒来，结果经 UpdateState 回报。
+    void StartUpdateWorker();
+    void StopUpdateWorker();
+    void UpdateWorkerMain();
+    // manual 为真表示这次来自托盘的 CheckNow，日志和跳过判定都与自动检查相同，区别只在
+    // 它不看自动检查开关。
+    void RunUpdateCheck(bool manual);
+    void RunUpdateInstall();
+    void SkipAvailableUpdate();
+    void PublishUpdateState(PenStatus::UpdateState state);
+    // 自动检查开关。托盘送来的选择必须由服务这边落盘：那个选择原本落在 HKCU，而服务跑在
+    // LocalSystem 下读不到用户的 hive。与 ApplyPenButtonMode 同形，落地加持久化一步做完。
+    void ApplyAutoUpdateCheck(bool enabled, const char* source);
+    // 本服务发起的那次升级装完之后，由新的服务实例把托盘拉回用户会话。作用域由注册表
+    // 标记限定，见 Update::MarkTrayRelaunchPending。
+    void RelaunchTrayAfterUpdate();
     void RepublishPenStatus();
     bool ValidateStartupConfig(const Config::ConfigStore& store) const;
     bool StartRuntimeAndPipeline();

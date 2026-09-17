@@ -297,6 +297,7 @@ add_executable(EGoTouchService
     "${SERVICE_ROOT}/source/TouchProviderCoordinator.cpp"
     "${SERVICE_ROOT}/source/VendorServices.cpp"
     "${SERVICE_ROOT}/source/ChargePolicy.cpp"
+    "${SERVICE_ROOT}/source/UpdateChecker.cpp"
     "${SERVICE_ROOT}/Service.rc"
 )
 # 与托盘同理：rc.exe 没有 /showIncludes，CMake 不为 .rc 生成 depfile，改了 AppVersion.h
@@ -326,7 +327,10 @@ target_include_directories(EGoTouchService PRIVATE
     "${SERVICE_ROOT}/include"
     "${GAOKUN_HAL_ROOT}/include"
 )
-target_link_libraries(EGoTouchService PRIVATE EGoTouchServiceCore Device Host Common advapi32 setupapi hid shell32 "${GAOKUN_HAL_LIB}")
+# winhttp 与 bcrypt 只有更新检查用到：前者是这棵树上唯一的 HTTP 客户端，后者算安装包的
+# SHA256。wtsapi32 与 userenv 是升级装完之后把托盘拉回用户会话那一步用的（WTSQueryUserToken
+# 与 CreateEnvironmentBlock）。全是系统库，不引入任何第三方依赖。
+target_link_libraries(EGoTouchService PRIVATE EGoTouchServiceCore Device Host Common advapi32 setupapi hid shell32 winhttp bcrypt wtsapi32 userenv "${GAOKUN_HAL_LIB}")
 
 # 服务开发构建必须使用与 GaokunHal.lib 同一配置生成的笔宿主。ResolveHostPath 的历史回退固定
 # 指向 hal/build/Release，Debug 服务因而会悄悄启动旧宿主；新增 IPC 后表现为服务端代码已更新、

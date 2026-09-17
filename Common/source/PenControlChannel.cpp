@@ -304,6 +304,8 @@ bool Host::PollCommand(Command& out) {
     command.colorMode = static_cast<ColorModeCommand>(copy.colorMode);
     command.hasVendorServices = (copy.flags & kFlagHasVendorServices) != 0;
     command.vendorServices = static_cast<VendorServicesCommand>(copy.vendorServices);
+    command.hasUpdate = (copy.flags & kFlagHasUpdate) != 0;
+    command.update = static_cast<UpdateCommand>(copy.update);
     command.revision = copy.revision;
     command.submittedAtUnixMs = copy.submittedAtUnixMs;
     out = command;
@@ -439,6 +441,15 @@ bool Client::SubmitVendorServices(VendorServicesCommand command) {
     Payload staged{};
     staged.flags = kFlagHasVendorServices;
     staged.vendorServices = static_cast<uint8_t>(command);
+    return Submit(staged);
+}
+
+bool Client::SubmitUpdate(UpdateCommand command) {
+    if (!m_view || command == UpdateCommand::None) return false;
+
+    Payload staged{};
+    staged.flags = kFlagHasUpdate;
+    staged.update = static_cast<uint8_t>(command);
     return Submit(staged);
 }
 

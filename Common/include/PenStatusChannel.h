@@ -149,6 +149,19 @@ enum class TouchProviderState : uint8_t {
     EGoSuspended,
 };
 
+// 更新检查的进度。发布方是服务，它是唯一有网络也唯一能执行安装的进程。
+//
+// 只有 Available 之后才要求版本号字段有效：Failed 不带原因，界面只说「检查失败，稍后重试」
+// ——把 WinHTTP 的错误码摆给用户没有可操作性，真正要查的人看服务日志。
+enum class UpdateState : uint8_t {
+    Idle = 0,     // 没有待处理的更新，或从未查过
+    Checking,     // 正在查 Release 接口
+    Available,    // 有比本机更新的版本，等用户决定
+    Downloading,  // 用户已确认，正在下载 MSI
+    Installing,   // 已校验哈希，msiexec 已拉起
+    Failed,       // 检查、下载或校验失败
+};
+
 inline constexpr int kModelNameCapacity = 32;
 // 实测串形如 "GAOKUN_KBD_BD 1.0.0.39"、"1.0.0.40"；序列号更长，单独给一档。
 inline constexpr int kVersionCapacity = 32;
@@ -172,7 +185,15 @@ struct Payload {
     uint8_t  notificationKind = 0;  // NotificationKind
     uint8_t  chargeLimit = 0;       // 停充百分比，valid with kFlagHasChargeLimit
     uint8_t  hostHealth = 0;        // kHostHealth* 的位组合
-    uint8_t  _pad[4]{};             // 显式补齐，避免下一个字段的偏移随编译器的填充规则漂移
+    // 自动更新。flags 的 32 位已经用尽，这四个字段占的是原先的显式填充字节，共享内存布局
+    // 与 ABI 版本因此不变，旧读者读到的是 0，也就是 UpdateState::Idle。
+    //
+    // 版本号按三个字节发布而不是发字符串：字符串要再占几十字节、逼着 ABI 递增，而这三段
+    // 数字本来就取自 AppVersion.h 的同一组值。每段上限 255，发布流程从未接近过。
+    uint8_t  updateState = 0;       // UpdateState
+    uint8_t  updateMajor = 0;       // valid with updateState == Available 及其后的状态
+    uint8_t  updateMinor = 0;
+    uint8_t  updatePatch = 0;
     uint64_t updatedAtUnixMs = 0;
     char     modelName[kModelNameCapacity]{};   // UTF-8, NUL-terminated
     char     penFirmware[kVersionCapacity]{};   // valid with kFlagHasPenFirmware
@@ -267,6 +288,11 @@ struct State {
     bool kbdCharging = false;
     uint32_t notificationSequence = 0;
     NotificationKind notificationKind = NotificationKind::None;
+    // 更新。版本号只在 Available 及其后的状态里有意义，见 UpdateState。
+    UpdateState updateState = UpdateState::Idle;
+    uint8_t updateMajor = 0;
+    uint8_t updateMinor = 0;
+    uint8_t updatePatch = 0;
     uint64_t updatedAtUnixMs = 0;
     uint32_t modelId = 0;
     char modelName[kModelNameCapacity]{};

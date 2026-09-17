@@ -19,6 +19,8 @@ enum class ConfigKeyId : uint16_t {
     SvcStylusVhfEnabled  = 0x0002,
     SvcPenButtonMode     = 0x0003,
     SvcPenButtonRoute    = 0x0004,
+    // 自动检查更新。key id 只追加，删掉的留空位不重编号。
+    SvcAutoUpdateCheck   = 0x0005,
 
     // ── Touch (0x0100-0x01FF) ──
     TouchBaselineBgAlphaShift     = 0x0100,

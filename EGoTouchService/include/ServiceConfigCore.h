@@ -26,6 +26,9 @@ struct ServiceConfigState {
     PenButtonMode penButtonMode = PenButtonMode::WindowsInk;
     PenButtonRoute penButtonRoute = PenButtonRoute::VhfOnly;
     bool penButtonRouteExplicit = false;
+    // 关掉之后只是不再按周期自动查更新；托盘送来的 CheckNow 仍然照做——用户点了「检查
+    // 更新」还不查，那个开关就不是「自动」的意思了。
+    bool autoUpdateCheck = true;
 };
 
 struct ReloadServiceConfigResult {
@@ -40,6 +43,7 @@ enum class ServiceConfigField : uint8_t {
     StylusVhfEnabled = 2,
     PenButtonMode = 3,
     PenButtonRoute = 4,
+    AutoUpdateCheck = 5,
 };
 
 constexpr uint8_t ToServiceConfigFieldBit(ServiceConfigField field) {
