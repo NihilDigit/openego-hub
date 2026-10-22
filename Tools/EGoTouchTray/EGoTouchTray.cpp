@@ -1351,6 +1351,15 @@ void ShowTrayBalloon(const wchar_t* title, const wchar_t* text, DWORD infoFlags 
 // 安装开始时托盘要退出，定义在 SubmitProviderLease 之后——它要先把租约放掉。
 void BeginUpdateInstallExit(uint8_t major, uint8_t minor, uint8_t patch);
 
+void NotifySettingsLifecycle(EGoTouchTrayIpc::SettingsLifecycle lifecycle) {
+    HWND bridge = FindWindowW(EGoTouchTrayIpc::kSettingsBridgeWindowClass, nullptr);
+    // Settings 使用 message-only bridge，FindWindowW 只枚举顶层窗口。
+    if (!bridge) bridge = FindWindowExW(
+        HWND_MESSAGE, nullptr, EGoTouchTrayIpc::kSettingsBridgeWindowClass, nullptr);
+    if (bridge) PostMessageW(bridge, EGoTouchTrayIpc::kSettingsLifecycleMessage,
+                            static_cast<WPARAM>(lifecycle), 0);
+}
+
 // 键盘开关没落地时的说明。分成两条是因为用户能做的事不同。
 void ReportKbdDetachFailure(bool unsupported) {
     g_app.kbdDetachPending = false;
@@ -1776,10 +1785,11 @@ bool SubmitUpdateCommand(PenControl::UpdateCommand command) {
 //
 // 不走 RequestSafeExit：那条路要等服务确认 HuaweiTHP 已经起回来，最长二十秒，确认不了还会
 // 弹一个模态框——安装程序会一直等在那里。这里只把租约放掉就走，交还本身交给服务：租约五秒
-// 后过期，它自己会把触控切回去。设置窗不用管，它读同一条通道，在同一个边沿上自己关闭。
+// 后过期，它自己会把触控切回去。显式通知现存设置窗关闭，后台窗口不依赖状态轮询。
 void BeginUpdateInstallExit(uint8_t major, uint8_t minor, uint8_t patch) {
     if (g_app.updateExitPending) return;
     g_app.updateExitPending = true;
+    NotifySettingsLifecycle(EGoTouchTrayIpc::SettingsLifecycle::InstallStarted);
 
     // 安装这几秒里没有任何本程序的界面活着：设置窗已经关掉，托盘马上也要退，而 msiexec 由
     // 服务在 session 0 里拉起，它的进度条画在用户看不见的桌面上。所以退之前先说一句。
@@ -2225,6 +2235,7 @@ HWND FindSettingsBridge() {
 }
 
 bool LaunchSettingsProcess(bool background, bool reportError) {
+    if (g_app.updateExitPending) return false;
     const std::wstring settingsPath = SettingsExecutablePath();
     if (settingsPath.empty()) return false;
 
@@ -2305,11 +2316,13 @@ void MaintainProviderLease() {
         PollChannel();
         if (g_app.hasState && g_app.state.hasTouchProvider &&
             g_app.state.touchProvider == PenStatus::TouchProviderState::Huawei) {
+            NotifySettingsLifecycle(EGoTouchTrayIpc::SettingsLifecycle::SafeExitCompleted);
             DestroyWindow(g_app.hwnd);
             return;
         }
         if (GetTickCount64() >= g_app.exitDeadlineTick) {
             g_app.exitPending = false;
+            NotifySettingsLifecycle(EGoTouchTrayIpc::SettingsLifecycle::SafeExitFailed);
             MessageBoxW(nullptr,
                         L"未能确认 HuaweiTHP 已恢复，OpenEGo Hub 将继续留在托盘，避免在无触控状态下退出。",
                         L"OpenEGo Hub", MB_OK | MB_ICONERROR);

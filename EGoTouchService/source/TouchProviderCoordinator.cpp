@@ -26,16 +26,15 @@ TouchProviderCoordinator::Clock::time_point TouchProviderCoordinator::ReadClock(
 }
 
 bool TouchProviderCoordinator::AcquireOrRenew(Clock::time_point now) {
-    // 纯续租：不做任何切换，调用本身是瞬时的，租期从 now 起算就是对的。
-    if (m_state == PenStatus::TouchProviderState::EGoTouch &&
-        m_error == TouchProviderError::None) {
+    // 挂起期间只延租，不启动宿主，也不因停止失败留下的错误状态重试切换。
+    if (m_suspended) {
         m_hasLease = true;
         m_leaseDeadline = now + m_leaseTimeout;
         return true;
     }
-    // 挂起期间照常延租，但不把宿主拉起来。息屏并不冻结托盘，它每秒一次的续租会立刻重起
-    // 刚刚停下的宿主，代管也就等于没做过。重新接管的时机由 OnResume 决定。
-    if (m_suspended) {
+    // 纯续租：不做任何切换，调用本身是瞬时的，租期从 now 起算就是对的。
+    if (m_state == PenStatus::TouchProviderState::EGoTouch &&
+        m_error == TouchProviderError::None) {
         m_hasLease = true;
         m_leaseDeadline = now + m_leaseTimeout;
         return true;
@@ -53,7 +52,7 @@ bool TouchProviderCoordinator::AcquireOrRenew(Clock::time_point now) {
         return true;
     }
     m_hasLease = false;
-    m_egoCooldownUntil = now + kAcquireFailureCooldown;
+    m_egoCooldownUntil = std::max(now, ReadClock()) + kAcquireFailureCooldown;
     return false;
 }
 
@@ -67,45 +66,71 @@ bool TouchProviderCoordinator::Release() {
     return SwitchToHuawei();
 }
 
-void TouchProviderCoordinator::OnSuspend(Clock::time_point) {
+void TouchProviderCoordinator::OnSuspend(Clock::time_point now) {
     if (!m_hasLease || m_state != PenStatus::TouchProviderState::EGoTouch) return;
 
-    // 停宿主是必须的：面板断电之后它内部已经死了而进程还在，唤醒瞬间服务日志报
-    // running=1, exit=-1，egoAlive 看不出来。
-    //
-    // 停完之后要不要把原厂请回来，原先的理由是「机器正在睡，起原厂只是让它跟着一起睡，
-    // 醒来还要再停一次」。实测推翻了这个理由：HuaweiThpService 启动 323/325/341 毫秒，
-    // 停止 1640/3350/3368 毫秒，代价是 0.32 秒起、几秒停；换掉的却是一个没有任何看门狗
-    // 的零提供方状态——Tick 遇到它直接 return，AcquireOrRenew 也直接 return，退出它只有
-    // OnResume 一条路，真机上息屏一次就是 68 秒两个提供方都不在跑，Resume 那一拍要是没到
-    // 就无限期停在那里。所以这里走完整的交还，对外发布的状态是真实的 Huawei。
     m_suspended = true;
-    (void)SwitchToHuawei();
+    m_suspendedAt = now;
+    // 只停宿主，让原厂保持停止。否则亮屏接管还要再等原厂内部数秒的清理。
+    if (m_operations.stopEGo && m_operations.stopEGo()) {
+        Publish(PenStatus::TouchProviderState::EGoSuspended);
+        return;
+    }
+    // 停止未确认时走完整交还兜底，挂起标志保留，亮屏后仍要重新接管。
+    if (!SwitchToHuawei()) {
+        Publish(PenStatus::TouchProviderState::EGoTouch,
+                TouchProviderError::StopEGoFailed);
+    }
 }
 
 void TouchProviderCoordinator::OnResume(Clock::time_point now) {
-    // 息屏与唤醒之间隔得极短，OnSuspend 还没动手（ServiceHost 那边有防抖）。这次唤醒对
-    // 协调器来说什么都没发生，租约照旧由托盘的心跳维持。
-    if (!m_suspended) return;
+    // 短息屏可能未到 ServiceHost 的防抖时限，宿主未停也要给托盘心跳宽限。
+    if (!m_suspended) {
+        if (m_hasLease) {
+            m_leaseDeadline = std::max(m_leaseDeadline, now + kResumeLeaseGrace);
+        }
+        return;
+    }
 
     m_suspended = false;
-    // 睡眠期间托盘没了，租约已经在 Tick 里过期。触控留在原厂手里，等托盘自己回来再要。
-    if (!m_hasLease) return;
+    if (!m_hasLease) {
+        (void)SwitchToHuawei();
+        return;
+    }
 
-    // 唤醒后的重新接管与普通接管没有区别：同一套冷却、同一套回退（SwitchToEGo 失败时它
-    // 自己已经把原厂请回来了）。不再走 HandleEGoHostDeath——那是给「跑着跑着崩掉」准备的
-    // 重启预算，而这里根本还没有宿主在跑。
-    if (!AcquireOrRenew(now)) return;
-    m_leaseDeadline = std::max(m_leaseDeadline, now + kResumeLeaseGrace);
+    // 挂起时若 stopEGo 失败，状态仍停在 EGoTouch；而真实 StartEGoTouchProvider 会把
+    // AlreadyRunning 当成功，直接进 SwitchToEGo 会复用断电后已失效的旧宿主。必须先确认
+    // 旧宿主已停，再拉起新宿主。
+    if (m_state == PenStatus::TouchProviderState::EGoTouch) {
+        if (!m_operations.stopEGo || !m_operations.stopEGo()) {
+            m_hasLease = false;
+            m_egoCooldownUntil = std::max(now, ReadClock()) + kAcquireFailureCooldown;
+            Publish(PenStatus::TouchProviderState::EGoTouch,
+                    TouchProviderError::StopEGoFailed);
+            return;
+        }
+        Publish(PenStatus::TouchProviderState::EGoSuspended);
+    }
+
+    // 不走普通续租短路或崩溃重启预算。原厂已停时 stopHuawei 是空操作；失败则由
+    // SwitchToEGo 自带的 restoreHuawei 回退恢复提供方。
+    if (SwitchToEGo()) {
+        m_hasLease = true;
+        m_leaseDeadline = std::max(m_leaseDeadline,
+                                   std::max(now, ReadClock()) + kResumeLeaseGrace);
+    } else {
+        m_hasLease = false;
+        m_egoCooldownUntil = std::max(now, ReadClock()) + kAcquireFailureCooldown;
+    }
 }
 
 void TouchProviderCoordinator::Tick(Clock::time_point now) {
+    // 用户会话可能被冻结、时钟可能跨过整个睡眠。不得误判租约过期并启动原厂，
+    // 也不探活主动停掉的宿主；亮屏后重新锚定租期并给予心跳宽限。
+    if (m_suspended) return;
+
     if (m_hasLease && now >= m_leaseDeadline) {
         m_hasLease = false;
-        // 挂起期间也照常放行：此刻触控本来就在原厂手里，SwitchToHuawei 是空操作，而标志
-        // 留着不清的话唤醒后 AcquireOrRenew 会一直走「挂起中只延租不接管」那条短路，永远
-        // 接管不回来。
-        m_suspended = false;
         (void)SwitchToHuawei();
         return;
     }
@@ -118,11 +143,6 @@ void TouchProviderCoordinator::Tick(Clock::time_point now) {
     // 交还原厂之后只剩 EGoTouch 一个状态满足这个判据，与错误码无关：EGoTouch 带着
     // StopEGoFailed 或 RestoreHuaweiFailed 时，恰恰是原厂没起来、宿主还在跑。
     if (m_state != PenStatus::TouchProviderState::EGoTouch) return;
-
-    // 挂起期间不看护。正常情况下这里根本到不了（交还原厂之后状态是 Huawei），到得了只有
-    // 一种：OnSuspend 的交还失败了，宿主还在跑。那时面板已经断电，宿主必定报死，就地重启
-    // 只会在机器睡着的时候白白烧掉重启预算，而唤醒时 OnResume 本来就要重新接管一次。
-    if (m_suspended) return;
 
     // 启动时那 1500 ms 的等待只能排除「起来就退」，之后崩溃没有任何人会发现，触控就此
     // 消失且不会回退到原厂。
@@ -145,11 +165,12 @@ void TouchProviderCoordinator::HandleEGoHostDeath(Clock::time_point now) {
 
     // 重启不管用：窗口内崩太多次，或这一次连起都起不来。交还原厂并进入冷却。预算用尽时
     // SwitchToEGo 根本没被调用过，状态还停在 EGoTouch，此时原厂仍被我们停着，必须请回来。
-    if (m_state == PenStatus::TouchProviderState::EGoTouch) {
+    if (m_state == PenStatus::TouchProviderState::EGoTouch ||
+        m_state == PenStatus::TouchProviderState::EGoSuspended) {
         (void)SwitchToHuawei();
     }
     m_hasLease = false;
-    m_egoCooldownUntil = now + kRestartCooldown;
+    m_egoCooldownUntil = std::max(now, ReadClock()) + kRestartCooldown;
     // 状态保留 SwitchToHuawei/SwitchToEGo 落到的那个，错误码换成根因：托盘要显示的是宿主
     // 死了，而不是回退路径上顺带记下的那一条。
     Publish(m_state, TouchProviderError::EGoHostDied);
@@ -165,8 +186,7 @@ void TouchProviderCoordinator::Shutdown(bool systemShutdown) {
     // 超时之后 SCM 直接终止进程，终止点可能正落在「原厂已停、宿主也已停」之间，那正是
     // 开机后没有触控的来源。
     //
-    // 这里不发布状态：宿主已停而原厂未起，没有哪个枚举值说的是这件事，而托盘此刻也在退出，
-    // 发布一个不准确的状态不如什么都不说。
+    // 关机时托盘也在退出，不再发布中间状态。
     if (systemShutdown) {
         if (m_operations.stopEGo) (void)m_operations.stopEGo();
         return;

@@ -51,9 +51,8 @@ public:
     // 原厂请回来，全程可能十几秒；不冷却的话下一次续租又会从头来一遍，原厂服务被反复
     // 起停，触控在这段时间里时有时无。比崩溃冷却短得多：失败常常是暂时的。
     static constexpr std::chrono::seconds kAcquireFailureCooldown{10};
-    // 唤醒后的租约下限。唤醒走的是与普通接管相同的路径，租期本来就从宿主真正起来的那一刻
-    // 起算，多数情况下比这个下限还长；但服务比用户会话先恢复，托盘那每秒一次的 WM_TIMER
-    // 要晚一些才回来，接管快的时候第一拍心跳还没到租约就过期了，触控白白交还原厂再抢一次。
+    // 唤醒后的租约下限，从重新接管完成起算。服务可能比用户会话先恢复，需要给托盘的
+    // WM_TIMER 心跳留出复苏宽限；宽限内仍未续租则正常交还原厂。
     static constexpr std::chrono::seconds kResumeLeaseGrace{10};
 
     TouchProviderCoordinator(TouchProviderOperations operations,
@@ -65,8 +64,8 @@ public:
     void Tick(Clock::time_point now);
     // 系统挂起与唤醒。宿主里的 THP_Service 自己注册了电源通知，但托管进程没有窗口也没有
     // 消息泵，那些通知一条都收不到：面板断电之后宿主内部已经死了而进程还在，egoAlive 看
-    // 不出来（唤醒瞬间服务日志报 running=1, exit=-1）。于是由服务代管——挂起时把触控整个
-    // 交还原厂，唤醒时重新接管。
+    // 不出来（唤醒瞬间服务日志报 running=1, exit=-1）。于是由服务代管——挂起时只停宿主，
+    // 原厂保持停止，亮屏时直接重启宿主，避免再次等待原厂停止。
     void OnSuspend(Clock::time_point now);
     void OnResume(Clock::time_point now);
     // systemShutdown 为真表示机器正在关机，此时不把原厂请回来，理由见实现处。
@@ -75,6 +74,7 @@ public:
     [[nodiscard]] PenStatus::TouchProviderState State() const noexcept { return m_state; }
     [[nodiscard]] TouchProviderError Error() const noexcept { return m_error; }
     [[nodiscard]] bool HasLease() const noexcept { return m_hasLease; }
+    [[nodiscard]] bool IsSuspended() const noexcept { return m_suspended; }
 
 private:
     bool SwitchToEGo();
@@ -88,16 +88,16 @@ private:
     StateChanged m_stateChanged;
     std::chrono::milliseconds m_leaseTimeout;
     Clock::time_point m_leaseDeadline{};
+    Clock::time_point m_suspendedAt{};
     Clock::time_point m_restartWindowStart{};
     Clock::time_point m_egoCooldownUntil{};
     int m_restartsInWindow = 0;
     PenStatus::TouchProviderState m_state = PenStatus::TouchProviderState::Unknown;
     TouchProviderError m_error = TouchProviderError::None;
     bool m_hasLease = false;
-    // 系统正在睡，触控已经交还原厂，但租约还在托盘手里、唤醒后要自动恢复接管。这件事只能
-    // 用内部标志表达：对外发布的状态必须是真实的 Huawei，托盘看到的才是当下真正在驱动
-    // 触控的那一方。挂起期间托盘照常每秒续租一次，这个标志就是拦住那些续租、不让它们把刚
-    // 停下的宿主又拉起来的地方。
+    // 挂起期间主动停掉宿主，正常状态为 EGoSuspended；停止失败时可能已回退到 Huawei。
+    // 保留租约并阻止续租、Tick 拉起任一提供方，亮屏后由 OnResume 重新接管。
+    // ServiceHost 以显示状态兜底，避免单次唤醒事件丢失后永久停在挂起态。
     bool m_suspended = false;
 };
 

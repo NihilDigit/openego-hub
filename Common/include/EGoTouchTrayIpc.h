@@ -19,6 +19,13 @@ inline constexpr wchar_t kSettingsMutexName[] = L"Local\\OpenEGoHubSettingsSingl
 inline constexpr UINT kCommandMessage = WM_APP + 20;
 inline constexpr UINT kActivateMessage = WM_APP + 21;
 inline constexpr UINT kNotificationMessage = WM_APP + 22;
+inline constexpr UINT kSettingsLifecycleMessage = WM_APP + 23;
+
+enum class SettingsLifecycle : uint32_t {
+    InstallStarted = 1,
+    SafeExitCompleted = 2,
+    SafeExitFailed = 3,
+};
 
 enum class Notification : uint32_t {
     PenConnected = 1,

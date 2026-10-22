@@ -26,6 +26,8 @@ SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 SERVICE_STATUS g_status{};
 Thp::Module g_module;
 bool g_consoleMode = false;
+SRWLOCK g_stopLock = SRWLOCK_INIT;
+bool g_stopped = false;
 
 void WriteEventLog(WORD type, const wchar_t *text) noexcept {
     HANDLE source = RegisterEventSourceW(nullptr, kEventSource);
@@ -120,11 +122,13 @@ void ReportStatus(DWORD state, DWORD exitCode = NO_ERROR) noexcept {
 }
 
 void StopService() noexcept {
-    if (g_module.IsLoaded()) {
-        HOST_LOG_INFO("stopping: ThpFuncStop then unload");
+    AcquireSRWLockExclusive(&g_stopLock);
+    if (!g_stopped && g_module.IsLoaded()) {
+        g_stopped = true;
+        HOST_LOG_INFO("stopping: ThpFuncStop");
         (void)g_module.ThpFuncStop();
-        g_module.Unload();
     }
+    ReleaseSRWLockExclusive(&g_stopLock);
 }
 
 DWORD WINAPI ServiceCtrlHandler(DWORD control, DWORD, LPVOID, LPVOID) noexcept {
@@ -156,9 +160,14 @@ bool StartThp() noexcept {
     }
     RegisterCallbacks();
     (void)g_module.ThpFuncStart();
-    HOST_LOG_INFO("ThpFuncStart called; VHFFunction=%d LogFunction=%d",
-                  Thp::ConfigStore::Instance().GetPenEleValue(0),
-                  Thp::ConfigStore::Instance().GetPenEleValue(1));
+    const int vhfFunc = Thp::ConfigStore::Instance().GetPenEleValue(0);
+    const int logFunc = Thp::ConfigStore::Instance().GetPenEleValue(1);
+    bool thpQuiet = false;
+    if (logFunc == 0) {
+        thpQuiet = g_module.SuppressVendorLogIfSupported();
+    }
+    HOST_LOG_INFO("ThpFuncStart called; VHFFunction=%d LogFunction=%d thpQuiet=%d",
+                  vhfFunc, logFunc, thpQuiet ? 1 : 0);
     return true;
 }
 
@@ -169,8 +178,24 @@ void RestoreVendorService() noexcept;
 // 尽快返回，只能挪进单独的线程。
 DWORD WINAPI ParentWatchThread(LPVOID param) noexcept {
     HANDLE parent = static_cast<HANDLE>(param);
-    (void)WaitForSingleObject(parent, INFINITE);
-    CloseHandle(parent);
+    if (Thp::ConfigStore::Instance().GetPenEleValue(1) == 0) {
+        for (int i = 0; i < 30; ++i) {
+            if (WaitForSingleObject(parent, 100) == WAIT_OBJECT_0) {
+                parent = nullptr;
+                break;
+            }
+            AcquireSRWLockShared(&g_stopLock);
+            const bool done = g_stopped || Thp::Module::TrySuppressHimaxLogIfReady();
+            ReleaseSRWLockShared(&g_stopLock);
+            if (done) break;
+        }
+    }
+    if (parent) {
+        (void)WaitForSingleObject(parent, INFINITE);
+        CloseHandle(parent);
+    } else {
+        CloseHandle(static_cast<HANDLE>(param));
+    }
 
     HOST_LOG_INFO("control process exited; stopping and restoring the vendor service");
     ReportStatus(SERVICE_STOP_PENDING);
@@ -216,9 +241,11 @@ void WINAPI ServiceMain(DWORD argc, LPWSTR *argv) noexcept {
     ReportStatus(SERVICE_RUNNING);
 }
 
-// 原厂在构造函数里设实时优先级。触摸采集对调度延迟敏感，这是原厂的选择，照搬。
+// 设高优先级而非实时优先级：原厂 x64 算法链在 ARM64EC 模拟下高频处理 SPI/笔帧时，
+// REALTIME_PRIORITY_CLASS 会抢占内核工作线程与 DWM，放大整机功耗与调度饥饿；
+// HIGH_PRIORITY_CLASS 已高于普通应用与主服务（ABOVE_NORMAL），足以保障触控低延迟。
 void ApplyProcessPriority() noexcept {
-    (void)SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+    (void)SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 }
 
 // 父进程消失后把原厂触控服务请回来，只用于「父进程没了」这条退出来路。
@@ -367,5 +394,7 @@ int wmain(int argc, wchar_t **argv) {
         wprintf(L"[hwthpec] not started by the SCM; use --console to run interactively\n");
         return 1;
     }
-    return 0;
+    // 进程退出前不触发静态析构里的 FreeLibrary(THP_Service.dll)：原厂存在 detach 的
+    // ThpNotify 睡眠线程，进程收尾阶段提前卸载 DLL 会触发模块已卸载访问异常。
+    ExitProcess(0);
 }

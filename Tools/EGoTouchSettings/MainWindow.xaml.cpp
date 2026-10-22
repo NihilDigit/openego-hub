@@ -225,7 +225,6 @@ MainWindow::MainWindow() {
     ShowAboutVersion();
     FillDevicePage();
     FillBatteryInfoAsync();
-    RefreshBatteryLive();
     LoadColorReferenceAsync();
     SetTitleBarIconAsync();
     RefreshState();
@@ -241,7 +240,6 @@ MainWindow::MainWindow() {
     m_refreshTimer.Tick([this](IInspectable const&, IInspectable const&) {
         RefreshState();
     });
-    m_refreshTimer.Start();
 
     // 电池单开一个 1 Hz 的节拍。不搭 m_refreshTimer 的 100 ms：读一次虽然只要几十微秒，
     // 但显示的数字以分钟为单位，而剩余时间的平滑系数是按每秒一个样本定的。
@@ -250,10 +248,24 @@ MainWindow::MainWindow() {
     m_batteryTimer.Tick([this](IInspectable const&, IInspectable const&) {
         RefreshBatteryLive();
     });
-    m_batteryTimer.Start();
+
+    SetPropW(WindowHandle(), L"OpenEGoHub.RefreshPolicy", this);
+    m_originalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+        WindowHandle(), GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&MainWndProc)));
+    AppWindow().Changed([this](auto const&, auto const&) { UpdateRefreshPolicy(); });
+    VisibilityChanged([this](auto const&, auto const&) { UpdateRefreshPolicy(); });
+    UpdateRefreshPolicy();
 
     Closed([this](IInspectable const&, WindowEventArgs const&) {
+        m_closed = true;
         SaveWindowPlacement();
+        if (m_originalWndProc) {
+            SetWindowLongPtrW(WindowHandle(), GWLP_WNDPROC,
+                             reinterpret_cast<LONG_PTR>(m_originalWndProc));
+            RemovePropW(WindowHandle(), L"OpenEGoHub.RefreshPolicy");
+            m_originalWndProc = nullptr;
+        }
+        if (m_penImageTimer) m_penImageTimer.Stop();
         if (m_refreshTimer) m_refreshTimer.Stop();
         if (m_batteryTimer) m_batteryTimer.Stop();
         // 防抖计时器要一并停掉：窗口关了之后它再触发，SendTrayCommand 会对着已经销毁的
@@ -261,6 +273,7 @@ MainWindow::MainWindow() {
         if (m_chargeLimitTimer) m_chargeLimitTimer.Stop();
         if (m_colorTemperatureTimer) m_colorTemperatureTimer.Stop();
         if (m_notificationWindow) {
+            get_self<implementation::NotificationWindow>(m_notificationWindow)->Shutdown();
             m_notificationWindow.Close();
             m_notificationWindow = nullptr;
         }
@@ -272,6 +285,54 @@ MainWindow::MainWindow() {
 MainWindow::~MainWindow() {
     if (m_refreshTimer) m_refreshTimer.Stop();
     DestroyBridgeWindow();
+}
+
+LRESULT CALLBACK MainWindow::MainWndProc(
+    HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto self = static_cast<MainWindow*>(GetPropW(hwnd, L"OpenEGoHub.RefreshPolicy"));
+    if (!self || !self->m_originalWndProc) return DefWindowProcW(hwnd, message, wParam, lParam);
+    const auto lifetime = self->get_strong();
+    const auto original = self->m_originalWndProc;
+    const auto result = CallWindowProcW(original, hwnd, message, wParam, lParam);
+    if (message == WM_SHOWWINDOW || message == WM_SIZE) self->UpdateRefreshPolicy();
+    return result;
+}
+
+bool MainWindow::IsMainUiVisible() {
+    if (m_closed) return false;
+    const auto hwnd = WindowHandle();
+    return hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd);
+}
+
+void MainWindow::UpdateRefreshPolicy() {
+    if (!m_uiReady || !m_refreshTimer || !m_batteryTimer) return;
+    const bool mainVisible = IsMainUiVisible();
+    const bool batteryVisible = mainVisible &&
+        BatteryPage().Visibility() == Visibility::Visible;
+    const bool notifyNeedsRefresh = !m_closed && m_notificationWindow &&
+        get_self<implementation::NotificationWindow>(m_notificationWindow)->NeedsStateRefresh();
+    const bool becameVisible = mainVisible && !m_mainUiVisible;
+    const bool batteryBecameVisible = batteryVisible && !m_batteryPageVisible;
+    if (!batteryVisible && m_batteryPageVisible) m_smoothedValid = false;
+    m_mainUiVisible = mainVisible;
+    m_batteryPageVisible = batteryVisible;
+    if (mainVisible || notifyNeedsRefresh) {
+        if (!m_refreshTimer.IsEnabled()) m_refreshTimer.Start();
+    } else {
+        m_refreshTimer.Stop();
+    }
+    if (batteryVisible) {
+        if (!m_batteryTimer.IsEnabled()) m_batteryTimer.Start();
+    } else {
+        m_batteryTimer.Stop();
+    }
+    if (becameVisible) {
+        m_lastRenderedValid = false;
+        RefreshState();
+    }
+    if (batteryBecameVisible && !m_closed) {
+        RefreshBatteryLive();
+    }
 }
 
 HWND MainWindow::WindowHandle() {
@@ -466,6 +527,27 @@ LRESULT CALLBACK MainWindow::BridgeWndProc(
     } else if (message == EGoTouchTrayIpc::kActivateMessage && self) {
         self->ActivateWindow();
         return 0;
+    } else if (message == EGoTouchTrayIpc::kSettingsLifecycleMessage && self) {
+        if (self->m_closed) return 0;
+        switch (static_cast<EGoTouchTrayIpc::SettingsLifecycle>(wParam)) {
+        case EGoTouchTrayIpc::SettingsLifecycle::InstallStarted:
+            self->Close();
+            break;
+        case EGoTouchTrayIpc::SettingsLifecycle::SafeExitCompleted:
+            self->m_exitPending = false;
+            self->Close();
+            break;
+        case EGoTouchTrayIpc::SettingsLifecycle::SafeExitFailed:
+            if (self->m_exitPending) {
+                self->m_exitPending = false;
+                self->SetInteractiveEnabled(self->m_trayConnected);
+                if (self->IsMainUiVisible()) {
+                    self->ShowError(L"无法安全退出", L"未能确认 HuaweiTHP 已恢复，应用将继续运行。");
+                }
+            }
+            break;
+        }
+        return 0;
     } else if (message == EGoTouchTrayIpc::kNotificationMessage && self) {
         self->ShowNotification(static_cast<EGoTouchTrayIpc::Notification>(wParam), lParam);
         return 0;
@@ -474,8 +556,11 @@ LRESULT CALLBACK MainWindow::BridgeWndProc(
 }
 
 void MainWindow::ShowNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload) {
+    if (m_closed) return;
     if (!m_notificationWindow) {
         m_notificationWindow = make<winrt::EGoTouchSettings::implementation::NotificationWindow>();
+        get_self<implementation::NotificationWindow>(m_notificationWindow)->SetRefreshDemandChanged(
+            [this] { UpdateRefreshPolicy(); });
     }
     auto implementation = get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
         m_notificationWindow);
@@ -509,7 +594,9 @@ void MainWindow::ActivateWindow() {
     SetForegroundWindow(hwnd);
     // 托盘的「有新版本」气泡就是经这条路把窗口叫起来的，而更新的弹窗要等窗口真的显示出来
     // 才敢弹。立刻刷一次，用户不必对着面板再等一拍轮询。
-    if (m_uiReady) RefreshState();
+    m_lastRenderedValid = false;
+    UpdateRefreshPolicy();
+    if (IsMainUiVisible()) RefreshState();
 }
 
 DWORD MainWindow::ReadUserSetting(const wchar_t* name, DWORD fallback) {
@@ -596,14 +683,10 @@ bool MainWindow::SendTrayCommand(EGoTouchTrayIpc::Command command, LPARAM value)
     return sent != 0 && response != 0;
 }
 
-// 版本取自 exe 自身的资源，不在源码里写死一份：写死的那份一定会和构建号脱节，而「关于」页
-// 存在的意义就是让人报问题时能说清跑的是哪一版。
-//
-// 取不到就把这一行整个折叠掉。留一个空 TextBlock 不是「什么都没显示」——它照样占一行高，
-// 把上面的标题顶离垂直中线，看起来就是标记和标题没对齐。**当前的构建正落在这一支上**：
-// 仓库里没有任何 VERSIONINFO 资源，第一步 GetFileVersionInfoSizeW 就返回 0。
+// 优先读取 exe 的版本资源；资源缺失时使用与安装包同源的构建版本。
 void MainWindow::ShowAboutVersion() {
-    AboutVersionText().Visibility(Visibility::Collapsed);
+    AboutVersionText().Text(L"版本 " + CurrentVersionText());
+    AboutVersionText().Visibility(Visibility::Visible);
 
     wchar_t module[MAX_PATH]{};
     if (GetModuleFileNameW(nullptr, module, MAX_PATH) == 0) return;
@@ -617,7 +700,8 @@ void MainWindow::ShowAboutVersion() {
     VS_FIXEDFILEINFO* info = nullptr;
     UINT infoSize = 0;
     if (!VerQueryValueW(buffer.data(), L"\\", reinterpret_cast<void**>(&info), &infoSize) ||
-        info == nullptr || infoSize == 0) {
+        info == nullptr || infoSize < sizeof(VS_FIXEDFILEINFO) ||
+        info->dwSignature != VS_FFI_SIGNATURE) {
         return;
     }
     const auto text = std::to_wstring(HIWORD(info->dwFileVersionMS)) + L"." +
@@ -797,6 +881,7 @@ fire_and_forget MainWindow::FillBatteryInfoAsync() {
 
 // 电池的高频项：电量、充放电、剩余时间。
 void MainWindow::RefreshBatteryLive() {
+    if (!IsMainUiVisible()) return;
     Gaokun::Power::LiveState live{};
     const auto result = Gaokun::Power::ReadLiveState(live);
     if (result != Gaokun::Power::Result::Ok || !live.batteryPresent) {
@@ -899,6 +984,7 @@ void MainWindow::NavSelectionChanged(
     GeneralPage().Visibility(tag == L"general" ? Visibility::Visible : Visibility::Collapsed);
     DevicePage().Visibility(tag == L"device" ? Visibility::Visible : Visibility::Collapsed);
     AboutPage().Visibility(tag == L"about" ? Visibility::Visible : Visibility::Collapsed);
+    UpdateRefreshPolicy();
 }
 
 void MainWindow::NavItemInvoked(
@@ -958,9 +1044,6 @@ void MainWindow::ApplyDeviceCardLayout() {
 
     PenGroup().Visibility(show(m_penSeen));
     KeyboardGroup().Visibility(show(m_kbdSeen));
-    // 设置项跟着各自的卡片走。设备不在场时留着它们，页面就不空，调的还是一台不存在的设备。
-    PenSettingsGroup().Visibility(show(m_penSeen));
-    KeyboardSettingsGroup().Visibility(show(m_kbdSeen));
     DeviceEmptyState().Visibility(show(!m_penSeen && !m_kbdSeen));
 
     // 两张设备卡片在够宽时并排。阈值按「一张卡片本身需要的宽度」定：低于它并排只会把两边
@@ -1266,27 +1349,59 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
 }
 
 void MainWindow::RefreshState() {
-    m_trayConnected = FindTrayWindow() != nullptr;
-    if (m_exitPending && !m_trayConnected) {
-        Close();
-        return;
-    }
+    if (m_closed) return;
+    const bool mainVisible = IsMainUiVisible();
+    const bool notifyNeedsRefresh = m_notificationWindow &&
+        get_self<implementation::NotificationWindow>(m_notificationWindow)->NeedsStateRefresh();
+    if (mainVisible) m_trayConnected = FindTrayWindow() != nullptr;
+    if (!mainVisible && !notifyNeedsRefresh) return;
 
     if (!m_reader.IsOpen()) m_reader.Open();
     PenStatus::State state{};
-    if (m_reader.IsOpen() && m_reader.Read(state)) {
-        RefreshControls(&state);
-        RefreshDevicePage(&state);
-        if (m_notificationWindow) {
-            auto implementation =
-                get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
-                    m_notificationWindow);
-            implementation->UpdateState(state);
-        }
+    const bool hasState = m_reader.IsOpen() && m_reader.Read(state);
+    if (hasState) {
+        if ((state.hasStylusLink && state.stylusLinked) ||
+            (state.hasChargingState && state.charging)) m_penSeen = true;
+        if (state.hasKbdPresent && state.kbdPresent) m_kbdSeen = true;
     } else {
         m_reader.Close();
-        RefreshControls(nullptr);
-        RefreshDevicePage(nullptr);
+    }
+
+    const bool imageRetryPending =
+        hasState &&
+        ((m_penSeen && !m_penImageSource) || (m_kbdSeen && !m_keyboardImageSource));
+    const bool transientActive =
+        imageRetryPending ||
+        m_chargeLimitAwaitingEcho ||
+        m_kbdDetachAwaitingEcho ||
+        m_providerAwaitingEcho ||
+        m_updateAwaitingEcho ||
+        m_vendorTarget != VendorTarget::None ||
+        m_exitPending ||
+        (m_chargeLimitTimer && m_chargeLimitTimer.IsEnabled());
+    const bool stateChanged =
+        !m_lastRenderedValid ||
+        transientActive ||
+        hasState != m_lastRenderedHasState ||
+        (hasState && std::memcmp(&state, &m_lastRenderedState, sizeof(state)) != 0) ||
+        m_trayConnected != m_lastRenderedTrayConnected ||
+        m_penSeen != m_lastRenderedPenSeen ||
+        m_kbdSeen != m_lastRenderedKbdSeen;
+
+    if (mainVisible && stateChanged) {
+        const PenStatus::State* statePtr = hasState ? &state : nullptr;
+        RefreshControls(statePtr);
+        if (m_closed) return;
+        RefreshDevicePage(statePtr);
+        m_lastRenderedState = state;
+        m_lastRenderedHasState = hasState;
+        m_lastRenderedTrayConnected = m_trayConnected;
+        m_lastRenderedPenSeen = m_penSeen;
+        m_lastRenderedKbdSeen = m_kbdSeen;
+        m_lastRenderedValid = true;
+    }
+    if (notifyNeedsRefresh && hasState && stateChanged) {
+        get_self<implementation::NotificationWindow>(m_notificationWindow)->UpdateState(state);
     }
 }
 
@@ -1406,14 +1521,50 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
         ChargeLimitStatusText().Text(ChargeLimitStatusFor(smart));
     }
 
-    if (state && state->hasTouchProvider) {
+    const bool providerKnown = state && state->hasTouchProvider;
+    const bool active = providerKnown &&
+        (state->touchProvider == PenStatus::TouchProviderState::EGoTouch ||
+         state->touchProvider == PenStatus::TouchProviderState::EGoSuspended);
+    const bool switching = providerKnown &&
+        (state->touchProvider == PenStatus::TouchProviderState::SwitchingToEGo ||
+         state->touchProvider == PenStatus::TouchProviderState::SwitchingToHuawei);
+    if (m_providerAwaitingEcho &&
+        ((providerKnown && !switching && active == m_providerRequested) ||
+         GetTickCount64() >= m_providerEchoDeadline)) {
+        m_providerAwaitingEcho = false;
+    }
+    if (providerKnown && !m_providerAwaitingEcho && !switching) {
+        m_updatingControls = true;
+        TouchProviderToggle().IsOn(active);
+        m_updatingControls = false;
+    }
+    if (!providerKnown) {
+        TouchProviderStatusText().Text(L"正在连接 OpenEGo Hub 服务…");
+    } else if (m_providerAwaitingEcho) {
+        TouchProviderStatusText().Text(m_providerRequested
+            ? L"正在切换到 OpenEGo Hub…" : L"正在交还华为原厂服务…");
+    } else {
         switch (state->touchProvider) {
+        case PenStatus::TouchProviderState::EGoTouch:
+            TouchProviderStatusText().Text(L"当前由 OpenEGo Hub 驱动触控与手写笔。");
+            break;
+        case PenStatus::TouchProviderState::EGoSuspended:
+            TouchProviderStatusText().Text(L"当前由 OpenEGo Hub 接管（息屏待机中）。");
+            break;
+        case PenStatus::TouchProviderState::SwitchingToEGo:
+            TouchProviderStatusText().Text(L"正在切换到 OpenEGo Hub…");
+            break;
+        case PenStatus::TouchProviderState::SwitchingToHuawei:
+            TouchProviderStatusText().Text(L"正在交还华为原厂服务…");
+            break;
+        case PenStatus::TouchProviderState::Huawei:
+            TouchProviderStatusText().Text(L"当前由华为原厂服务驱动。");
+            break;
         case PenStatus::TouchProviderState::Error:
-            // 只有异常才值得打断用户：正常接管与交还都是托盘生命周期的一部分，无需播报。
-            ShowStatus(InfoBarSeverity::Error, L"触控提供方异常",
-                       ProviderErrorText(state->providerError));
+            TouchProviderStatusText().Text(ProviderErrorText(state->providerError));
             break;
         default:
+            TouchProviderStatusText().Text(L"正在连接 OpenEGo Hub 服务…");
             break;
         }
     }
@@ -1598,6 +1749,7 @@ void MainWindow::AutoUpdateCheckToggled(IInspectable const&, RoutedEventArgs con
         return;
     }
     // 说明文字里写着这个开关的状态，立刻刷一次，不等下一拍轮询。
+    m_lastRenderedValid = false;
     RefreshState();
 }
 
@@ -1614,6 +1766,7 @@ void MainWindow::CheckForUpdatesClicked(IInspectable const&, RoutedEventArgs con
     // 服务要过一轮才把状态发布成 Checking，这段时间里通道里还是旧值；不挡住的话按钮会
     // 立刻亮回来，看起来像是没点上。
     BeginUpdateEcho(m_lastUpdateState, L"正在检查…");
+    m_lastRenderedValid = false;
     RefreshState();
 }
 
@@ -1653,6 +1806,7 @@ winrt::fire_and_forget MainWindow::ShowUpdateDialog(uint32_t version, hstring ve
     default:
         // 「稍后」不提交任何命令，也不落盘：只把这一版的提示收起来，下一轮检查照常再问。
         m_updateDismissedVersion = version;
+        m_lastRenderedValid = false;
         RefreshState();
         break;
     }
@@ -1669,6 +1823,7 @@ void MainWindow::RequestUpdateInstall() {
     // 这一小段回显期沿用「正在下载…」而不另起一句：它只有几百毫秒，紧接着就是真的在下载，
     // 为它单造一句措辞只会多一个要维护的字符串。
     BeginUpdateEcho(PenStatus::UpdateState::Available, L"正在下载…");
+    m_lastRenderedValid = false;
     RefreshState();
 }
 
@@ -1680,10 +1835,12 @@ void MainWindow::RequestUpdateSkip() {
     // 记住这一版是服务那边的事，本地也先收起提示：否则要等服务把状态改回 Idle 才消失。
     m_updateDismissedVersion = m_updateVersion;
     BeginUpdateEcho(PenStatus::UpdateState::Available, L"已跳过此版本。");
+    m_lastRenderedValid = false;
     RefreshState();
 }
 
 void MainWindow::SetInteractiveEnabled(bool enabled) {
+    TouchProviderToggle().IsEnabled(enabled);
     PenModeSelector().IsEnabled(enabled);
     ColorModeCombo().IsEnabled(enabled);
     SmartChargeToggle().IsEnabled(enabled);
@@ -1868,6 +2025,23 @@ void MainWindow::ChargeLimitChanged(
     m_chargeLimitTimer.Start();
 }
 
+void MainWindow::TouchProviderToggled(IInspectable const&, RoutedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    const bool requested = TouchProviderToggle().IsOn();
+    if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetProviderEnabled, requested ? 1 : 0)) {
+        m_updatingControls = true;
+        TouchProviderToggle().IsOn(!requested);
+        m_updatingControls = false;
+        ShowError(L"无法切换触控提供方", L"托盘没有响应，设置没有生效。");
+        return;
+    }
+    m_providerAwaitingEcho = true;
+    m_providerRequested = requested;
+    m_providerEchoDeadline = GetTickCount64() + 6000;
+    TouchProviderStatusText().Text(requested
+        ? L"正在切换到 OpenEGo Hub…" : L"正在交还华为原厂服务…");
+}
+
 void MainWindow::KeyboardWirelessToggled(IInspectable const&, RoutedEventArgs const&) {
     if (m_updatingControls) return;
     const bool requested = KeyboardWirelessToggle().IsOn();
@@ -1940,9 +2114,18 @@ void MainWindow::ColorTemperatureToggled(IInspectable const&, RoutedEventArgs co
 // 只是不再往任何一个方向偏。
 void MainWindow::ColorTemperatureResetClicked(IInspectable const&, RoutedEventArgs const&) {
     if (!m_uiReady) return;
-    // 直接改滑条的值，让 ValueChanged 走既有的防抖提交路径，不另外发一次命令——两条路径
-    // 各发一次的话，防抖那次会在重置之后再把旧值补发出去。
-    ColorTemperatureSlider().Value(6500);
+    if (ColorTemperatureSlider().Value() == 6500.0) {
+        // 同值赋值不会触发 ValueChanged；取消旧的防抖提交后直接发送中性值。
+        if (m_colorTemperatureTimer) m_colorTemperatureTimer.Stop();
+        m_pendingColorTemperature = 6500;
+        ColorTemperatureValueText().Text(L"6500K");
+        if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetColorTemperature, 6500)) {
+            ShowError(L"无法设置色温", L"托盘没有响应，设置没有生效。");
+        }
+    } else {
+        // 值有变化时沿用滑条的防抖提交路径。
+        ColorTemperatureSlider().Value(6500);
+    }
 }
 
 void MainWindow::EyeComfortToggled(IInspectable const&, RoutedEventArgs const&) {
@@ -2032,6 +2215,7 @@ winrt::fire_and_forget MainWindow::ConfirmExit() {
         co_return;
     }
     m_exitPending = true;
+    m_lastRenderedValid = false;
     RefreshState();
 }
 

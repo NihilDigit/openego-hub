@@ -48,14 +48,17 @@ public:
 
     // 请求宿主停止并等待它退出。超时后强制终止并返回 false——那种情况下设备可能停在
     // 中间状态，调用方应当在交还原厂服务前把这一点记进日志。
+    // true 表示停止完成，允许交接；非零进程退出码保存在 ExitCode，不阻止恢复华为。
     [[nodiscard]] bool Stop(std::chrono::milliseconds timeout = std::chrono::seconds(15)) noexcept;
 
     [[nodiscard]] bool IsRunning() const noexcept;
 
-    // 宿主最后一次停止时向 SCM 报告的退出码，仍在运行时为 -1。
+    // 停止时的 SCM 错误码或非零进程退出码；超时为 ERROR_TIMEOUT，启动后为 -1。
     [[nodiscard]] int ExitCode() const noexcept;
 
 private:
+    // Retain the process identity after SCM drops its PID on SERVICE_STOPPED.
+    mutable void *m_process = nullptr;
     int m_lastExitCode = -1;
 };
 

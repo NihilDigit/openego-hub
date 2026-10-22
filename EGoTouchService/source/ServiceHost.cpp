@@ -79,6 +79,8 @@ struct ServiceHost::Impl {
     // 待处理的电源事件，见 kPowerEvent*。监视线程写、控制线程取走，后写覆盖先写：只有
     // 最后那个状态是真的，中间的翻转没有意义。coordinator 只能在控制线程上被碰。
     std::atomic<int> m_pendingPowerEvent{kPowerEventNone};
+    // 显示状态独立于事件槽保留，用于亮屏事件被覆盖或丢失后的挂起自愈。
+    std::atomic<bool> m_displayOn{true};
     // 息屏之后推迟动手的时刻。只有控制线程读写，不需要同步。
     std::chrono::steady_clock::time_point m_powerSuspendDueAt{};
     std::atomic<bool> m_inputSuppressed{false};
@@ -766,10 +768,12 @@ bool ServiceHost::StartSystemStateMonitor() {
             switch (ev.type) {
             case Host::SystemStateEventType::Suspend:
             case Host::SystemStateEventType::DisplayOff:
+                // Suspend 也清除亮屏镜像，避免 DisplayOff 尚未到达时自愈误启动宿主。
+                m_impl->m_displayOn.store(false, std::memory_order_release);
                 m_impl->m_pendingPowerEvent.store(kPowerEventSuspend, std::memory_order_release);
                 break;
-            case Host::SystemStateEventType::ResumeAutomatic:
             case Host::SystemStateEventType::DisplayOn:
+                m_impl->m_displayOn.store(true, std::memory_order_release);
                 m_impl->m_pendingPowerEvent.store(kPowerEventResume, std::memory_order_release);
                 break;
             default:
@@ -1614,18 +1618,22 @@ void ServiceHost::ReplayLastWakeEvent() {
 
 bool ServiceHost::StopEGoTouchProvider() {
     SetInputSuppressed(false);
-    if (!m_thpHost.IsRunning()) return true;
 
     // 宿主收到停止事件后自行走完 ThpFuncStop 再退出。超时意味着收尾没走通，此时设备可能
     // 停在中间状态；交还原厂服务时它会自己复位 AFE，但这里必须留下记录。
-    const bool clean = m_thpHost.Stop(std::chrono::seconds(15));
-    if (!clean) {
+    const bool stopped = m_thpHost.Stop(std::chrono::seconds(15));
+    if (!stopped) {
         LOG_ERROR("Service", __func__, "Provider",
-                  "THP host did not exit within the timeout and was terminated.");
+                  "THP host stop could not be confirmed (code=%d).",
+                  m_thpHost.ExitCode());
+    } else if (m_thpHost.ExitCode() != 0) {
+        LOG_ERROR("Service", __func__, "Provider",
+                  "THP host exited abnormally (code=%d); continuing provider recovery.",
+                  m_thpHost.ExitCode());
     } else {
         LOG_INFO("Service", __func__, "Provider", "ARM64EC THP host stopped.");
     }
-    return clean;
+    return stopped;
 }
 
 void ServiceHost::SetInputSuppressed(bool suppressed) {
@@ -2205,6 +2213,15 @@ void ServiceHost::DispatchPendingPowerEvent() {
         now >= m_impl->m_powerSuspendDueAt) {
         m_impl->m_powerSuspendDueAt = {};
         m_impl->m_touchProviderCoordinator->OnSuspend(now);
+    }
+
+    // 独立的显示镜像兜底：单次 DisplayOn 投递丢失不能让两个提供方永久停着。
+    // ResumeAutomatic 可能只是后台维护，不更新镜像，也不能触发这里的重新接管。
+    if (m_impl->m_touchProviderCoordinator->IsSuspended() &&
+        m_impl->m_displayOn.load(std::memory_order_acquire) &&
+        m_impl->m_powerSuspendDueAt == std::chrono::steady_clock::time_point{}) {
+        m_impl->m_touchProviderCoordinator->OnResume(
+            TouchProviderCoordinator::Clock::now());
     }
 }
 

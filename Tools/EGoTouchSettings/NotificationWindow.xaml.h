@@ -17,6 +17,9 @@ struct NotificationWindow : NotificationWindowT<NotificationWindow> {
     void ShowToolChanged(bool eraser);
     void ApplyTheme(Microsoft::UI::Xaml::ElementTheme theme);
     void HideNotification();
+    bool NeedsStateRefresh() const noexcept;
+    void SetRefreshDemandChanged(std::function<void()> cb);
+    void Shutdown();
 
 private:
     HWND WindowHandle();
@@ -29,7 +32,8 @@ private:
     void PresentView(Microsoft::UI::Xaml::UIElement const& view, int widthDip, int heightDip,
                      std::function<void()> apply);
     void StartOpacityAnimation(
-        double from, double to, int milliseconds, std::function<void()> onComplete);
+        double from, double to, int milliseconds);
+    void StartTransition(int milliseconds, std::function<void()> action);
     void RestartDwellTimer();
     void ApplyConnectedState(const PenStatus::State& state);
     void ApplyKeyboardState(const PenStatus::State& state);
@@ -42,9 +46,16 @@ private:
     winrt::fire_and_forget LoadKeyboardImage();
 
     Microsoft::UI::Xaml::DispatcherTimer m_dwellTimer{nullptr};
+    Microsoft::UI::Xaml::DispatcherTimer m_transitionTimer{nullptr};
+    winrt::event_token m_transitionTick{};
+    uint64_t m_presentationGeneration = 0;
+    bool m_presented = false;
+    bool m_connectionView = false;
+    bool m_shutdown = false;
+    std::function<void()> m_onRefreshDemandChanged;
     // 窗口尺寸补间的节拍，非空表示正在收缩或展开。
     Microsoft::UI::Xaml::DispatcherTimer m_boundsTimer{nullptr};
-    Microsoft::UI::Xaml::Media::Animation::Storyboard m_storyboard{nullptr};
+    Microsoft::UI::Xaml::Media::Animation::Storyboard m_opacityStoryboard{nullptr};
     uint32_t m_penModelId = 0;
     uint64_t m_penImageGeneration = 0;
     uint64_t m_keyboardImageGeneration = 0;

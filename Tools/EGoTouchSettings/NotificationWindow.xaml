@@ -4,10 +4,6 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:EGoTouchSettings">
 
-    <Window.SystemBackdrop>
-        <DesktopAcrylicBackdrop />
-    </Window.SystemBackdrop>
-
     <Grid x:Name="NotificationRoot" Background="Transparent" Opacity="0">
         <!-- 圆角必须与 DWM 给窗口裁的那一档一致，见 ConfigureWindow 里的说明。
              OverlayCornerRadius 就是那一档，写死数值会在下一次系统改半径时重新错开。
@@ -36,6 +32,7 @@
                     <TextBlock x:Name="PenNameText"
                                Text="HUAWEI M-Pencil"
                                FontSize="14"
+                               FontWeight="SemiBold"
                                TextTrimming="CharacterEllipsis"
                                VerticalAlignment="Center" />
                     <local:BatteryIndicator x:Name="PenBatteryIndicator"
@@ -69,11 +66,12 @@
                     <TextBlock x:Name="KeyboardNameText"
                                Text="HUAWEI 智能磁吸键盘"
                                FontSize="14"
-                               HorizontalAlignment="Right"
-                               TextAlignment="Right"
+                               FontWeight="SemiBold"
+                               HorizontalAlignment="Left"
+                               TextAlignment="Left"
                                TextTrimming="CharacterEllipsis" />
                     <local:BatteryIndicator x:Name="KeyboardBatteryIndicator"
-                                            HorizontalAlignment="Right" />
+                                            HorizontalAlignment="Left" />
                 </StackPanel>
             </Grid>
 

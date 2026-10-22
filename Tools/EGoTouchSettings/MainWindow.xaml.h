@@ -15,6 +15,7 @@ struct MainWindow : MainWindowT<MainWindow> {
         IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void AutoStartToggled(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void KeyboardWirelessToggled(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void TouchProviderToggled(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void SmartChargeToggled(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void VendorHintDismissed(
         Microsoft::UI::Xaml::Controls::InfoBar const&, IInspectable const&);
@@ -56,6 +57,20 @@ struct MainWindow : MainWindowT<MainWindow> {
 
 private:
     static LRESULT CALLBACK BridgeWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+
+    static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    WNDPROC m_originalWndProc = nullptr;
+    bool IsMainUiVisible();
+    void UpdateRefreshPolicy();
+    bool m_closed = false;
+    bool m_mainUiVisible = false;
+    bool m_batteryPageVisible = false;
+    PenStatus::State m_lastRenderedState{};
+    bool m_lastRenderedValid = false;
+    bool m_lastRenderedHasState = false;
+    bool m_lastRenderedTrayConnected = false;
+    bool m_lastRenderedPenSeen = false;
+    bool m_lastRenderedKbdSeen = false;
 
     HWND WindowHandle();
     HWND FindTrayWindow() const;
@@ -153,6 +168,10 @@ private:
     bool m_kbdDetachAwaitingEcho = false;
     bool m_kbdDetachRequested = false;
     ULONGLONG m_kbdDetachEchoDeadline = 0;
+    // 接管/交还期间保留用户意图，等待状态回显或六秒超时。
+    bool m_providerAwaitingEcho = false;
+    bool m_providerRequested = false;
+    ULONGLONG m_providerEchoDeadline = 0;
     // 色温滑条的防抖。每条命令要拉起一个进程写 PCC，逐 tick 发就是几十个进程连续写，画面会抖。
     Microsoft::UI::Xaml::DispatcherTimer m_colorTemperatureTimer{nullptr};
     int m_pendingColorTemperature = 0;

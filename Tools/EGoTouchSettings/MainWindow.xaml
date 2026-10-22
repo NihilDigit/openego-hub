@@ -242,9 +242,6 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
-                            <!-- 设置项跨满两列，摆在两张卡片下面。窄窗口时第二列宽度为 0，
-                                 跨列不影响它，仍然是整宽一行。 -->
-                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
                         <!-- 笔 -->
@@ -284,7 +281,7 @@
                                                 Visibility="Collapsed"
                                                 MinWidth="0" Padding="6"
                                                 Background="Transparent" BorderThickness="0"
-                                                HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                HorizontalAlignment="Right" VerticalAlignment="Center"
                                                 ToolTipService.ToolTip="移除"
                                                 Click="PenDismissClicked">
                                             <FontIcon Glyph="&#xE711;" FontSize="12"
@@ -325,9 +322,61 @@
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE70F;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="双击行为" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            Text="选择连按两次笔侧键时执行的操作。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ComboBox
+                                        x:Name="PenModeSelector"
+                                        Grid.Column="2"
+                                        MinWidth="180"
+                                        VerticalAlignment="Center"
+                                        SelectionChanged="PenModeSelectionChanged">
+                                        <ComboBoxItem Content="遵循系统笔设置" />
+                                        <ComboBoxItem Content="切换书写与橡皮擦" />
+                                    </ComboBox>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="OneNoteCompatibilityRow" Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE70B;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="OneNote 兼容" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="OneNoteCompatibilityStatusText"
+                                            Text="切换工具时同步 OneNote 的绘图选项。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        x:Name="OneNoteCompatibilityToggle"
+                                        Grid.Column="2"
+                                        MinWidth="0"
+                                        OnContent=""
+                                        OffContent=""
+                                        Margin="0,0,-12,0"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        Toggled="OneNoteCompatibilityToggled" />
+                                </Grid>
+                            </Border>
                         </StackPanel>
 
-                        <!-- 键盘 -->
+                        <!-- 键盘：状态与设置同属一列，窄屏时整体堆叠。 -->
                         <StackPanel x:Name="KeyboardGroup" Grid.Row="1" Grid.Column="0" Spacing="4"
                                     VerticalAlignment="Top" Visibility="Collapsed">
                             <TextBlock Text="键盘" Style="{StaticResource SettingsGroupHeaderStyle}" />
@@ -359,7 +408,7 @@
                                                 Visibility="Collapsed"
                                                 MinWidth="0" Padding="6"
                                                 Background="Transparent" BorderThickness="0"
-                                                HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                HorizontalAlignment="Right" VerticalAlignment="Center"
                                                 ToolTipService.ToolTip="移除"
                                                 Click="KeyboardDismissClicked">
                                             <FontIcon Glyph="&#xE711;" FontSize="12"
@@ -381,97 +430,33 @@
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
-                        </StackPanel>
-
-                        <!-- 笔与键盘的设置项。放在两张状态卡片下面而不是单独一页：它们要改的
-                             正是上面这两个设备，隔一页去调整会让人先怀疑自己找错了地方。 -->
-                        <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Spacing="24">
-                            <StackPanel x:Name="PenSettingsGroup" Spacing="4" Visibility="Collapsed">
-                                <TextBlock Text="笔" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                                <Border Style="{StaticResource SettingsCardStyle}">
-                                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <FontIcon Glyph="&#xE70F;" Style="{StaticResource SettingsRowIconStyle}" />
-                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                            <TextBlock Text="双击行为" TextWrapping="Wrap" />
-                                            <TextBlock
-                                                Text="选择连按两次笔侧键时执行的操作。"
-                                                Style="{StaticResource SettingsDescriptionStyle}" />
-                                        </StackPanel>
-                                        <ComboBox
-                                            x:Name="PenModeSelector"
-                                            Grid.Column="2"
-                                            MinWidth="180"
-                                            VerticalAlignment="Center"
-                                            SelectionChanged="PenModeSelectionChanged">
-                                            <ComboBoxItem Content="遵循系统笔设置" />
-                                            <ComboBoxItem Content="切换书写与橡皮擦" />
-                                        </ComboBox>
-                                    </Grid>
-                                </Border>
-                                <Border x:Name="OneNoteCompatibilityRow" Style="{StaticResource SettingsCardStyle}">
-                                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <FontIcon Glyph="&#xE70B;" Style="{StaticResource SettingsRowIconStyle}" />
-                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                            <TextBlock Text="OneNote 兼容" TextWrapping="Wrap" />
-                                            <TextBlock
-                                                x:Name="OneNoteCompatibilityStatusText"
-                                                Text="切换工具时同步 OneNote 的绘图选项。"
-                                                Style="{StaticResource SettingsDescriptionStyle}" />
-                                        </StackPanel>
-                                        <ToggleSwitch
-                                            x:Name="OneNoteCompatibilityToggle"
-                                            Grid.Column="2"
-                                            MinWidth="0"
-                                            OnContent=""
-                                            OffContent=""
-                                            Margin="0,0,-12,0"
-                                            HorizontalAlignment="Right"
-                                            VerticalAlignment="Center"
-                                            Toggled="OneNoteCompatibilityToggled" />
-                                    </Grid>
-                                </Border>
-                            </StackPanel>
-
-                            <StackPanel x:Name="KeyboardSettingsGroup" Spacing="4" Visibility="Collapsed">
-                                <TextBlock Text="键盘" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                                <Border Style="{StaticResource SettingsCardStyle}">
-                                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <FontIcon Glyph="&#xE765;" Style="{StaticResource SettingsRowIconStyle}" />
-                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                            <TextBlock Text="分离后保持无线连接" TextWrapping="Wrap" />
-                                            <TextBlock
-                                                x:Name="KeyboardStatusText"
-                                                Text="键盘与主机分离后继续通过无线方式使用。"
-                                                Style="{StaticResource SettingsDescriptionStyle}" />
-                                        </StackPanel>
-                                        <ToggleSwitch
-                                            x:Name="KeyboardWirelessToggle"
-                                            Grid.Column="2"
-                                            MinWidth="0"
-                                            OnContent=""
-                                            OffContent=""
-                                            Margin="0,0,-12,0"
-                                            HorizontalAlignment="Right"
-                                            VerticalAlignment="Center"
-                                            Toggled="KeyboardWirelessToggled" />
-                                    </Grid>
-                                </Border>
-                            </StackPanel>
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE765;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="分离后保持无线连接" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="KeyboardStatusText"
+                                            Text="键盘与主机分离后继续通过无线方式使用。"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        x:Name="KeyboardWirelessToggle"
+                                        Grid.Column="2"
+                                        MinWidth="0"
+                                        OnContent=""
+                                        OffContent=""
+                                        Margin="0,0,-12,0"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        Toggled="KeyboardWirelessToggled" />
+                                </Grid>
+                            </Border>
                         </StackPanel>
                     </Grid>
                     </StackPanel>
@@ -909,9 +894,38 @@
                              这几个值必须写在控件上。同样的设置放进 Style 的 Setter 里，MinWidth 不会生效，
                              实测开关仍按 154 排布。 -->
 
-                        <!-- 系统 -->
-                        <!-- 华为服务。放在最前：这一页的其余各项都是本程序自己的开关，只有
-                             这一条动的是系统上别人的东西，代价也最大。 -->
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="触控接管" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xEDA4;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="接管触控与手写笔" TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="TouchProviderStatusText"
+                                            Text="正在检查…"
+                                            Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        x:Name="TouchProviderToggle"
+                                        Grid.Column="2"
+                                        MinWidth="0"
+                                        OnContent=""
+                                        OffContent=""
+                                        Margin="0,0,-12,0"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        Toggled="TouchProviderToggled" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- 华为服务：停用或恢复 PC Manager 的后台服务。 -->
                         <StackPanel Spacing="4">
                             <TextBlock Text="华为服务" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardStyle}">
@@ -1257,8 +1271,14 @@
                         <!-- 关于页是标记唯一以完整三层出现的地方。这里不缩到图标尺寸，
                              层与层之间的明暗差正是它要表达的东西：一个接触点在电容图上
                              由强到弱的等高线。 -->
-                        <StackPanel Orientation="Horizontal" Spacing="16">
-                            <Viewbox Width="52" Height="52" VerticalAlignment="Center">
+                        <Border Style="{StaticResource SettingsCardStyle}" Padding="20,18">
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                            <Viewbox Width="48" Height="48" VerticalAlignment="Center">
                                 <Grid Width="24" Height="24">
                                     <!-- BRAND-MARK:BEGIN -->
                                     <!-- 由 scripts/make_brand_assets.py 从 Assets/brand/openego-hub.svg 生成，不要手改。 -->
@@ -1308,12 +1328,16 @@
                                     <!-- BRAND-MARK:END -->
                                 </Grid>
                             </Viewbox>
-                            <StackPanel Spacing="4" VerticalAlignment="Center">
-                                <TextBlock Text="OpenEGo Hub" Style="{ThemeResource TitleTextBlockStyle}" />
-                                <TextBlock x:Name="AboutVersionText"
+                            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                <TextBlock Text="OpenEGo Hub" Style="{StaticResource TitleTextBlockStyle}" />
+                                <TextBlock Text="HUAWEI MateBook E Go 硬件控制中心"
                                            Style="{StaticResource SettingsDescriptionStyle}" />
                             </StackPanel>
-                        </StackPanel>
+                            <TextBlock x:Name="AboutVersionText" Grid.Column="2"
+                                       VerticalAlignment="Center"
+                                       Style="{StaticResource SettingsDescriptionStyle}" />
+                            </Grid>
+                        </Border>
 
                         <!-- 诊断排在项目、许可之前：关于页其余各组都是读的，只有这一组
                              是用户要动手做的事，出问题时找它不该先滚一屏。 -->
@@ -1352,7 +1376,7 @@
                                     </Grid.ColumnDefinitions>
                                     <FontIcon Glyph="&#xE7C3;" Style="{StaticResource SettingsRowIconStyle}" />
                                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                        <TextBlock Text="厂商日志" TextWrapping="Wrap" />
+                                        <TextBlock Text="附带厂商日志" TextWrapping="Wrap" />
                                         <TextBlock
                                             Text="触摸或笔不工作时，原因通常记录在华为触控服务的日志里。文件较大，默认不附带。"
                                             Style="{StaticResource SettingsDescriptionStyle}" />
@@ -1387,100 +1411,103 @@
                         </StackPanel>
 
                         <StackPanel Spacing="4">
-                            <TextBlock Text="项目" Style="{StaticResource SettingsGroupHeaderStyle}" />
+                            <TextBlock Text="开源与致谢" Style="{StaticResource SettingsGroupHeaderStyle}" />
                             <Border Style="{StaticResource SettingsCardStyle}">
-                                <Grid ColumnSpacing="12" RowSpacing="2">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
-                                    </Grid.RowDefinitions>
                                     <!-- GitHub Octicons: mark-github-16, MIT licensed. -->
                                     <Viewbox
-                                        Grid.RowSpan="2"
-                                        Width="28"
-                                        Height="28"
+                                        Width="24"
+                                        Height="20"
                                         HorizontalAlignment="Center"
                                         VerticalAlignment="Center">
                                         <Path
                                             Width="16"
                                             Height="16"
                                             Stretch="Uniform"
-                                            Fill="{ThemeResource TextFillColorPrimaryBrush}"
+                                            Fill="{ThemeResource TextFillColorSecondaryBrush}"
                                             Data="M8,0 C3.58,0 0,3.58 0,8 C0,11.54 2.29,14.53 5.47,15.59 C5.87,15.66 6.02,15.42 6.02,15.21 C6.02,15.02 6.01,14.39 6.01,13.72 C4,14.09 3.48,13.23 3.32,12.78 C3.23,12.55 2.84,11.84 2.5,11.65 C2.22,11.5 1.82,11.13 2.49,11.12 C3.12,11.11 3.57,11.7 3.72,11.94 C4.44,13.15 5.59,12.81 6.05,12.6 C6.12,12.08 6.33,11.73 6.56,11.53 C4.78,11.33 2.92,10.64 2.92,7.58 C2.92,6.71 3.23,5.99 3.74,5.43 C3.66,5.23 3.38,4.41 3.82,3.31 C3.82,3.31 4.49,3.1 6.02,4.13 C6.66,3.95 7.34,3.86 8.02,3.86 C8.7,3.86 9.38,3.95 10.02,4.13 C11.55,3.09 12.22,3.31 12.22,3.31 C12.66,4.41 12.38,5.23 12.3,5.43 C12.81,5.99 13.12,6.7 13.12,7.58 C13.12,10.65 11.25,11.33 9.47,11.53 C9.76,11.78 10.01,12.26 10.01,13.01 C10.01,14.08 10,14.94 10,15.21 C10,15.42 10.15,15.67 10.55,15.59 C13.71,14.53 16,11.53 16,8 C16,3.58 12.42,0 8,0 Z" />
                                     </Viewbox>
-                                    <TextBlock Grid.Column="1" Text="GitHub" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="开源仓库" TextWrapping="Wrap" />
+                                        <TextBlock Text="查看源代码、版本发布与问题反馈。"
+                                                   Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
                                     <HyperlinkButton
-                                        Grid.Row="1"
-                                        Grid.Column="1"
+                                        Grid.Column="2"
+                                        VerticalAlignment="Center"
                                         Content="NihilDigit/openego-hub"
                                         Padding="0"
                                         HorizontalAlignment="Left"
                                         NavigateUri="https://github.com/NihilDigit/openego-hub" />
                                 </Grid>
                             </Border>
-                        </StackPanel>
-
-                        <StackPanel Spacing="4">
-                            <TextBlock Text="许可" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardCompactStyle}">
-                                <!-- 两条横排。各占一行会在右边留下一大片空白，而它们本来就是
-                                     并列的两个链接，不存在先后。 -->
-                                <StackPanel Orientation="Horizontal" Spacing="20">
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE8A5;" Style="{StaticResource SettingsRowIconStyle}" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="开源许可" TextWrapping="Wrap" />
+                                        <TextBlock Text="基于 MIT 许可证开源。"
+                                                   Style="{StaticResource SettingsDescriptionStyle}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="20" VerticalAlignment="Center">
                                     <HyperlinkButton
                                         Content="MIT License"
                                         Padding="0"
                                         NavigateUri="https://github.com/NihilDigit/openego-hub/blob/main/LICENSE" />
                                     <HyperlinkButton
-                                        Content="第三方许可与声明"
+                                        Content="第三方许可"
                                         Padding="0"
                                         NavigateUri="https://github.com/NihilDigit/openego-hub/blob/main/THIRD-PARTY-NOTICES.md" />
-                                </StackPanel>
+                                    </StackPanel>
+                                </Grid>
                             </Border>
-                        </StackPanel>
-
-                        <StackPanel Spacing="4">
-                            <TextBlock Text="致谢" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardCompactStyle}">
-                                <!-- 链接嵌在句子里而不是一行一个：一行一个会在右边留下大片
-                                     空白，而这些项目之间并无主次，本来就该并列成一句话。 -->
-                                <!-- 致谢与声明取同一档字号，比页面上其余描述性文字大一号：
-                                     这两段是给人读的句子，不是控件下面的一行注解。 -->
-                                <RichTextBlock
-                                    FontSize="14"
-                                    LineHeight="22"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}">
-                                    <Paragraph>
-                                        <Run Text="本项目的实现参考了这些优秀的开源项目：" />
-                                        <Hyperlink NavigateUri="https://github.com/awarson2233/EGoTouchRev">EGoTouchRev</Hyperlink><Run Text="、" /><Hyperlink
-                                            NavigateUri="https://github.com/matebook-e-go/goodies">goodies</Hyperlink><Run Text="、" /><Hyperlink
-                                            NavigateUri="https://github.com/LanZhan-Harmony/HuaweiThpService">HuaweiThpService</Hyperlink><Run Text="、" /><Hyperlink
-                                            NavigateUri="https://github.com/eiyooooo/MateBook-E-Pen">MateBook-E-Pen</Hyperlink><Run Text="、" /><Hyperlink
-                                            NavigateUri="https://github.com/SaKongA/EgoTools">EgoTools</Hyperlink><Run Text="、" /><Hyperlink
-                                            NavigateUri="https://github.com/qwqVictor/HuaweiPenEraserService">HuaweiPenEraserService</Hyperlink><Run Text="。" />
-                                    </Paragraph>
-                                </RichTextBlock>
-                            </Border>
-                        </StackPanel>
-
-                        <StackPanel Spacing="4">
-                            <TextBlock Text="声明" Style="{StaticResource SettingsGroupHeaderStyle}" />
-                            <Border Style="{StaticResource SettingsCardCompactStyle}">
-                                <!-- 字号与上面的致谢取齐，见那里的说明。 -->
-                                <StackPanel Spacing="2">
-                                    <TextBlock
-                                        Text="与 HUAWEI、Himax 及其商标持有者无关联。"
-                                        FontSize="14"
-                                        LineHeight="22"
-                                        Style="{StaticResource SettingsDescriptionStyle}" />
-                                    <TextBlock
-                                        Text="设备产品图在运行时读取自本机的 PC Manager，不随本程序分发。"
-                                        FontSize="14"
-                                        LineHeight="22"
-                                        Style="{StaticResource SettingsDescriptionStyle}" />
+                            <Border Style="{StaticResource SettingsCardStyle}">
+                                <StackPanel Spacing="12">
+                                    <Grid ColumnSpacing="16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="&#xEB51;" Style="{StaticResource SettingsRowIconStyle}" />
+                                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                            <TextBlock Text="致谢" TextWrapping="Wrap" />
+                                            <TextBlock Text="感谢社区开发者在 MateBook E Go 硬件协议与驱动适配上的探索。"
+                                                       Style="{StaticResource SettingsDescriptionStyle}" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <Grid Margin="34,0,0,0" ColumnSpacing="16" RowSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <HyperlinkButton Grid.Row="0" Grid.Column="0" Padding="0" HorizontalAlignment="Left"
+                                                         Content="EGoTouchRev" NavigateUri="https://github.com/awarson2233/EGoTouchRev" />
+                                        <HyperlinkButton Grid.Row="0" Grid.Column="1" Padding="0" HorizontalAlignment="Left"
+                                                         Content="goodies" NavigateUri="https://github.com/matebook-e-go/goodies" />
+                                        <HyperlinkButton Grid.Row="0" Grid.Column="2" Padding="0" HorizontalAlignment="Left"
+                                                         Content="HuaweiThpService" NavigateUri="https://github.com/LanZhan-Harmony/HuaweiThpService" />
+                                        <HyperlinkButton Grid.Row="1" Grid.Column="0" Padding="0" HorizontalAlignment="Left"
+                                                         Content="MateBook-E-Pen" NavigateUri="https://github.com/eiyooooo/MateBook-E-Pen" />
+                                        <HyperlinkButton Grid.Row="1" Grid.Column="1" Padding="0" HorizontalAlignment="Left"
+                                                         Content="EgoTools" NavigateUri="https://github.com/SaKongA/EgoTools" />
+                                        <HyperlinkButton Grid.Row="1" Grid.Column="2" Padding="0" HorizontalAlignment="Left"
+                                                         Content="HuaweiPenEraserService" NavigateUri="https://github.com/qwqVictor/HuaweiPenEraserService" />
+                                    </Grid>
                                 </StackPanel>
                             </Border>
                         </StackPanel>

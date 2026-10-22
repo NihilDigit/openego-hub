@@ -22,14 +22,15 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string]$Config = 'Debug',
-    [switch]$Restore
+    [switch]$Restore,
+    [switch]$NoPause
 )
 
 $ErrorActionPreference = 'Stop'
 # 提权后的窗口是独立的，脚本一抛错窗口就关，服务停在半路却没人看见原因。把错误留在窗口里。
 trap {
     Write-Host "[x] $_" -ForegroundColor Red
-    Read-Host "press Enter to close"
+    if (-not $NoPause) { Read-Host "press Enter to close" }
     break
 }
 
@@ -38,6 +39,11 @@ $principal = New-Object Security.Principal.WindowsPrincipal($id)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Config', $Config)
     if ($Restore) { $argList += '-Restore' }
+    if ($NoPause) {
+        $argList += '-NoPause'
+        $p = Start-Process -FilePath 'pwsh.exe' -Verb RunAs -ArgumentList $argList -Wait -PassThru
+        exit $p.ExitCode
+    }
     Start-Process -FilePath 'pwsh.exe' -Verb RunAs -ArgumentList $argList
     return
 }
@@ -143,4 +149,4 @@ Start-Service OpenEGoHubService
 (Get-Service OpenEGoHubService).WaitForStatus('Running', '00:00:20')
 Get-Service OpenEGoHubService | Format-Table Name, Status -AutoSize
 Start-Tray
-Read-Host "press Enter to close"
+if (-not $NoPause) { Read-Host "press Enter to close" }

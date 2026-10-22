@@ -69,12 +69,20 @@ private:
 } // namespace
 
 HostController::~HostController() noexcept {
-    if (IsRunning()) (void)Stop();
+    if (m_process || IsRunning()) (void)Stop();
+    if (m_process) CloseHandle(m_process);
 }
 
 StartResult HostController::Start(const std::wstring &hostExePath,
                                   const std::wstring &extraArgs) noexcept {
     if (IsRunning()) return StartResult::AlreadyRunning;
+    // A stopped SCM entry can still have callbacks running in the old process.
+    if (m_process && WaitForSingleObject(m_process, 0) != WAIT_OBJECT_0)
+        return StartResult::LaunchFailed;
+    if (m_process) {
+        CloseHandle(m_process);
+        m_process = nullptr;
+    }
 
     if (GetFileAttributesW(hostExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         return StartResult::HostNotFound;
@@ -128,49 +136,70 @@ StartResult HostController::Start(const std::wstring &hostExePath,
     }
 
     m_lastExitCode = -1;
+    (void)IsRunning();
     return StartResult::Started;
 }
 
 bool HostController::Stop(std::chrono::milliseconds timeout) noexcept {
     ScopedHandle manager{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
-    if (!manager) return true;
+    if (!manager) return false;
 
     ScopedHandle service{
         OpenServiceW(manager.get(), kHostServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS)};
-    if (!service) return true; // 没注册过，没有东西要停
+    if (!service) return GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST && !m_process;
 
     SERVICE_STATUS_PROCESS status{};
-    if (!QueryStatus(service.get(), status)) return true;
-    if (status.dwCurrentState == SERVICE_STOPPED) {
-        m_lastExitCode = static_cast<int>(status.dwWin32ExitCode);
-        return true;
+    if (!QueryStatus(service.get(), status)) return false;
+    if (!m_process && status.dwProcessId) {
+        m_process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION |
+                                   PROCESS_TERMINATE, FALSE, status.dwProcessId);
+        if (!m_process) return false;
     }
-
-    const DWORD pid = status.dwProcessId;
+    const ULONGLONG deadline = GetTickCount64() +
+        static_cast<ULONGLONG>(timeout.count() > 0 ? timeout.count() : 0);
 
     SERVICE_STATUS legacy{};
-    if (!ControlService(service.get(), SERVICE_CONTROL_STOP, &legacy) &&
+    if (status.dwCurrentState != SERVICE_STOPPED &&
+        status.dwCurrentState != SERVICE_STOP_PENDING &&
+        !ControlService(service.get(), SERVICE_CONTROL_STOP, &legacy) &&
         GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
         return false;
     }
 
-    const DWORD waited =
-        WaitForState(service.get(), SERVICE_STOP_PENDING, static_cast<DWORD>(timeout.count()));
-    if (waited == SERVICE_STOPPED) {
-        if (QueryStatus(service.get(), status)) {
-            m_lastExitCode = static_cast<int>(status.dwWin32ExitCode);
+    const auto remaining = [&]() -> DWORD {
+        const auto now = GetTickCount64();
+        return now >= deadline ? 0 : static_cast<DWORD>(
+            (deadline - now) < MAXDWORD ? deadline - now : MAXDWORD - 1);
+    };
+    for (;;) {
+        if (!QueryStatus(service.get(), status)) return false;
+        if (status.dwCurrentState == SERVICE_STOPPED || remaining() == 0) break;
+        Sleep(kPollIntervalMs);
+    }
+    if (status.dwCurrentState == SERVICE_STOPPED) {
+        m_lastExitCode = static_cast<int>(status.dwWin32ExitCode);
+        if (!m_process) return true;
+        if (WaitForSingleObject(m_process, remaining()) == WAIT_OBJECT_0) {
+            DWORD exitCode = 0;
+            const bool queried = GetExitCodeProcess(m_process, &exitCode) != FALSE;
+            CloseHandle(m_process);
+            m_process = nullptr;
+            if (!queried) m_lastExitCode = ERROR_GEN_FAILURE;
+            else if (exitCode) m_lastExitCode = static_cast<int>(exitCode);
+            // The coordinator needs to know whether it may restore Huawei.
+            // An abnormal exit is diagnostic; it must not leave both providers off.
+            return true;
         }
-        return true;
     }
 
     // 超时说明宿主没走完收尾。强杀之后设备可能停在中间状态，交还原厂服务时它会自己复位
     // AFE，但调用方应当把这次超时记下来：反复出现意味着收尾路径有问题。
-    if (pid != 0) {
-        HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
-        if (process) {
-            (void)TerminateProcess(process, 1);
-            (void)WaitForSingleObject(process, 2000);
-            CloseHandle(process);
+    m_lastExitCode = ERROR_TIMEOUT;
+    if (m_process) {
+        (void)TerminateProcess(m_process, 1);
+        if (WaitForSingleObject(m_process, 2000) == WAIT_OBJECT_0) {
+            CloseHandle(m_process);
+            m_process = nullptr;
         }
     }
     return false;
@@ -185,6 +214,16 @@ bool HostController::IsRunning() const noexcept {
 
     SERVICE_STATUS_PROCESS status{};
     if (!QueryStatus(service.get(), status)) return false;
+    if (m_process && status.dwProcessId &&
+        status.dwProcessId != GetProcessId(m_process) &&
+        WaitForSingleObject(m_process, 0) == WAIT_OBJECT_0) {
+        CloseHandle(m_process);
+        m_process = nullptr;
+    }
+    if (!m_process && status.dwProcessId) {
+        m_process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION |
+                                   PROCESS_TERMINATE, FALSE, status.dwProcessId);
+    }
     return status.dwCurrentState != SERVICE_STOPPED;
 }
 

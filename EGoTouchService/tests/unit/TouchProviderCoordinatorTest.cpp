@@ -20,6 +20,7 @@ struct Fixture {
     bool disableHuawei = true;
     bool startEGo = true;
     bool stopEGo = true;
+    int stopEGoFailuresRemaining = 0;
     bool restoreHuawei = true;
     bool egoAlive = true;
     int egoAliveQueries = 0;
@@ -42,7 +43,14 @@ struct Fixture {
         operations.stopHuawei = [this, step] { step("stopHuawei"); return stopHuawei; };
         operations.disableHuawei = [this, step] { step("disableHuawei"); return disableHuawei; };
         operations.startEGo = [this, step] { step("startEGo"); return startEGo; };
-        operations.stopEGo = [this, step] { step("stopEGo"); return stopEGo; };
+        operations.stopEGo = [this, step] {
+            step("stopEGo");
+            if (stopEGoFailuresRemaining > 0) {
+                --stopEGoFailuresRemaining;
+                return false;
+            }
+            return stopEGo;
+        };
         operations.restoreHuawei = [this, step] { step("restoreHuawei"); return restoreHuawei; };
         operations.egoAlive = [this] { ++egoAliveQueries; return egoAlive; };
         operations.now = [this] { return clock; };
@@ -255,9 +263,8 @@ void TestAcquireFailureCoolsDown() {
 }
 
 // 宿主里的 THP_Service 收不到电源通知，面板断电之后它内部就死了而进程还在（唤醒瞬间实测
-// running=1, exit=-1）。所以挂起时必须停掉它。停完之后触控整个交还原厂：原厂起来只要
-// 0.32 秒，换掉的是一个两个提供方都不在跑、又没有看门狗的状态。
-void TestSuspendHandsTouchBackToHuawei() {
+// running=1, exit=-1）。挂起时只停宿主，避免亮屏后再等原厂停止。
+void TestSuspendStopsOnlyEGoAndResumeRetakesTouch() {
     Fixture f;
     auto coordinator = f.Make();
     const auto start = TouchProviderCoordinator::Clock::time_point{};
@@ -265,11 +272,17 @@ void TestSuspendHandsTouchBackToHuawei() {
 
     f.calls.clear();
     coordinator.OnSuspend(start + std::chrono::seconds(1));
-    Require(f.calls == std::vector<std::string>{"stopEGo", "restoreHuawei"},
-            "suspend stops the host and hands touch back, leaving no gap");
-    Require(coordinator.State() == PenStatus::TouchProviderState::Huawei,
-            "the published state names whoever really drives touch right now");
+    Require(f.calls == std::vector<std::string>{"stopEGo"},
+            "suspend stops only EGo and never starts Huawei");
+    Require(coordinator.State() == PenStatus::TouchProviderState::EGoSuspended,
+            "suspend publishes the intentionally stopped provider state");
+    Require(coordinator.Error() == TouchProviderError::None,
+            "a clean suspension is not an error");
+    Require(coordinator.IsSuspended(), "suspend is queryable by the display watchdog");
     Require(coordinator.HasLease(), "the tray never gave the lease back");
+    coordinator.OnSuspend(start + std::chrono::seconds(1));
+    Require(f.calls == std::vector<std::string>{"stopEGo"},
+            "duplicate suspend does not stop the host twice");
 
     f.calls.clear();
     coordinator.OnResume(start + std::chrono::seconds(2));
@@ -277,6 +290,7 @@ void TestSuspendHandsTouchBackToHuawei() {
             "resume takes touch back through the ordinary takeover path");
     Require(coordinator.State() == PenStatus::TouchProviderState::EGoTouch,
             "resume returns to EGoTouch");
+    Require(!coordinator.IsSuspended(), "resume clears the suspended flag");
 }
 
 // 息屏并不冻结托盘，它照常每秒续租一次。续租必须延租约却不能把宿主拉起来，否则代管等于
@@ -298,13 +312,13 @@ void TestSuspendedRenewalsExtendTheLeaseWithoutTakingOver() {
     }
     Require(f.calls.empty(), "no switch of any kind happens while the machine sleeps");
     Require(f.egoAliveQueries == 0, "the host is not probed: we stopped it ourselves");
-    Require(coordinator.State() == PenStatus::TouchProviderState::Huawei,
-            "Huawei keeps driving touch until the resume arrives");
+    Require(coordinator.State() == PenStatus::TouchProviderState::EGoSuspended,
+            "both providers stay stopped until the display resumes");
     Require(coordinator.HasLease(), "the renewals kept the lease alive");
 }
 
-// 托盘在睡眠期间被杀掉，租约无人续期。醒来时触控留在原厂手里，不该凭空替托盘抢回来。
-void TestSuspendedLeaseCanStillExpire() {
+// 用户会话在深度睡眠期间冻结，Tick 即使先于唤醒心跳也不能误判租约超时。
+void TestSuspendedLeaseSurvivesAnHourWithoutRenewal() {
     Fixture f;
     auto coordinator = f.Make(std::chrono::milliseconds(100));
     const auto start = TouchProviderCoordinator::Clock::time_point{};
@@ -312,14 +326,23 @@ void TestSuspendedLeaseCanStillExpire() {
     coordinator.OnSuspend(start);
 
     f.calls.clear();
+    f.egoAliveQueries = 0;
+    f.egoAlive = false;
     coordinator.Tick(start + std::chrono::hours(1));
-    Require(!coordinator.HasLease(), "an unrenewed lease expires even while suspended");
-    Require(f.calls.empty(), "touch is already with Huawei, so expiry has nothing to switch");
+    Require(coordinator.HasLease(), "suspension preserves even an unrenewed lease");
+    Require(coordinator.IsSuspended(), "sleeping for an hour does not clear suspension");
+    Require(f.calls.empty(), "suspended tick never starts Huawei or EGo");
+    Require(f.egoAliveQueries == 0, "suspended tick never probes the stopped host");
+    Require(coordinator.AcquireOrRenew(start + std::chrono::hours(1)),
+            "renewal remains accepted after an hour asleep");
+    Require(f.calls.empty(), "suspended renewal only extends the lease");
 
-    coordinator.OnResume(start + std::chrono::hours(1));
-    Require(f.calls.empty(), "resume without a lease does not take touch back");
-    Require(coordinator.State() == PenStatus::TouchProviderState::Huawei,
-            "Huawei keeps touch until the tray comes back and asks");
+    f.clock = start + std::chrono::hours(1);
+    coordinator.OnResume(f.clock);
+    Require(f.calls == std::vector<std::string>{"stopHuawei", "startEGo", "disableHuawei"},
+            "resume still retakes touch after the original lease deadline");
+    Require(coordinator.State() == PenStatus::TouchProviderState::EGoTouch,
+            "EGo is restored even if the tray has not yet resumed");
 }
 
 // 唤醒后宿主起不来，走的是普通接管的失败路径：SwitchToEGo 自带回退，原厂留在原地，
@@ -339,6 +362,13 @@ void TestResumeStartFailureLeavesHuaweiOwningTouch() {
     Require(coordinator.State() == PenStatus::TouchProviderState::Huawei,
             "Huawei ends up owning touch");
     Require(!coordinator.HasLease(), "a failed takeover drops the lease");
+    Require(!coordinator.IsSuspended(), "failed resume leaves suspension");
+    Require(coordinator.Error() == TouchProviderError::StartEGoFailed,
+            "failed resume records the start failure");
+    f.calls.clear();
+    Require(!coordinator.AcquireOrRenew(f.clock + std::chrono::seconds(1)),
+            "failed resume enters the acquire cooldown");
+    Require(f.calls.empty(), "cooldown does not disturb the restored Huawei provider");
 }
 
 void TestSuspendOutsideEGoIsANoOp() {
@@ -364,17 +394,114 @@ void TestResumeLeaseIsAtLeastTheGrace() {
 
     const auto resumeAt = start + std::chrono::hours(3);
     f.clock = resumeAt;
+    // 恢复过程本身也耗时，宽限必须从切换完成而非 OnResume 入口起算。
+    f.stepCost = std::chrono::milliseconds(100);
     coordinator.OnResume(resumeAt);
+    const auto resumedAt = f.clock;
     Require(coordinator.State() == PenStatus::TouchProviderState::EGoTouch,
             "precondition: the retake succeeded");
 
     f.calls.clear();
-    coordinator.Tick(resumeAt + TouchProviderCoordinator::kResumeLeaseGrace -
+    coordinator.Tick(resumedAt + TouchProviderCoordinator::kResumeLeaseGrace -
                      std::chrono::milliseconds(1));
     Require(f.calls.empty(), "the grace outlives the 1 s lease the takeover would have given");
-    coordinator.Tick(resumeAt + TouchProviderCoordinator::kResumeLeaseGrace);
+    coordinator.Tick(resumedAt + TouchProviderCoordinator::kResumeLeaseGrace);
     Require(f.calls == std::vector<std::string>{"stopEGo", "restoreHuawei"},
             "a tray that never comes back still loses the lease");
+}
+
+void TestShortDisplayOffStillGrantsResumeGrace() {
+    Fixture f;
+    auto coordinator = f.Make(std::chrono::milliseconds(100));
+    Require(coordinator.AcquireOrRenew(f.clock), "precondition: EGo active");
+    f.calls.clear();
+    const auto resumeAt = f.clock + std::chrono::milliseconds(50);
+    coordinator.OnResume(resumeAt);
+    coordinator.Tick(resumeAt + TouchProviderCoordinator::kResumeLeaseGrace -
+                     std::chrono::milliseconds(1));
+    Require(f.calls.empty(), "short display-off grants grace without restarting the host");
+    coordinator.Tick(resumeAt + TouchProviderCoordinator::kResumeLeaseGrace);
+    Require(f.calls == std::vector<std::string>{"stopEGo", "restoreHuawei"},
+            "short display-off grace still eventually expires");
+}
+
+void TestResumeDoesNotShortenALongerLease() {
+    Fixture f;
+    auto coordinator = f.Make(std::chrono::hours(1));
+    Require(coordinator.AcquireOrRenew(f.clock), "precondition: EGo active");
+    coordinator.OnSuspend(f.clock);
+    coordinator.OnResume(f.clock);
+    f.calls.clear();
+    coordinator.Tick(f.clock + TouchProviderCoordinator::kResumeLeaseGrace);
+    Require(f.calls.empty(), "resume grace never shortens a longer lease");
+    Require(coordinator.HasLease(), "the longer lease remains held");
+}
+
+void TestSuspendedReleaseAndOrdinaryShutdownRestoreHuawei() {
+    for (const bool shutdown : {false, true}) {
+        Fixture f;
+        auto coordinator = f.Make();
+        Require(coordinator.AcquireOrRenew(f.clock), "precondition: EGo active");
+        coordinator.OnSuspend(f.clock);
+        f.calls.clear();
+        if (shutdown) coordinator.Shutdown(false);
+        else Require(coordinator.Release(), "release while suspended succeeds");
+        Require(f.calls == std::vector<std::string>{"stopEGo", "restoreHuawei"},
+                "release and ordinary shutdown restore Huawei even from EGoSuspended");
+        Require(coordinator.State() == PenStatus::TouchProviderState::Huawei,
+                "Huawei owns touch after leaving suspension");
+        Require(!coordinator.HasLease() && !coordinator.IsSuspended(),
+                "release and shutdown clear both the lease and suspension");
+    }
+}
+
+void TestSuspendStopFailureFallsBackToHuawei() {
+    Fixture f;
+    auto coordinator = f.Make();
+    Require(coordinator.AcquireOrRenew(f.clock), "precondition: EGo active");
+    f.calls.clear();
+    f.stopEGoFailuresRemaining = 1;
+    coordinator.OnSuspend(f.clock);
+    Require(f.calls == std::vector<std::string>{"stopEGo", "stopEGo", "restoreHuawei"},
+            "a failed initial stop retries through the Huawei fallback transaction");
+    Require(coordinator.State() == PenStatus::TouchProviderState::Huawei,
+            "successful suspend fallback leaves Huawei owning touch");
+    Require(coordinator.IsSuspended() && coordinator.HasLease(),
+            "fallback retains suspension and lease for resume");
+    f.calls.clear();
+    coordinator.Tick(f.clock + std::chrono::hours(1));
+    Require(f.calls.empty(), "fallback suspension also ignores lease expiry");
+    coordinator.OnResume(f.clock);
+    Require(f.calls == std::vector<std::string>{"stopHuawei", "startEGo", "disableHuawei"},
+            "resume retakes touch even after the suspend fallback");
+}
+
+void TestSuspendStopAndFallbackFailureRemainRecoverable() {
+    Fixture f;
+    auto coordinator = f.Make();
+    Require(coordinator.AcquireOrRenew(f.clock), "precondition: EGo active");
+    f.calls.clear();
+    f.stopEGo = false;
+    coordinator.OnSuspend(f.clock);
+    Require(f.calls == std::vector<std::string>{"stopEGo", "stopEGo"},
+            "unconfirmed host stop must not start Huawei concurrently");
+    Require(coordinator.State() == PenStatus::TouchProviderState::EGoTouch &&
+                coordinator.Error() == TouchProviderError::StopEGoFailed,
+            "failed suspend fallback publishes EGoTouch and StopEGoFailed");
+    Require(coordinator.IsSuspended() && coordinator.HasLease(),
+            "failed fallback retains the resume path");
+    f.calls.clear();
+    Require(coordinator.AcquireOrRenew(f.clock), "suspended error state accepts renewal");
+    coordinator.Tick(f.clock + std::chrono::hours(1));
+    Require(f.calls.empty() && f.egoAliveQueries == 0,
+            "suspended error state neither retries takeover nor probes the host");
+    f.stopEGo = true;
+    coordinator.OnResume(f.clock);
+    Require(f.calls == std::vector<std::string>{"stopEGo", "stopHuawei", "startEGo", "disableHuawei"},
+            "resume stops the stale EGo host first before starting a fresh one");
+    Require(coordinator.State() == PenStatus::TouchProviderState::EGoTouch &&
+                coordinator.Error() == TouchProviderError::None,
+            "resume after stop recovery returns cleanly to EGoTouch");
 }
 
 // 一次接管同步占住控制线程 4888~5129 毫秒，而租期就是 5000 毫秒。租期若按进入时刻起算，
@@ -471,12 +598,17 @@ int main() {
         TestRestartBudgetIsPerWindow();
         TestReleaseClearsTheCooldown();
         TestAcquireFailureCoolsDown();
-        TestSuspendHandsTouchBackToHuawei();
+        TestSuspendStopsOnlyEGoAndResumeRetakesTouch();
         TestSuspendedRenewalsExtendTheLeaseWithoutTakingOver();
-        TestSuspendedLeaseCanStillExpire();
+        TestSuspendedLeaseSurvivesAnHourWithoutRenewal();
         TestResumeStartFailureLeavesHuaweiOwningTouch();
         TestSuspendOutsideEGoIsANoOp();
         TestResumeLeaseIsAtLeastTheGrace();
+        TestShortDisplayOffStillGrantsResumeGrace();
+        TestResumeDoesNotShortenALongerLease();
+        TestSuspendedReleaseAndOrdinaryShutdownRestoreHuawei();
+        TestSuspendStopFailureFallsBackToHuawei();
+        TestSuspendStopAndFallbackFailureRemainRecoverable();
         TestSlowTakeoverDoesNotExpireItsOwnLease();
         TestHostStaysWatchedAfterTheLeaseIsGone();
         TestShutdownDuringSystemShutdownDoesNotWaitForHuawei();

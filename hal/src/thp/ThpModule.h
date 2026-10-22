@@ -38,6 +38,14 @@ public:
     void RegisterGetPenEleValue(CallBackFunc f) const noexcept { m_registerGetPenEleValue(f); }
     void RegisterSetPenEleValue(CallBackFunc f) const noexcept { m_registerSetPenEleValue(f); }
 
+    // ThpFuncStart 无条件将内部 logFlag 置 1，忽略配置中的 LogFunction=0。
+    // 校验指令签名与数据段边界后将 logFlag 置 0，关闭 Service_LogFile 高频落盘。
+    [[nodiscard]] bool SuppressVendorLogIfSupported() const noexcept;
+
+    // himax_thp_drv.dll 由 ThpMain 异步加载并在 InitTpdLogLevel 中把 g_logLevel 置 3。
+    // 当检测到 thp_afe_open 已完成（g_hLogFile 非空）且指令签名匹配时，将 g_logLevel 置 0。
+    [[nodiscard]] static bool TrySuppressHimaxLogIfReady() noexcept;
+
 private:
     using ThpFuncStartFn = int(__cdecl *)();
     using ThpFuncStopFn = int(__cdecl *)();
