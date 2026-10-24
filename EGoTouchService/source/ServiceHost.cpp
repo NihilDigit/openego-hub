@@ -196,6 +196,42 @@ struct ServiceHost::Impl {
         if (threshold.IsManual()) packed |= kChargeLimitManual;
         m_chargeLimitCache.store(packed, std::memory_order_relaxed);
     }
+
+    // 华为后台服务状态的缓存。Query() 每轮要对 7 个服务做 44 次 SCM RPC 往返，跟着
+    // PublishStatusSnapshot 每 250 毫秒跑一次会让本进程和 services.exe 在待机时每秒产生
+    // 约 200 次跨进程唤醒。打包进单个原子量，在亮屏期间按周期刷新，并在用户点击开关后
+    // 立即重读。
+    //   bit 0-7   total
+    //   bit 8-15  disabled
+    //   bit 16-23 running
+    //   bit 24    这份缓存有效
+    static constexpr uint32_t kVendorServicesValid = 1u << 24;
+    std::atomic<uint32_t> m_vendorServicesCache{0};
+    HostSupervisor::Clock::time_point m_lastVendorServicesRead{};
+
+    VendorServices::Status RefreshVendorServices() {
+        const auto vendor = VendorServices::Query();
+        const uint32_t packed =
+            kVendorServicesValid |
+            (static_cast<uint32_t>(vendor.total) & 0xFFu) |
+            ((static_cast<uint32_t>(vendor.disabled) & 0xFFu) << 8) |
+            ((static_cast<uint32_t>(vendor.running) & 0xFFu) << 16);
+        m_vendorServicesCache.store(packed, std::memory_order_relaxed);
+        return vendor;
+    }
+
+    void ReconcileVendorServices() {
+        using Clock = HostSupervisor::Clock;
+        constexpr auto kReadInterval = std::chrono::seconds(10);
+
+        const auto now = Clock::now();
+        if (m_lastVendorServicesRead != Clock::time_point{} &&
+            now - m_lastVendorServicesRead < kReadInterval) {
+            return;
+        }
+        m_lastVendorServicesRead = now;
+        (void)RefreshVendorServices();
+    }
     // 两个 hal 宿主各自的「应当在运行」意图与重启预算。只由 AccessoryLoop 这一个线程读写，
     // 结论经下面两个原子发布给别的线程。
     HostSupervisor m_penSupervisor{"pen"};
@@ -922,7 +958,7 @@ bool ServiceHost::Start() {
 
             // 厂商服务的现状记一条。「上次禁用过、这次重启后被谁恢复了」和「本来就没禁用」
             // 在日志里长得一样，事后只能靠这条基线区分。
-            const auto vendor = VendorServices::Query();
+            const auto vendor = m_impl->RefreshVendorServices();
             LOG_INFO("Service", "Start", "Vendor",
                      "Vendor services: {} present, {} disabled, {} running.",
                      vendor.total, vendor.disabled, vendor.running);
@@ -961,11 +997,23 @@ void ServiceHost::CloseIpcResources() {
 // 用轮询而不是等宿主的通知：快照本身可重复读，错过一轮没有代价，而少一条跨进程唤醒路径
 // 就少一处可能卡住的地方。事件那侧是管道，Poll 不阻塞，同一个循环里一并取走。
 void ServiceHost::AccessoryLoop() {
+    bool wasDisplayOn = true;
     while (!m_accessoryStop.load(std::memory_order_acquire)) {
         // 充电阈值的首读也在这里，不在启动路径上：它走 WMI，一次往返在实测里可以花掉几秒，
         // 放进 Start 就把 ServiceMain 报 RUNNING 的时刻一起推后，安装程序于是停在「正在
         // 启动服务」。设置窗第一次打开时滑块仍能停在真实位置——第一轮在 250 毫秒内就跑到。
-        ReconcileChargeLimit();
+        // 息屏期间跳过 WMI 与 SCM 周期重读，避免现代待机下每几秒唤醒一次 EC 与服务管理器；
+        // 亮屏瞬间复位时间戳，第一轮立即补读。
+        const bool displayOn = m_impl->m_displayOn.load(std::memory_order_acquire);
+        if (displayOn) {
+            if (!wasDisplayOn) {
+                m_impl->m_lastChargeRead = {};
+                m_impl->m_lastVendorServicesRead = {};
+            }
+            ReconcileChargeLimit();
+            m_impl->ReconcileVendorServices();
+        }
+        wasDisplayOn = displayOn;
 
         SuperviseAccessoryHosts();
         OpenAccessoryChannels();
@@ -1538,11 +1586,19 @@ void ServiceHost::PublishStatusSnapshot() {
 
     // 只有服务有权查 SCM 的启动类型，所以判据由这里给出。名单里的服务全部禁用才算「已禁用」,
     // 部分禁用仍显示为未禁用：那种状态下再点一次开关会把剩下的补上，比显示成已完成有用。
-    const auto vendor = VendorServices::Query();
-    out.hasVendorServices = vendor.total > 0;
-    out.vendorServicesDisabled = vendor.total > 0 && vendor.disabled == vendor.total;
-    out.vendorServicesRunning = vendor.running > 0;
-    out.vendorServicesAllRunning = vendor.total > 0 && vendor.running == vendor.total;
+    // 这里读缓存，不在每 250 毫秒一次的快照路径上直接刷 SCM。
+    uint32_t vendorPacked = m_impl->m_vendorServicesCache.load(std::memory_order_relaxed);
+    if ((vendorPacked & Impl::kVendorServicesValid) == 0) {
+        (void)m_impl->RefreshVendorServices();
+        vendorPacked = m_impl->m_vendorServicesCache.load(std::memory_order_relaxed);
+    }
+    const int vendorTotal = static_cast<int>(vendorPacked & 0xFFu);
+    const int vendorDisabled = static_cast<int>((vendorPacked >> 8) & 0xFFu);
+    const int vendorRunning = static_cast<int>((vendorPacked >> 16) & 0xFFu);
+    out.hasVendorServices = vendorTotal > 0;
+    out.vendorServicesDisabled = vendorTotal > 0 && vendorDisabled == vendorTotal;
+    out.vendorServicesRunning = vendorRunning > 0;
+    out.vendorServicesAllRunning = vendorTotal > 0 && vendorRunning == vendorTotal;
 
     // 更新。版本号无条件转发：Idle 与 Checking 之外的状态才要求它有意义，而清零一次反而
     // 会让界面在 Available 到 Downloading 的切换中间闪一下 0.0.0。
@@ -1832,15 +1888,18 @@ void ServiceHost::HandlePenControlCommand(const PenControl::Command& command) {
         switch (command.vendorServices) {
         case PenControl::VendorServicesCommand::Disable: {
             const bool ok = VendorServices::DisableAll();
-            const auto status = VendorServices::Query();
+            const auto status = m_impl->RefreshVendorServices();
             LOG_INFO("Service", __func__, "Vendor",
                      "Vendor services disabled ({}/{}), complete={}.",
                      status.disabled, status.total, ok);
+            RepublishPenStatus();
             break;
         }
         case PenControl::VendorServicesCommand::Restore: {
             const bool ok = VendorServices::RestoreAll();
+            (void)m_impl->RefreshVendorServices();
             LOG_INFO("Service", __func__, "Vendor", "Vendor services restored, complete={}.", ok);
+            RepublishPenStatus();
             break;
         }
         default:

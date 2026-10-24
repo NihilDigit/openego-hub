@@ -102,7 +102,7 @@ if ($Restore) {
     Start-Service OpenEGoHubService
     (Get-Service OpenEGoHubService).WaitForStatus('Running', '00:00:20')
     Start-Tray
-    Read-Host "press Enter to close"
+    if (-not $NoPause) { Read-Host "press Enter to close" }
     return
 }
 
