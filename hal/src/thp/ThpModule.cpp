@@ -114,7 +114,10 @@ bool Module::SuppressVendorLogIfSupported() const noexcept {
 }
 
 bool Module::TrySuppressHimaxLogIfReady() noexcept {
-    HMODULE himax = GetModuleHandleW(L"himax_thp_drv.dll");
+    return detail::SuppressHimaxLogInImage(GetModuleHandleW(L"himax_thp_drv.dll"));
+}
+
+bool detail::SuppressHimaxLogInImage(HMODULE himax) noexcept {
     if (!himax) return false;
 
     const auto *base = reinterpret_cast<const uint8_t *>(himax);
@@ -126,14 +129,16 @@ bool Module::TrySuppressHimaxLogIfReady() noexcept {
         return false;
     }
 
-    // 校验 RVA 0x41950 (SetLogLevel): 0F B6 C1 89 05 71 E2 0E 00 C3 -> 写 g_logLevel (0x12FBC8)
+    // 本机 2023-05-16 版本的导出入口 0x41950 先记录日志，真正的赋值序列在 0x424EA。
+    // movzx eax, dil; mov [rip+0xED6D4], eax -> g_logLevel (0x12FBC8)。
+    // 不调用导出函数：它会先进行日志 I/O；只原子改写已核实的数据，不修改代码或文件句柄。
     constexpr uint8_t kSetLevelSig[10] = {
-        0x0F, 0xB6, 0xC1, 0x89, 0x05, 0x71, 0xE2, 0x0E, 0x00, 0xC3};
+        0x40, 0x0F, 0xB6, 0xC7, 0x89, 0x05, 0xD4, 0xD6, 0x0E, 0x00};
     // 校验 RVA 0x28459 (CloseLog): 48 8B 0D 80 00 17 00 48 85 C9 -> 读 g_hLogFile (0x1984E0)
     constexpr uint8_t kLogHandleSig[10] = {
         0x48, 0x8B, 0x0D, 0x80, 0x00, 0x17, 0x00, 0x48, 0x85, 0xC9};
 
-    if (std::memcmp(base + 0x41950, kSetLevelSig, sizeof(kSetLevelSig)) != 0 ||
+    if (std::memcmp(base + 0x424EA, kSetLevelSig, sizeof(kSetLevelSig)) != 0 ||
         std::memcmp(base + 0x28459, kLogHandleSig, sizeof(kLogHandleSig)) != 0) {
         return false;
     }

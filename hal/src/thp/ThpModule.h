@@ -7,6 +7,11 @@
 // stdcall 是同一套 ABI，此处不产生差别，但写出来才能在日后换架构时立刻暴露问题。
 namespace Thp {
 
+namespace detail {
+// 仅接受已映射的完整 PE 镜像；分离入口供离线测试，不加载或执行厂商 DLL。
+[[nodiscard]] bool SuppressHimaxLogInImage(HMODULE image) noexcept;
+}
+
 using CallBackFunc = int(__cdecl *)(int arg);
 
 // 原厂 PrintEventLog 回调固定用 64 字节缓冲调用 GetMESSAGE，对应 .NET 侧的
