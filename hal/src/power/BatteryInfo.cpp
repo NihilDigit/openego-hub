@@ -243,12 +243,8 @@ Result ReadLiveState(LiveState &out) noexcept {
     SYSTEM_POWER_STATUS power{};
     if (GetSystemPowerStatus(&power) && power.BatteryLifePercent <= 100) {
         out.percent = power.BatteryLifePercent;
-    } else if (state.MaxCapacity > 0) {
-        // 系统报不出百分比时按容量折算，而不是留 kPercentUnknown：容量本身是可信的。
-        out.percent = static_cast<uint8_t>(
-            (static_cast<uint64_t>(state.RemainingCapacity) * 100 + state.MaxCapacity / 2) /
-            state.MaxCapacity);
     }
+    // 容量比与系统百分比采用不同口径。系统未知时保留未知，不能把容量估算冒充为系统值。
     return Result::Ok;
 }
 

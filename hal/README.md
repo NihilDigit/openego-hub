@@ -118,6 +118,33 @@ GaokunKeyboardHost.exe --detach-support [enable|disable]
 `StopProcPipeMsg`、`StopLoop` 与 `FreeLibrary` 一律不调用：循环线程仍停在该 DLL 内部，
 调用它们同样会访问违例。原厂工具解析了这些符号却从不使用，原因即在于此。
 
+### 电量读数与排查
+
+主机百分比采用 `GetSystemPowerStatus().BatteryLifePercent`。有效范围为 0–100；
+系统返回未知或读取失败时，`ReadLiveState` 保留 `kPercentUnknown`，界面清除旧数字。
+剩余容量与满充容量继续用于容量和时间计算，不用于替代系统百分比。
+字段含义见 [Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-system_power_status)。
+
+配件回调在转换为字节前校验 0–100；异常采样清除旧电量有效位，下一次有效采样恢复。
+界面还会隐藏已知宿主故障、组件缺失或明确离线时的电量。笔的充电状态和书写链路分别上报，
+因此链路位变为假时保留充电状态；宿主心跳也只能证明进程主循环仍在运行。
+
+在仓库根目录执行：
+
+```powershell
+# Debug/Release 边界测试；不需要电池或配件，CI 同样运行。
+.\hal\scripts\test-battery.ps1
+# 可选：编译后同时进行本机只读采样。
+.\hal\scripts\test-battery.ps1 -Live
+# 已编译时直接采样：次数、间隔毫秒。
+.\hal\build\tests\battery\BatteryLiveDiagnostic-Release.exe 30 1000
+```
+
+诊断输出 UTC 时间、实际 `ReadLiveState`、前后两次 Win32 百分比、WinRT 百分比与容量比例。
+2026-11-04 本机采样中三处百分比均为 38%，同期容量比例为 37.728%–38.212%。
+此次窗口读取通道不可用，Windows 设置页面的偶发差异尚未复现；再次出现时，保持两个电池页面
+打开并运行上述采样，记录显示值及时间，区分接口差异与页面刷新延迟。
+
 ### 充电阈值（GaokunPower）
 
 ```

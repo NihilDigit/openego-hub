@@ -45,7 +45,7 @@ enum class TimeKind : uint8_t {
 };
 
 struct LiveState {
-    uint8_t percent = kPercentUnknown;  ///< 0-100
+    uint8_t percent = kPercentUnknown;  ///< Windows system percentage, 0-100 or unknown
     bool batteryPresent = false;
     bool acOnline = false;
     // 方向以 powerMilliWatt 的符号为准。系统上报的这两个标志实测会同时置位（切换到充电的

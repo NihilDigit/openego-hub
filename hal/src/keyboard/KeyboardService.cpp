@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "shared/ModelNames.h"
+#include "shared/BatterySample.h"
 
 namespace Gaokun::Keyboard {
 
@@ -89,8 +90,8 @@ void CopyText(GetTextFn fn, char *dst, int32_t capacity) noexcept {
 
 int __cdecl OnBattery(int value) noexcept {
     std::lock_guard<std::mutex> guard(g_mutex);
-    g_snapshot.battery = static_cast<uint8_t>(value);
-    SetFlag(Flag::HasBattery, true);
+    ApplyBatterySample(value, g_snapshot.battery, g_snapshot.flags,
+                       static_cast<uint32_t>(Flag::HasBattery));
     Touch();
     return 0;
 }

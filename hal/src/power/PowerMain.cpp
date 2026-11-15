@@ -55,7 +55,11 @@ void ReportFailure(const wchar_t *what, Result result, HRESULT failure) noexcept
         return 1;
     }
 
-    wprintf(L"percent  : %u%%\n", live.percent);
+    if (live.percent <= 100) {
+        wprintf(L"percent  : %u%%\n", live.percent);
+    } else {
+        wprintf(L"percent  : unknown\n");
+    }
     wprintf(L"remaining: %lu mWh of %lu mWh\n",
             static_cast<unsigned long>(live.remainingCapacityMWh),
             static_cast<unsigned long>(live.fullChargedCapacityMWh));
