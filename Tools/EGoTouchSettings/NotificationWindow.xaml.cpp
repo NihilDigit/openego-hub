@@ -2,6 +2,7 @@
 
 #include "NotificationWindow.xaml.h"
 #include "AccessoryImageLoader.h"
+#include "AccessoryBatteryState.h"
 
 #include <dwmapi.h>
 
@@ -14,7 +15,6 @@
 using namespace winrt;
 using namespace Microsoft::UI::Windowing;
 using namespace Microsoft::UI::Xaml;
-using namespace Microsoft::UI::Xaml::Media::Animation;
 
 namespace winrt::EGoTouchSettings::implementation {
 
@@ -25,8 +25,15 @@ constexpr int kDeviationWidthDip = 336;
 constexpr int kDeviationHeightDip = 58;
 constexpr int kToolWidthDip = 200;
 constexpr int kToolHeightDip = 58;
-// 换一条通知时淡出与收缩共用的时长。
-constexpr int kSwapMs = 130;
+constexpr int kEnterMs = 180;
+constexpr int kSwapFadeOutMs = 120;
+constexpr int kSwapFadeInMs = 160;
+constexpr int kExitMs = 200;
+constexpr int kEnterSlideDip = 14;
+constexpr int kSwapSlideDip = 8;
+constexpr int kExitSlideDip = 10;
+constexpr int kTopWorkMarginDip = 24;
+constexpr uint32_t kImagePrefetchBudgetMs = 150;
 constexpr double kPenImageMaxWidthDip = 304.0;
 constexpr double kPenImageMaxHeightDip = 28.0;
 constexpr double kKeyboardImageMaxWidthDip = 96.0;
@@ -39,7 +46,20 @@ constexpr UINT kDwmwaBorderColor = 34;
 constexpr COLORREF kBorderColorDark = 0x00303030;
 constexpr COLORREF kBorderColorLight = 0x00DFDFDF;
 
+bool ClientAnimationsEnabled() noexcept {
+    BOOL enabled = TRUE;
+    return SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0)
+        ? (enabled != FALSE)
+        : true;
 }
+
+void SignalCompletion(const std::shared_ptr<winrt::handle>& signalOnDone) noexcept {
+    if (signalOnDone && signalOnDone->get()) {
+        (void)SetEvent(signalOnDone->get());
+    }
+}
+
+} // namespace
 
 NotificationWindow::NotificationWindow() {
     InitializeComponent();
@@ -51,15 +71,95 @@ NotificationWindow::NotificationWindow() {
     NotificationRoot().Loaded(
         [this](IInspectable const&, RoutedEventArgs const&) { SyncFrameTheme(); });
 
-    m_transitionTimer = DispatcherTimer();
-    m_dwellTimer = DispatcherTimer();
+    m_windowAnimTimer = this->DispatcherQueue().CreateTimer();
+    m_windowAnimTimer.Interval(std::chrono::milliseconds(8));
+    m_windowAnimTimer.IsRepeating(true);
+    m_windowAnimTickToken = m_windowAnimTimer.Tick(
+        [this](Microsoft::UI::Dispatching::DispatcherQueueTimer const& sender, IInspectable const&) {
+            if (m_shutdown || !m_presented || !m_windowAnimRunning ||
+                m_animGeneration != m_presentationGeneration) {
+                m_windowAnimRunning = false;
+                m_animOnDone = nullptr;
+                sender.Stop();
+                return;
+            }
+            const HWND hwnd = WindowHandle();
+            const double elapsed = static_cast<double>(GetTickCount64() - m_animStartTick);
+            const double t =
+                std::clamp(elapsed / static_cast<double>(m_animDurationMs), 0.0, 1.0);
+            const double eased = m_animEaseOut
+                ? (1.0 - std::pow(1.0 - t, 3.0))
+                : (t * t * t);
+
+            const auto lerp = [eased](LONG a, LONG b) {
+                return static_cast<int>(std::lround(a + (b - a) * eased));
+            };
+            const int left = lerp(m_animFromRect.left, m_animToRect.left);
+            const int top = lerp(m_animFromRect.top, m_animToRect.top);
+            const int width = lerp(m_animFromRect.right, m_animToRect.right) - left;
+            const int height = lerp(m_animFromRect.bottom, m_animToRect.bottom) - top;
+            const int alphaInt = static_cast<int>(std::lround(
+                m_animFromAlpha +
+                (static_cast<int>(m_animToAlpha) - static_cast<int>(m_animFromAlpha)) * eased));
+            m_currentAlpha = static_cast<uint8_t>(std::clamp(alphaInt, 0, 255));
+
+            SetLayeredWindowAttributes(hwnd, 0, m_currentAlpha, LWA_ALPHA);
+            SetWindowPos(hwnd, HWND_TOPMOST, left, top, width, height,
+                         SWP_NOACTIVATE | SWP_NOZORDER);
+
+            if (t >= 1.0) {
+                m_windowAnimRunning = false;
+                sender.Stop();
+                auto onDone = std::move(m_animOnDone);
+                m_animOnDone = nullptr;
+                if (onDone) onDone();
+            }
+        });
+
+    m_dwellTimer = this->DispatcherQueue().CreateTimer();
     m_dwellTimer.Interval(std::chrono::seconds(3));
+    m_dwellTimer.IsRepeating(false);
+    m_dwellTickToken = m_dwellTimer.Tick(
+        [this](Microsoft::UI::Dispatching::DispatcherQueueTimer const& sender, IInspectable const&) {
+            sender.Stop();
+            const uint64_t generation = m_dwellGeneration;
+            if (m_shutdown || !m_presented || generation != m_presentationGeneration) return;
+            if (!ClientAnimationsEnabled()) {
+                HideNotification();
+                return;
+            }
+            const HWND hwnd = WindowHandle();
+            RECT curRect{};
+            GetWindowRect(hwnd, &curRect);
+            const UINT rawDpi = GetDpiForWindow(hwnd);
+            const UINT dpi = rawDpi ? rawDpi : 96;
+            const int exitPx = MulDiv(kExitSlideDip, dpi, 96);
+            const RECT exitRect{
+                curRect.left, curRect.top - exitPx, curRect.right, curRect.bottom - exitPx};
+            StartWindowMotion(curRect, exitRect, m_currentAlpha, 0, kExitMs, false,
+                              [this, generation] {
+                                  if (!m_shutdown && generation == m_presentationGeneration) {
+                                      HideNotification();
+                                  }
+                              });
+        });
 }
 
 NotificationWindow::~NotificationWindow() {
-    if (m_dwellTimer) m_dwellTimer.Stop();
-    if (m_transitionTimer) m_transitionTimer.Stop();
-    if (m_boundsTimer) m_boundsTimer.Stop();
+    if (m_dwellTimer) {
+        m_dwellTimer.Stop();
+        if (m_dwellTickToken.value) {
+            m_dwellTimer.Tick(m_dwellTickToken);
+            m_dwellTickToken = {};
+        }
+    }
+    if (m_windowAnimTimer) {
+        m_windowAnimTimer.Stop();
+        if (m_windowAnimTickToken.value) {
+            m_windowAnimTimer.Tick(m_windowAnimTickToken);
+            m_windowAnimTickToken = {};
+        }
+    }
 }
 
 HWND NotificationWindow::WindowHandle() {
@@ -83,22 +183,19 @@ void NotificationWindow::ConfigureWindow() {
     }
 
     LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    exStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    exStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
 
     // SetBorderAndTitleBar(false, false) 不动窗口样式位，WS_CAPTION/WS_DLGFRAME 仍留在那里，
-    // DWM 据此在边框最内侧画一条高光——深色卡片外面那圈白边就是它。这条线不受
-    // DWMWA_BORDER_COLOR、ImmersiveDarkMode、NCRENDERING_POLICY 和圆角偏好中的任何一个影响，
-    // 逐个试过；把样式位剥成纯 WS_POPUP，DWM 就不再画它。
+    // DWM 据此在边框最内侧画一条高光——深色卡片外面那圈白边就是它。
     LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
     style &= ~(WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME | WS_SYSMENU);
     style |= WS_POPUP;
     SetWindowLongPtrW(hwnd, GWL_STYLE, style);
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    // 窗口本身是矩形的：亚克力底铺满整个客户区，圆角只能由 DWM 裁。卡片描边因此不能自己
-    // 定半径——描边比裁切大时，四角会露出一截被裁掉的窗口底，看起来像圆角外又画了一圈边框。
-    // XAML 那边用 OverlayCornerRadius，与这里的 ROUND 是同一档。
+    SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+
     const int corner = kDwmCornerRound;
     (void)DwmSetWindowAttribute(hwnd, kDwmwaWindowCornerPreference, &corner, sizeof(corner));
 }
@@ -111,13 +208,24 @@ void NotificationWindow::SelectView(UIElement const& view) {
     }
 }
 
-fire_and_forget NotificationWindow::LoadPenImage(uint32_t modelId) {
+fire_and_forget NotificationWindow::LoadPenImage(
+        uint32_t modelId,
+        std::shared_ptr<winrt::handle> signalOnDone) {
     auto lifetime = get_strong();
-    if (m_shutdown) co_return;
+    if (m_shutdown) {
+        SignalCompletion(signalOnDone);
+        co_return;
+    }
     const ULONGLONG now = GetTickCount64();
     const bool modelChanged = modelId != m_penModelId;
-    if (!modelChanged && m_penImageSource) co_return;
-    if (!modelChanged && now < m_penImageRetryAt) co_return;
+    if (!modelChanged && m_penImageSource) {
+        SignalCompletion(signalOnDone);
+        co_return;
+    }
+    if (!modelChanged && now < m_penImageRetryAt) {
+        SignalCompletion(signalOnDone);
+        co_return;
+    }
 
     if (modelChanged) {
         m_penModelId = modelId;
@@ -131,12 +239,18 @@ fire_and_forget NotificationWindow::LoadPenImage(uint32_t modelId) {
 
     try {
         auto asset = AccessoryImages::ResolvePen(modelId);
-        if (!asset) co_return;
+        if (!asset) {
+            SignalCompletion(signalOnDone);
+            co_return;
+        }
         Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource source;
         const auto pixelSize = co_await AccessoryImages::DecodeCroppedAsync(
             std::move(asset.encoded), source);
         if (m_shutdown || pixelSize.Width <= 0 || generation != m_penImageGeneration ||
-            modelId != m_penModelId) co_return;
+            modelId != m_penModelId) {
+            SignalCompletion(signalOnDone);
+            co_return;
+        }
         m_penImageSource = source;
         m_penImagePixelSize = pixelSize;
         PenImage().Source(source);
@@ -147,24 +261,41 @@ fire_and_forget NotificationWindow::LoadPenImage(uint32_t modelId) {
     } catch (...) {
         // 安装资源正被更新或图片损坏时保留 Fluent 占位图，后续状态刷新会重试。
     }
+    SignalCompletion(signalOnDone);
 }
 
-fire_and_forget NotificationWindow::LoadKeyboardImage() {
+fire_and_forget NotificationWindow::LoadKeyboardImage(
+        std::shared_ptr<winrt::handle> signalOnDone) {
     auto lifetime = get_strong();
-    if (m_shutdown) co_return;
-    if (m_keyboardImageSource) co_return;
+    if (m_shutdown) {
+        SignalCompletion(signalOnDone);
+        co_return;
+    }
+    if (m_keyboardImageSource) {
+        SignalCompletion(signalOnDone);
+        co_return;
+    }
     const ULONGLONG now = GetTickCount64();
-    if (now < m_keyboardImageRetryAt) co_return;
+    if (now < m_keyboardImageRetryAt) {
+        SignalCompletion(signalOnDone);
+        co_return;
+    }
     m_keyboardImageRetryAt = now + 5000;
     const uint64_t generation = ++m_keyboardImageGeneration;
 
     try {
         auto asset = AccessoryImages::ResolveKeyboard();
-        if (!asset) co_return;
+        if (!asset) {
+            SignalCompletion(signalOnDone);
+            co_return;
+        }
         Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource source;
         const auto pixelSize = co_await AccessoryImages::DecodeCroppedAsync(
             std::move(asset.encoded), source);
-        if (m_shutdown || pixelSize.Width <= 0 || generation != m_keyboardImageGeneration) co_return;
+        if (m_shutdown || pixelSize.Width <= 0 || generation != m_keyboardImageGeneration) {
+            SignalCompletion(signalOnDone);
+            co_return;
+        }
         m_keyboardImageSource = source;
         m_keyboardImagePixelSize = pixelSize;
         KeyboardImage().Source(source);
@@ -176,6 +307,7 @@ fire_and_forget NotificationWindow::LoadKeyboardImage() {
     } catch (...) {
         // 与设备页使用同一资源规则；失败时保留 Fluent 键盘图标并稍后重试。
     }
+    SignalCompletion(signalOnDone);
 }
 
 void NotificationWindow::ApplyNoUpscaleSize(
@@ -193,154 +325,175 @@ void NotificationWindow::ApplyNoUpscaleSize(
         maxWidthDip / nativeWidthDip,
         maxHeightDip / nativeHeightDip,
     });
-    // Width/Height 换算回当前窗口的物理像素后不超过源图尺寸：只缩不放。
     image.Width(std::max(1.0, nativeWidthDip * fit));
     image.Height(std::max(1.0, nativeHeightDip * fit));
 }
 
 RECT NotificationWindow::TargetBounds(int widthDip, int heightDip) {
     const UINT dpi = GetDpiForWindow(WindowHandle());
-    const int width = MulDiv(widthDip, dpi ? dpi : 96, 96);
-    const int height = MulDiv(heightDip, dpi ? dpi : 96, 96);
+    const UINT effectiveDpi = dpi ? dpi : 96;
+    const int width = MulDiv(widthDip, effectiveDpi, 96);
+    const int height = MulDiv(heightDip, effectiveDpi, 96);
 
     POINT cursor{};
     GetCursorPos(&cursor);
     const HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO info{sizeof(info)};
-    RECT screen{};
-    if (GetMonitorInfoW(monitor, &info)) screen = info.rcMonitor;
-    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &screen, 0);
+    RECT work{};
+    if (GetMonitorInfoW(monitor, &info)) work = info.rcWork;
+    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
 
-    const int anchorX = screen.left + (screen.right - screen.left) / 2;
-    const int anchorY = screen.top + (screen.bottom - screen.top) / 10;
-    const int left = anchorX - width / 2;
-    const int top = anchorY - height / 2;
+    const int topOffset = MulDiv(kTopWorkMarginDip, effectiveDpi, 96);
+    const int minLeft = static_cast<int>(work.left);
+    const int maxLeft = (std::max)(minLeft, static_cast<int>(work.right) - width);
+    const int anchorX = minLeft + static_cast<int>(work.right - work.left) / 2;
+    const int left = std::clamp(anchorX - width / 2, minLeft, maxLeft);
+    const int minTop = static_cast<int>(work.top);
+    const int maxTop = (std::max)(minTop, static_cast<int>(work.bottom) - height);
+    const int top = std::clamp(minTop + topOffset, minTop, maxTop);
     return RECT{left, top, left + width, top + height};
 }
 
-void NotificationWindow::PositionAndShow(int widthDip, int heightDip) {
-    if (m_shutdown) return;
-    if (!SystemBackdrop()) {
-        SystemBackdrop(Microsoft::UI::Xaml::Media::DesktopAcrylicBackdrop{});
-    }
-    AppWindow().Show(false);
-    const RECT bounds = TargetBounds(widthDip, heightDip);
-    SetWindowPos(WindowHandle(), HWND_TOPMOST, bounds.left, bounds.top,
-                 bounds.right - bounds.left, bounds.bottom - bounds.top,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-}
+// 整窗位移 + 整窗透明度补间：亚克力卡片、DWM 圆角边框与内部元素作为一个整体同步进出，
+// 不出现“边框不动、里面元素独自飘”的割裂感。
+void NotificationWindow::StartWindowMotion(
+        RECT fromRect, RECT toRect,
+        uint8_t fromAlpha, uint8_t toAlpha,
+        int durationMs, bool easeOut,
+        std::function<void()> onDone) {
+    if (m_windowAnimTimer) m_windowAnimTimer.Stop();
+    m_windowAnimRunning = false;
+    m_animOnDone = nullptr;
 
-// 窗口大小没有补间可用——SetWindowPos 是一次到位的，所以自己按帧插值。两条通知的尺寸差得
-// 不小（连接提示比工具提示宽一半），直接跳过去，卡片会在淡出的中途忽然变形。
-void NotificationWindow::AnimateBounds(int widthDip, int heightDip, int milliseconds) {
-    const RECT from = [this] {
-        RECT r{};
-        GetWindowRect(WindowHandle(), &r);
-        return r;
-    }();
-    const RECT to = TargetBounds(widthDip, heightDip);
-
-    if (m_boundsTimer) m_boundsTimer.Stop();
-    m_boundsTimer = DispatcherTimer();
-    m_boundsTimer.Interval(std::chrono::milliseconds(16));
-    const auto started = GetTickCount64();
-    const auto generation = m_presentationGeneration;
-    m_boundsTimer.Tick([this, from, to, started, milliseconds, generation](
-                           IInspectable const& sender, IInspectable const&) {
-        const auto timer = sender.as<DispatcherTimer>();
-        if (m_shutdown || !m_presented || generation != m_presentationGeneration ||
-            !IsWindowVisible(WindowHandle())) {
-            timer.Stop();
-            return;
-        }
-        const auto elapsed = static_cast<double>(GetTickCount64() - started);
-        const double t = std::clamp(elapsed / std::max(1, milliseconds), 0.0, 1.0);
-        // 三次缓出：起步快、收尾慢，与同时进行的淡出是同一种手感。
-        const double eased = 1.0 - std::pow(1.0 - t, 3.0);
-        const auto lerp = [eased](LONG a, LONG b) {
-            return static_cast<int>(std::lround(a + (b - a) * eased));
-        };
-        const int left = lerp(from.left, to.left);
-        const int top = lerp(from.top, to.top);
-        SetWindowPos(WindowHandle(), HWND_TOPMOST, left, top,
-                     lerp(from.right, to.right) - left, lerp(from.bottom, to.bottom) - top,
+    const HWND hwnd = WindowHandle();
+    if (!ClientAnimationsEnabled() || durationMs <= 0) {
+        m_currentAlpha = toAlpha;
+        SetLayeredWindowAttributes(hwnd, 0, toAlpha, LWA_ALPHA);
+        SetWindowPos(hwnd, HWND_TOPMOST, toRect.left, toRect.top,
+                     toRect.right - toRect.left, toRect.bottom - toRect.top,
                      SWP_NOACTIVATE | SWP_NOZORDER);
-        if (t >= 1.0) timer.Stop();
-    });
-    m_boundsTimer.Start();
+        if (onDone) onDone();
+        return;
+    }
+
+    m_animFromRect = fromRect;
+    m_animToRect = toRect;
+    m_animFromAlpha = fromAlpha;
+    m_animToAlpha = toAlpha;
+    m_animDurationMs = durationMs;
+    m_animEaseOut = easeOut;
+    m_animStartTick = GetTickCount64();
+    m_animGeneration = m_presentationGeneration;
+    m_animOnDone = std::move(onDone);
+    m_windowAnimRunning = true;
+
+    m_currentAlpha = fromAlpha;
+    SetLayeredWindowAttributes(hwnd, 0, fromAlpha, LWA_ALPHA);
+    SetWindowPos(hwnd, HWND_TOPMOST, fromRect.left, fromRect.top,
+                 fromRect.right - fromRect.left, fromRect.bottom - fromRect.top,
+                 SWP_NOACTIVATE | SWP_NOZORDER);
+    if (m_windowAnimTimer) m_windowAnimTimer.Start();
 }
 
-void NotificationWindow::StartOpacityAnimation(
-        double from, double to, int milliseconds) {
-    if (m_opacityStoryboard) m_opacityStoryboard.Stop();
-    Storyboard storyboard;
-    DoubleAnimation opacity;
-    opacity.From(from);
-    opacity.To(to);
-    opacity.Duration(DurationHelper::FromTimeSpan(
-        Windows::Foundation::TimeSpan{static_cast<int64_t>(milliseconds) * 10'000}));
-    Storyboard::SetTarget(opacity, NotificationRoot());
-    Storyboard::SetTargetProperty(opacity, L"Opacity");
-    storyboard.Children().Append(opacity);
-    m_opacityStoryboard = storyboard;
-    storyboard.Begin();
-}
-
-// 换一条通知时先把当前这张淡出，等看不见了再换内容、改窗口大小，然后淡入。窗口尺寸是一次
-// SetWindowPos，本来就没法补间；趁不可见时改，跳变就看不出来了。窗口没在显示时不必淡出，
-// 直接走淡入那一半。
 void NotificationWindow::PresentView(
         UIElement const& view, int widthDip, int heightDip, std::function<void()> apply) {
     if (m_shutdown) return;
-    const bool wasVisible = m_presented && IsWindowVisible(WindowHandle());
-    const double currentOpacity = NotificationRoot().Opacity();
-    m_dwellTimer.Stop();
-    m_transitionTimer.Stop();
-    if (m_boundsTimer) m_boundsTimer.Stop();
-    if (m_opacityStoryboard) m_opacityStoryboard.Stop();
+    const HWND hwnd = WindowHandle();
+    const bool wasVisible = m_presented && IsWindowVisible(hwnd);
+    if (m_dwellTimer) m_dwellTimer.Stop();
+    if (m_windowAnimTimer) m_windowAnimTimer.Stop();
+    m_windowAnimRunning = false;
+    m_animOnDone = nullptr;
+
     const auto generation = ++m_presentationGeneration;
     m_presented = true;
-    const auto swap = [this, generation, view, widthDip, heightDip,
-                       apply = std::move(apply)]() {
+
+    const UINT rawDpi = GetDpiForWindow(hwnd);
+    const UINT effectiveDpi = rawDpi ? rawDpi : 96;
+
+    const auto enterNewView = [this, hwnd, generation, view, widthDip, heightDip, effectiveDpi,
+                               apply = std::move(apply)]() {
         if (m_shutdown || generation != m_presentationGeneration) return;
         if (apply) apply();
         SelectView(view);
         m_connectionView = view == ConnectionView().as<UIElement>() ||
                            view == KeyboardConnectionView().as<UIElement>();
-        NotificationRoot().Opacity(0.0);
-        PositionAndShow(widthDip, heightDip);
-        StartOpacityAnimation(0.0, 1.0, 150);
+        if (!SystemBackdrop()) {
+            SystemBackdrop(Microsoft::UI::Xaml::Media::DesktopAcrylicBackdrop{});
+        }
+        SyncFrameTheme();
+
+        const RECT toRect = TargetBounds(widthDip, heightDip);
+        const int slidePx = MulDiv(kEnterSlideDip, effectiveDpi, 96);
+        const RECT fromRect{toRect.left, toRect.top - slidePx, toRect.right, toRect.bottom - slidePx};
+
+        m_currentAlpha = 0;
+        SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+        SetWindowPos(hwnd, HWND_TOPMOST, fromRect.left, fromRect.top,
+                     fromRect.right - fromRect.left, fromRect.bottom - fromRect.top,
+                     SWP_NOACTIVATE);
+        AppWindow().Show(false);
+        SetWindowPos(hwnd, HWND_TOPMOST, fromRect.left, fromRect.top,
+                     fromRect.right - fromRect.left, fromRect.bottom - fromRect.top,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+        StartWindowMotion(fromRect, toRect, 0, 255, kEnterMs, true);
         RestartDwellTimer();
         if (m_onRefreshDemandChanged) m_onRefreshDemandChanged();
     };
 
-    if (!wasVisible) {
-        swap();
+    if (!wasVisible || !ClientAnimationsEnabled()) {
+        enterNewView();
         return;
     }
-    // 已经在显示：一边淡出旧的一边把窗口收到新尺寸，淡完再换内容。停留计时也推迟到那时。
-    if (m_dwellTimer) m_dwellTimer.Stop();
-    AnimateBounds(widthDip, heightDip, kSwapMs);
-    StartOpacityAnimation(currentOpacity, 0.0, kSwapMs);
-    StartTransition(kSwapMs, swap);
+
+    RECT curRect{};
+    GetWindowRect(hwnd, &curRect);
+    const RECT nextTarget = TargetBounds(widthDip, heightDip);
+    const int swapSlidePx = MulDiv(kSwapSlideDip, effectiveDpi, 96);
+    const RECT midRect{
+        nextTarget.left, nextTarget.top - swapSlidePx,
+        nextTarget.right, nextTarget.bottom - swapSlidePx};
+
+    StartWindowMotion(
+        curRect, midRect, m_currentAlpha, 0, kSwapFadeOutMs, false,
+        [this, hwnd, generation, view, midRect, nextTarget, apply = std::move(apply)]() {
+            if (m_shutdown || generation != m_presentationGeneration) return;
+            if (apply) apply();
+            SelectView(view);
+            m_connectionView = view == ConnectionView().as<UIElement>() ||
+                               view == KeyboardConnectionView().as<UIElement>();
+            SyncFrameTheme();
+            StartWindowMotion(midRect, nextTarget, 0, 255, kSwapFadeInMs, true);
+            RestartDwellTimer();
+            if (m_onRefreshDemandChanged) m_onRefreshDemandChanged();
+        });
     if (m_onRefreshDemandChanged) m_onRefreshDemandChanged();
 }
 
 void NotificationWindow::RestartDwellTimer() {
-    if (m_dwellTimer) m_dwellTimer.Stop();
-    m_dwellTimer = DispatcherTimer();
-    m_dwellTimer.Interval(std::chrono::seconds(3));
-    const auto generation = m_presentationGeneration;
-    m_dwellTimer.Tick([this, generation](IInspectable const& sender, IInspectable const&) {
-        sender.as<DispatcherTimer>().Stop();
-        if (m_shutdown || !m_presented || generation != m_presentationGeneration) return;
-        StartOpacityAnimation(1.0, 0.0, 300);
-        StartTransition(300, [this] { HideNotification(); });
-    });
+    if (!m_dwellTimer) return;
+    m_dwellTimer.Stop();
+    m_dwellGeneration = m_presentationGeneration;
     m_dwellTimer.Start();
 }
 
-void NotificationWindow::ShowConnected(const PenStatus::State& state) {
+fire_and_forget NotificationWindow::ShowConnected(PenStatus::State state) {
+    auto lifetime = get_strong();
+    const uint64_t showGeneration = ++m_showGeneration;
+    if (!m_penImageSource || m_penModelId != state.modelId) {
+        auto readyEvent = std::make_shared<winrt::handle>(
+            CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        LoadPenImage(state.modelId, readyEvent);
+        if (readyEvent->get()) {
+            winrt::apartment_context uiThread;
+            (void)co_await winrt::resume_on_signal(
+                readyEvent->get(), std::chrono::milliseconds(kImagePrefetchBudgetMs));
+            co_await uiThread;
+        }
+    }
+    if (m_shutdown || showGeneration != m_showGeneration) co_return;
+
     PresentView(ConnectionView(), kConnectionWidthDip, kConnectionHeightDip, [this, state] {
         ApplyConnectedState(state);
         if (m_penImageSource) {
@@ -354,7 +507,7 @@ void NotificationWindow::ShowConnected(const PenStatus::State& state) {
 void NotificationWindow::ApplyConnectedState(const PenStatus::State& state) {
     PenNameText().Text(state.modelName[0] ? to_hstring(state.modelName) : L"HUAWEI M-Pencil");
     PenBatteryIndicator().SetState(
-        state.hasBatteryLevel, state.batteryLevel,
+        AccessoryBattery::HasPenBattery(state), state.batteryLevel,
         state.hasChargingState && state.charging);
 
     LoadPenImage(state.modelId);
@@ -363,7 +516,22 @@ void NotificationWindow::ApplyConnectedState(const PenStatus::State& state) {
     PenImageFallback().Visibility(hasImage ? Visibility::Collapsed : Visibility::Visible);
 }
 
-void NotificationWindow::ShowKeyboardConnected(const PenStatus::State& state) {
+fire_and_forget NotificationWindow::ShowKeyboardConnected(PenStatus::State state) {
+    auto lifetime = get_strong();
+    const uint64_t showGeneration = ++m_showGeneration;
+    if (!m_keyboardImageSource) {
+        auto readyEvent = std::make_shared<winrt::handle>(
+            CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        LoadKeyboardImage(readyEvent);
+        if (readyEvent->get()) {
+            winrt::apartment_context uiThread;
+            (void)co_await winrt::resume_on_signal(
+                readyEvent->get(), std::chrono::milliseconds(kImagePrefetchBudgetMs));
+            co_await uiThread;
+        }
+    }
+    if (m_shutdown || showGeneration != m_showGeneration) co_return;
+
     PresentView(
         KeyboardConnectionView(), kConnectionWidthDip, kConnectionHeightDip, [this, state] {
             ApplyKeyboardState(state);
@@ -379,7 +547,7 @@ void NotificationWindow::ApplyKeyboardState(const PenStatus::State& state) {
     KeyboardNameText().Text(
         state.kbdModelName[0] ? to_hstring(state.kbdModelName) : L"HUAWEI 智能磁吸键盘");
     KeyboardBatteryIndicator().SetState(
-        state.hasKbdBattery, state.kbdBatteryLevel,
+        AccessoryBattery::HasKeyboardBattery(state), state.kbdBatteryLevel,
         state.hasKbdCharging && state.kbdCharging);
     LoadKeyboardImage();
     const bool hasImage = m_keyboardImageSource != nullptr;
@@ -389,7 +557,6 @@ void NotificationWindow::ApplyKeyboardState(const PenStatus::State& state) {
 
 void NotificationWindow::UpdateState(const PenStatus::State& state) {
     if (!NeedsStateRefresh()) return;
-    // 只改当前视图内容，不重启动画和停留计时。
     if (ConnectionView().Visibility() == Visibility::Visible) {
         ApplyConnectedState(state);
     } else if (KeyboardConnectionView().Visibility() == Visibility::Visible) {
@@ -398,53 +565,31 @@ void NotificationWindow::UpdateState(const PenStatus::State& state) {
 }
 
 void NotificationWindow::ShowDeviation() {
+    ++m_showGeneration;
     PresentView(DeviationView(), kDeviationWidthDip, kDeviationHeightDip, nullptr);
 }
 
 void NotificationWindow::ShowToolChanged(bool eraser) {
+    ++m_showGeneration;
     PresentView(ToolView(), kToolWidthDip, kToolHeightDip, [this, eraser] {
-        // 橡皮擦与笔尖各用一个字形，文本本身已经说清楚了是哪一支，图标只是让扫一眼就能分辨。
         ToolPenIcon().Visibility(eraser ? Visibility::Collapsed : Visibility::Visible);
         ToolEraserIcon().Visibility(eraser ? Visibility::Visible : Visibility::Collapsed);
-        // 两句等长，切换时卡片的宽度和字的位置都不动；「书写／橡皮」也是设置里那一项
-        // 「切换书写与橡皮擦」用的词。
         ToolText().Text(eraser ? L"已切换到橡皮" : L"已切换到书写");
     });
 }
 
-// 弹窗是独立的 Window，主题不从主窗口继承，由 MainWindow 在每次弹出前推给它。深浅也一并
-// 传进来：跟随系统时 theme 是 Default，而 ActualTheme 在窗口刚建好、内容还没上树时读不到
-// 真正生效的那一档——照它设边框色，深色下会得到一条白边，正是要修的东西。
 void NotificationWindow::ApplyTheme(ElementTheme theme) {
     NotificationRoot().RequestedTheme(theme);
 }
 
-// 窗口的边界由 DWM 画，不归 RequestedTheme 管，得按 ActualTheme 单独交代。
 void NotificationWindow::SyncFrameTheme() {
     const bool dark = NotificationRoot().ActualTheme() == ElementTheme::Dark;
     const HWND hwnd = WindowHandle();
 
     const BOOL immersive = dark ? TRUE : FALSE;
     (void)DwmSetWindowAttribute(hwnd, kDwmwaUseImmersiveDarkMode, &immersive, sizeof(immersive));
-    // 卡片自己不描边，边界只剩这一条。DWMWA_COLOR_NONE 对这个无标题栏的窗口不起作用，实测
-    // 仍会描一条系统默认色的线，所以给它一个贴着卡片的颜色，让它退到轮廓的位置上。
     const COLORREF border = dark ? kBorderColorDark : kBorderColorLight;
     (void)DwmSetWindowAttribute(hwnd, kDwmwaBorderColor, &border, sizeof(border));
-}
-
-void NotificationWindow::StartTransition(int milliseconds, std::function<void()> action) {
-    m_transitionTimer.Stop();
-    if (m_transitionTick.value) m_transitionTimer.Tick(m_transitionTick);
-    const auto generation = m_presentationGeneration;
-    m_transitionTimer.Interval(std::chrono::milliseconds(milliseconds));
-    m_transitionTick = m_transitionTimer.Tick(
-        [this, generation, action = std::move(action)](
-            IInspectable const& sender, IInspectable const&) {
-            sender.as<DispatcherTimer>().Stop();
-            if (m_shutdown || generation != m_presentationGeneration) return;
-            action();
-        });
-    m_transitionTimer.Start();
 }
 
 bool NotificationWindow::NeedsStateRefresh() const noexcept {
@@ -456,21 +601,18 @@ void NotificationWindow::SetRefreshDemandChanged(std::function<void()> cb) {
 }
 
 void NotificationWindow::HideNotification() {
+    ++m_showGeneration;
     ++m_presentationGeneration;
     if (m_dwellTimer) m_dwellTimer.Stop();
-    if (m_transitionTimer) {
-        m_transitionTimer.Stop();
-        if (m_transitionTick.value) {
-            m_transitionTimer.Tick(m_transitionTick);
-            m_transitionTick = {};
-        }
-    }
-    if (m_boundsTimer) m_boundsTimer.Stop();
-    if (m_opacityStoryboard) m_opacityStoryboard.Stop();
+    if (m_windowAnimTimer) m_windowAnimTimer.Stop();
+    m_windowAnimRunning = false;
+    m_animOnDone = nullptr;
+    const HWND hwnd = WindowHandle();
+    m_currentAlpha = 0;
+    SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
     AppWindow().Hide();
-    ShowWindow(WindowHandle(), SW_HIDE);
+    ShowWindow(hwnd, SW_HIDE);
     SystemBackdrop(nullptr);
-    NotificationRoot().Opacity(0.0);
     m_presented = false;
     m_connectionView = false;
     if (m_onRefreshDemandChanged) m_onRefreshDemandChanged();

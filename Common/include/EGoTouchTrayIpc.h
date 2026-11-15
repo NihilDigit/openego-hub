@@ -20,6 +20,7 @@ inline constexpr UINT kCommandMessage = WM_APP + 20;
 inline constexpr UINT kActivateMessage = WM_APP + 21;
 inline constexpr UINT kNotificationMessage = WM_APP + 22;
 inline constexpr UINT kSettingsLifecycleMessage = WM_APP + 23;
+inline constexpr UINT kToggleQuickFlyoutMessage = WM_APP + 24;
 
 enum class SettingsLifecycle : uint32_t {
     InstallStarted = 1,

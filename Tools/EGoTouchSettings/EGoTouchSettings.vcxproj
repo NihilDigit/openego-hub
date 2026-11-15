@@ -127,12 +127,17 @@
     </ClInclude>
     <ClInclude Include="AccessoryImageLoader.h" />
     <ClInclude Include="DeviceInfo.h" />
+    <ClInclude Include="DisplayModeHelper.h" />
     <ClInclude Include="LogExport.h" />
+    <ClInclude Include="PowerOverlay.h" />
     <ClInclude Include="MainWindow.xaml.h">
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </ClInclude>
     <ClInclude Include="NotificationWindow.xaml.h">
       <DependentUpon>NotificationWindow.xaml</DependentUpon>
+    </ClInclude>
+    <ClInclude Include="QuickFlyoutWindow.xaml.h">
+      <DependentUpon>QuickFlyoutWindow.xaml</DependentUpon>
     </ClInclude>
     <ClInclude Include="..\..\Common\include\EGoTouchTrayIpc.h" />
     <ClInclude Include="..\..\Common\include\ManagedResource.h" />
@@ -148,6 +153,9 @@
       <SubType>Designer</SubType>
     </Page>
     <Page Include="NotificationWindow.xaml">
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="QuickFlyoutWindow.xaml">
       <SubType>Designer</SubType>
     </Page>
   </ItemGroup>
@@ -169,6 +177,9 @@
     </ClCompile>
     <ClCompile Include="NotificationWindow.xaml.cpp">
       <DependentUpon>NotificationWindow.xaml</DependentUpon>
+    </ClCompile>
+    <ClCompile Include="QuickFlyoutWindow.xaml.cpp">
+      <DependentUpon>QuickFlyoutWindow.xaml</DependentUpon>
     </ClCompile>
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
     <ClCompile Include="..\..\Common\source\PenStatusChannel.cpp">

@@ -231,6 +231,7 @@
         <File Id="EGoTouchSettingsBatteryIndicatorXBF" Source="$(var.BuildOutputDir)\BatteryIndicator.xbf" />
         <File Id="EGoTouchSettingsMainWindowXBF" Source="$(var.BuildOutputDir)\MainWindow.xbf" />
         <File Id="EGoTouchSettingsNotificationWindowXBF" Source="$(var.BuildOutputDir)\NotificationWindow.xbf" />
+        <File Id="EGoTouchSettingsQuickFlyoutWindowXBF" Source="$(var.BuildOutputDir)\QuickFlyoutWindow.xbf" />
         <File Id="WindowsAppRuntimeBootstrapDLL" Source="$(var.BuildOutputDir)\Microsoft.WindowsAppRuntime.Bootstrap.dll" />
       </Component>
 

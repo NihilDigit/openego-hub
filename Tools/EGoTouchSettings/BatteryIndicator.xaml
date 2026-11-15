@@ -1,44 +1,67 @@
 <UserControl
     x:Class="EGoTouchSettings.BatteryIndicator"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    UseLayoutRounding="True">
 
     <UserControl.Resources>
-        <!-- 包一层 SolidColorBrush，代码才拿得到；直接写在 FontIcon 上的 ThemeResource
-             取不回来。Color 仍走 ThemeResource，主题切换时跟着变。 -->
         <SolidColorBrush x:Key="BatteryNormalBrush" Color="{ThemeResource TextFillColorPrimary}" />
         <SolidColorBrush x:Key="BatteryChargingBrush" Color="{ThemeResource SystemFillColorSuccess}" />
         <SolidColorBrush x:Key="BatteryLowBrush" Color="{ThemeResource SystemFillColorCritical}" />
     </UserControl.Resources>
 
+    <!-- 统一几何电池指示器：100% 时内部填满，无字形阶梯留白。全站概览、配件页、
+         电池页、快捷面板与接入弹窗共用同一组视觉定义。 -->
     <StackPanel x:Name="IndicatorRoot"
                 Orientation="Horizontal"
-                Spacing="7"
+                Spacing="6"
                 VerticalAlignment="Center"
                 Visibility="Collapsed">
-        <!-- 电量图用 Segoe Fluent Icons 里现成的电池字形，外框、电量条和闪电都在字形里，
-             跟着字号缩放。字号取得比字面上的一致大一些：字形在 em 框里自带留白，与旁边
-             的数字取同一个字号会明显矮一截。哪一档用哪个码点见 SetState。 -->
-        <!-- 两层叠出双色：下面这层出电量，颜色随状态走；上面压一个同组的空电池字形，把外框
-             重新描成文字色，于是染色只落在内舱里。两层必须取自同一组，尺寸才对得上。 -->
-        <Grid VerticalAlignment="Center">
-            <FontIcon x:Name="BatteryLevelGlyph"
-                      FontSize="26"
-                      FontFamily="Segoe Fluent Icons" />
-            <FontIcon x:Name="BatteryShellGlyph"
-                      FontSize="26"
-                      FontFamily="Segoe Fluent Icons"
-                      Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Grid x:Name="BatteryIconGroup"
+              VerticalAlignment="Center">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Border x:Name="BatteryBody"
+                    Grid.Column="0"
+                    Width="24"
+                    Height="12"
+                    CornerRadius="3"
+                    BorderThickness="1.5"
+                    Padding="1.5"
+                    BorderBrush="{ThemeResource TextFillColorPrimaryBrush}"
+                    Opacity="0.9">
+                <Border x:Name="BatteryFillBar"
+                        HorizontalAlignment="Left"
+                        VerticalAlignment="Stretch"
+                        CornerRadius="1"
+                        Visibility="Collapsed" />
+            </Border>
+            <Border x:Name="BatteryCap"
+                    Grid.Column="1"
+                    Width="2"
+                    Height="5"
+                    Margin="1,0,0,0"
+                    CornerRadius="0,1.5,1.5,0"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource TextFillColorPrimaryBrush}"
+                    Opacity="0.75" />
         </Grid>
 
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
+        <StackPanel x:Name="BatteryTextGroup"
+                    Orientation="Horizontal"
+                    VerticalAlignment="Center"
+                    Spacing="1">
             <TextBlock x:Name="BatteryValue"
-                       FontSize="18"
+                       FontSize="16"
                        FontWeight="SemiBold"
                        VerticalAlignment="Center" />
-            <TextBlock Text="%"
-                       FontSize="10"
-                       Margin="0,4,0,0"
+            <TextBlock x:Name="BatteryPercentUnit"
+                       Text="%"
+                       FontSize="11"
+                       Margin="0,2,0,0"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        VerticalAlignment="Center" />
         </StackPanel>
     </StackPanel>

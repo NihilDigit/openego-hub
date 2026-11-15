@@ -390,12 +390,18 @@ if(WIN32 AND MSVC)
     set(EGO_SETTINGS_INTERMEDIATE
         "${CMAKE_CURRENT_BINARY_DIR}/EGoTouchSettings-int/${CMAKE_BUILD_TYPE}")
     set(EGO_SETTINGS_SOURCES
+        Tools/EGoTouchSettings/AccessoryImageLoader.cpp
+        Tools/EGoTouchSettings/AccessoryImageLoader.h
         Tools/EGoTouchSettings/App.xaml
         Tools/EGoTouchSettings/App.xaml.cpp
         Tools/EGoTouchSettings/App.xaml.h
         Tools/EGoTouchSettings/BatteryIndicator.xaml
         Tools/EGoTouchSettings/BatteryIndicator.xaml.cpp
         Tools/EGoTouchSettings/BatteryIndicator.xaml.h
+        Common/include/AccessoryBatteryState.h
+        Tools/EGoTouchSettings/DeviceInfo.cpp
+        Tools/EGoTouchSettings/DeviceInfo.h
+        Tools/EGoTouchSettings/DisplayModeHelper.h
         Tools/EGoTouchSettings/LogExport.cpp
         Tools/EGoTouchSettings/LogExport.h
         Tools/EGoTouchSettings/MainWindow.xaml
@@ -404,6 +410,10 @@ if(WIN32 AND MSVC)
         Tools/EGoTouchSettings/NotificationWindow.xaml
         Tools/EGoTouchSettings/NotificationWindow.xaml.cpp
         Tools/EGoTouchSettings/NotificationWindow.xaml.h
+        Tools/EGoTouchSettings/PowerOverlay.h
+        Tools/EGoTouchSettings/QuickFlyoutWindow.xaml
+        Tools/EGoTouchSettings/QuickFlyoutWindow.xaml.cpp
+        Tools/EGoTouchSettings/QuickFlyoutWindow.xaml.h
         Tools/EGoTouchSettings/Types.idl
         Tools/EGoTouchSettings/app.manifest
         Tools/EGoTouchSettings/pch.cpp
@@ -416,9 +426,11 @@ if(WIN32 AND MSVC)
         Common/include/AppIconResource.h
         Common/include/AppVersion.h
         Common/include/EGoTouchTrayIpc.h
+        Common/include/AccessoryBitmapCrop.h
         Common/include/ManagedResource.h
         Common/include/PenButtonConfig.h
         Common/include/PenStatusChannel.h
+        Common/include/PenStatusUiState.h
         Common/source/PenStatusChannel.cpp
         Common/source/ManagedResource.cpp
     )
@@ -454,7 +466,7 @@ add_executable(EGoTouchTray WIN32
 set_source_files_properties(Tools/EGoTouchTray/Tray.rc PROPERTIES
     OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Common/include/AppVersion.h")
 target_include_directories(EGoTouchTray PRIVATE "${COMMON_ROOT}/include")
-target_link_libraries(EGoTouchTray PRIVATE Common advapi32 comctl32 d2d1 dwrite dwmapi
+target_link_libraries(EGoTouchTray PRIVATE Common advapi32 comctl32 d2d1 dwmapi
     shell32 shcore user32 gdi32 uiautomationcore uxtheme)
 set_target_properties(EGoTouchTray PROPERTIES OUTPUT_NAME OpenEGoHubTray)
 if(TARGET EGoTouchSettings)
@@ -501,6 +513,7 @@ if(TARGET EGoTouchSettings)
         "${EGO_SETTINGS_OUTPUT}/BatteryIndicator.xbf"
         "${EGO_SETTINGS_OUTPUT}/MainWindow.xbf"
         "${EGO_SETTINGS_OUTPUT}/NotificationWindow.xbf"
+        "${EGO_SETTINGS_OUTPUT}/QuickFlyoutWindow.xbf"
         "${EGO_SETTINGS_OUTPUT}/Microsoft.WindowsAppRuntime.Bootstrap.dll"
         DESTINATION "."
         COMPONENT Runtime
@@ -555,6 +568,8 @@ if (EGO_BUILD_TESTS)
     ego_add_common_test(CommonHeaderCompileTest Common/tests/HeaderCompileTest.cpp)
     ego_add_common_test(CommonConfigCatalogTest Common/tests/ConfigCatalogTest.cpp)
     ego_add_common_test(CommonPenStatusChannelTest Common/tests/PenStatusChannelTest.cpp)
+    ego_add_common_test(CommonAccessoryBatteryStateTest Common/tests/AccessoryBatteryStateTest.cpp)
+    ego_add_common_test(CommonAccessoryBitmapCropTest Common/tests/AccessoryBitmapCropTest.cpp)
     ego_add_common_test(CommonPenControlChannelTest Common/tests/PenControlChannelTest.cpp)
 
     add_executable(TouchProviderCoordinatorTest

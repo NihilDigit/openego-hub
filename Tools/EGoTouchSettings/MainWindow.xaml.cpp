@@ -2,20 +2,25 @@
 
 #include "MainWindow.xaml.h"
 #include "AccessoryImageLoader.h"
+#include "AccessoryBatteryState.h"
 #include "AppIconResource.h"
 #include "DeviceInfo.h"
+#include "DisplayModeHelper.h"
 #include "AppVersion.h"
 #include "LogExport.h"
+#include "PowerOverlay.h"
 // gaokun-hal 的电池读取。电量、容量、健康度、循环次数都不需要提权，本进程直接读；
 // 只有充电阈值要管理员权限，那一项由服务读了经状态通道送回来。
 #include "GaokunPower.h"
 // 只用到里面的命令枚举，不链接 PenControlChannel.cpp：设置窗从不直接写服务的控制通道，
 // 提交一律经托盘转发，以保住那条通道的单写者约束。
 #include "PenControlChannel.h"
+#include "PenStatusUiState.h"
 
 #include <cmath>
 #include <dwmapi.h>
 #include <optional>
+#include <shellapi.h>
 
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
@@ -25,6 +30,7 @@ using namespace winrt;
 using namespace Microsoft::UI::Windowing;
 using namespace Microsoft::UI::Xaml;
 using namespace Microsoft::UI::Xaml::Controls;
+using namespace Microsoft::UI::Xaml::Media::Animation;
 
 namespace winrt::EGoTouchSettings::implementation {
 
@@ -50,6 +56,56 @@ constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
 
 // 存在注册表里的外观取值。0 是跟随系统，也是没设过时的取值。
 constexpr wchar_t kThemeSettingName[] = L"AppTheme";
+
+bool HasCommandLineSwitch(const wchar_t* name) {
+    int count = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!argv) return false;
+
+    bool found = false;
+    for (int i = 1; i < count && !found; ++i) {
+        found = _wcsicmp(argv[i], name) == 0;
+    }
+    LocalFree(argv);
+    return found;
+}
+
+bool ClientAnimationsEnabled() noexcept {
+    BOOL enabled = TRUE;
+    return SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0)
+        ? (enabled != FALSE)
+        : true;
+}
+
+void SetBusySpinner(Controls::ProgressRing const& ring, bool busy) {
+    ring.IsActive(busy);
+    ring.Visibility(busy ? Visibility::Visible : Visibility::Collapsed);
+}
+
+void ApplyTwoColumnLayout(
+        Controls::Grid const& grid,
+        Controls::ColumnDefinition const& col0,
+        Controls::ColumnDefinition const& col1,
+        FrameworkElement const& sidePanel,
+        double width) {
+    const bool twoCol = width >= 820.0;
+    grid.ColumnSpacing(twoCol ? 20.0 : 0.0);
+    col0.Width(GridLength{twoCol ? 6.0 : 1.0, GridUnitType::Star});
+    col1.Width(twoCol ? GridLength{5.0, GridUnitType::Star}
+                      : GridLength{0.0, GridUnitType::Pixel});
+    Controls::Grid::SetRow(sidePanel, twoCol ? 0 : 1);
+    Controls::Grid::SetColumn(sidePanel, twoCol ? 1 : 0);
+}
+
+winrt::hstring PageHeaderForTag(winrt::hstring const& tag) {
+    if (tag == L"devices") return L"配件";
+    if (tag == L"battery") return L"电池";
+    if (tag == L"screen") return L"屏幕";
+    if (tag == L"general") return L"服务";
+    if (tag == L"device") return L"设备";
+    if (tag == L"about") return L"关于";
+    return L"概览";
+}
 
 ElementTheme ThemeFromSetting(DWORD value) {
     switch (value) {
@@ -146,6 +202,22 @@ winrt::hstring ChargeLimitStatusFor(bool smart) {
                  : L"长期插电时限制充电上限可以减缓电池老化。";
 }
 
+constexpr uint32_t kEnergySaverThresholds[] = {0, 10, 20, 30, 40, 50, 100};
+
+int32_t EnergySaverThresholdToIndex(uint32_t threshold) {
+    for (size_t i = 0; i < std::size(kEnergySaverThresholds); ++i) {
+        if (kEnergySaverThresholds[i] == threshold) return static_cast<int32_t>(i);
+    }
+    return 2;
+}
+
+uint32_t IndexToEnergySaverThreshold(int32_t index) {
+    if (index < 0 || index >= static_cast<int32_t>(std::size(kEnergySaverThresholds))) {
+        return 20;
+    }
+    return kEnergySaverThresholds[index];
+}
+
 // 版本号在状态通道里是三个字节。打包成一个整数只为回答「还是不是同一个版本」，不参与显示。
 uint32_t PackUpdateVersion(PenStatus::State const& state) {
     return (static_cast<uint32_t>(state.updateMajor) << 16) |
@@ -212,7 +284,6 @@ MainWindow::MainWindow() {
     SetTitleBar(AppTitleBar());
 
     ConfigureWindow();
-    CreateBridgeWindow();
 
     // 内容那一侧由 RequestedTheme 管，窗框和标题栏按钮要自己跟上。订在 ActualThemeChanged
     // 上，用户改外观和系统改主题走的是同一条路。
@@ -221,17 +292,14 @@ MainWindow::MainWindow() {
     // 元素上树之前 ActualTheme 还不是生效值，首次同步要等到这里。
     RootLayout().Loaded([this](IInspectable const&, RoutedEventArgs const&) { SyncFrameTheme(); });
 
-    LoadStoredSettings();
-    ShowAboutVersion();
-    FillDevicePage();
-    FillBatteryInfoAsync();
-    LoadColorReferenceAsync();
-    SetTitleBarIconAsync();
-    RefreshState();
-
-    // 到这里控件才算备齐。在此之前 Slider 的 ValueChanged 已经因为 XAML 里的 Minimum
-    // 触发过一次，值是 50——若那时就允许提交，打开一次设置窗就会把充电上限真的改成 50%。
-    m_uiReady = true;
+    // 后台驻留（通知弹窗 / 快捷飞出窗）只需要主题与服务配置轻量读数，重型固件/电池/资源
+    // 解码推迟到主窗口首次真正显示前执行。
+    ApplyTheme(ThemeFromSetting(ReadUserSetting(kThemeSettingName, 0)));
+    m_vendorHintDismissed = ReadUserSetting(L"VendorHintDismissed", 0) != 0;
+    const DWORD savedKelvin = ReadUserSetting(L"ColorTemperature", 0);
+    if (savedKelvin >= 2000 && savedKelvin <= 10000) {
+        m_lastColorTemperatureKelvin = static_cast<int>(savedKelvin);
+    }
 
     m_refreshTimer = DispatcherTimer();
     // 共享内存读取只是一次 240 字节 seqlock 快照。100 ms 的安全轮询让充电边沿即使错过
@@ -249,12 +317,19 @@ MainWindow::MainWindow() {
         RefreshBatteryLive();
     });
 
+    const bool backgroundLaunch = HasCommandLineSwitch(L"--background");
+    if (!backgroundLaunch) {
+        EnsureMainUiInitialized();
+        RefreshState();
+    }
+
     SetPropW(WindowHandle(), L"OpenEGoHub.RefreshPolicy", this);
     m_originalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
         WindowHandle(), GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&MainWndProc)));
     AppWindow().Changed([this](auto const&, auto const&) { UpdateRefreshPolicy(); });
     VisibilityChanged([this](auto const&, auto const&) { UpdateRefreshPolicy(); });
     UpdateRefreshPolicy();
+    CreateBridgeWindow();
 
     Closed([this](IInspectable const&, WindowEventArgs const&) {
         m_closed = true;
@@ -265,6 +340,7 @@ MainWindow::MainWindow() {
             RemovePropW(WindowHandle(), L"OpenEGoHub.RefreshPolicy");
             m_originalWndProc = nullptr;
         }
+        if (m_pageStoryboard) m_pageStoryboard.Stop();
         if (m_penImageTimer) m_penImageTimer.Stop();
         if (m_refreshTimer) m_refreshTimer.Stop();
         if (m_batteryTimer) m_batteryTimer.Stop();
@@ -277,9 +353,39 @@ MainWindow::MainWindow() {
             m_notificationWindow.Close();
             m_notificationWindow = nullptr;
         }
+        if (m_quickFlyoutWindow) {
+            get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow)->Shutdown();
+            m_quickFlyoutWindow.Close();
+            m_quickFlyoutWindow = nullptr;
+        }
         m_reader.Close();
         DestroyBridgeWindow();
     });
+}
+
+void MainWindow::EnsureMainUiInitialized() {
+    if (m_mainUiInitialized || m_closed) return;
+    m_mainUiInitialized = true;
+
+    HomeHostBatteryIcon().Configure(false, false, false);
+    HomePenBattery().Configure(true, false, true);
+    HomeKeyboardBattery().Configure(true, false, true);
+    BatteryHeroIcon().Configure(false, true, false);
+
+    LoadStoredSettings();
+    ShowAboutVersion();
+    FillDevicePage();
+    FillBatteryInfoAsync();
+    LoadColorReferenceAsync();
+    SetTitleBarIconAsync();
+    RefreshScreenControls();
+    RefreshPowerModeControl();
+
+    // 到这里控件才算备齐。在此之前 Slider 的 ValueChanged 已经因为 XAML 里的 Minimum
+    // 触发过一次，值是 50——若那时就允许提交，打开一次设置窗就会把充电上限真的改成 50%。
+    m_uiReady = true;
+    m_mainUiNeedsRender = true;
+    RefreshHomeScreenSummary();
 }
 
 MainWindow::~MainWindow() {
@@ -305,32 +411,44 @@ bool MainWindow::IsMainUiVisible() {
 }
 
 void MainWindow::UpdateRefreshPolicy() {
-    if (!m_uiReady || !m_refreshTimer || !m_batteryTimer) return;
+    if (m_closed || !m_refreshTimer || !m_batteryTimer) return;
     const bool mainVisible = IsMainUiVisible();
-    const bool batteryVisible = mainVisible &&
-        BatteryPage().Visibility() == Visibility::Visible;
+    if (mainVisible && !m_mainUiInitialized) {
+        EnsureMainUiInitialized();
+    }
+
+    const bool quickFlyoutVisible = !m_closed && m_quickFlyoutWindow &&
+        get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow)->IsVisible();
     const bool notifyNeedsRefresh = !m_closed && m_notificationWindow &&
         get_self<implementation::NotificationWindow>(m_notificationWindow)->NeedsStateRefresh();
+    const bool homeVisible = mainVisible && m_mainUiInitialized &&
+        HomePage().Visibility() == Visibility::Visible;
+    const bool batteryPageVisible = mainVisible && m_mainUiInitialized &&
+        BatteryPage().Visibility() == Visibility::Visible;
+    const bool needLiveBattery = batteryPageVisible || homeVisible || quickFlyoutVisible;
     const bool becameVisible = mainVisible && !m_mainUiVisible;
-    const bool batteryBecameVisible = batteryVisible && !m_batteryPageVisible;
-    if (!batteryVisible && m_batteryPageVisible) m_smoothedValid = false;
+    const bool liveBatteryBecameActive = needLiveBattery && !m_liveBatteryActive;
+
+    if (!batteryPageVisible && m_liveBatteryActive) m_smoothedValid = false;
     m_mainUiVisible = mainVisible;
-    m_batteryPageVisible = batteryVisible;
-    if (mainVisible || notifyNeedsRefresh) {
+    m_liveBatteryActive = needLiveBattery;
+
+    if (mainVisible || notifyNeedsRefresh || quickFlyoutVisible) {
         if (!m_refreshTimer.IsEnabled()) m_refreshTimer.Start();
     } else {
         m_refreshTimer.Stop();
     }
-    if (batteryVisible) {
+    if (needLiveBattery) {
         if (!m_batteryTimer.IsEnabled()) m_batteryTimer.Start();
     } else {
         m_batteryTimer.Stop();
     }
     if (becameVisible) {
         m_lastRenderedValid = false;
+        m_mainUiNeedsRender = true;
         RefreshState();
     }
-    if (batteryBecameVisible && !m_closed) {
+    if (liveBatteryBecameActive && !m_closed) {
         RefreshBatteryLive();
     }
 }
@@ -524,32 +642,62 @@ LRESULT CALLBACK MainWindow::BridgeWndProc(
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     } else if (message == WM_NCDESTROY) {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-    } else if (message == EGoTouchTrayIpc::kActivateMessage && self) {
-        self->ActivateWindow();
-        return 0;
-    } else if (message == EGoTouchTrayIpc::kSettingsLifecycleMessage && self) {
-        if (self->m_closed) return 0;
-        switch (static_cast<EGoTouchTrayIpc::SettingsLifecycle>(wParam)) {
-        case EGoTouchTrayIpc::SettingsLifecycle::InstallStarted:
-            self->Close();
-            break;
-        case EGoTouchTrayIpc::SettingsLifecycle::SafeExitCompleted:
-            self->m_exitPending = false;
-            self->Close();
-            break;
-        case EGoTouchTrayIpc::SettingsLifecycle::SafeExitFailed:
-            if (self->m_exitPending) {
-                self->m_exitPending = false;
-                self->SetInteractiveEnabled(self->m_trayConnected);
-                if (self->IsMainUiVisible()) {
-                    self->ShowError(L"无法安全退出", L"未能确认 HuaweiTHP 已恢复，应用将继续运行。");
-                }
+    } else if ((message == EGoTouchTrayIpc::kActivateMessage ||
+                message == EGoTouchTrayIpc::kSettingsLifecycleMessage ||
+                message == EGoTouchTrayIpc::kNotificationMessage ||
+                message == EGoTouchTrayIpc::kToggleQuickFlyoutMessage) && self) {
+        // 桥接窗口是原始 HWND_MESSAGE，直接在其 WndProc 内同步操作 XAML 会错过 WinUI
+        // 消息泵调度（尤其冷启动首个 --background 飞出消息），统一投递到 DispatcherQueue。
+        try {
+            const auto dispatch = [self](auto&& action) {
+                self->DispatcherQueue().TryEnqueue(
+                    [weak = self->get_weak(), fn = std::move(action)]() mutable {
+                        try {
+                            const auto strong = weak.get();
+                            if (!strong || strong->m_closed) return;
+                            fn(*strong);
+                        } catch (...) {
+                        }
+                    });
+            };
+            if (message == EGoTouchTrayIpc::kActivateMessage) {
+                dispatch([](MainWindow& mw) { mw.ActivateWindow(); });
+            } else if (message == EGoTouchTrayIpc::kSettingsLifecycleMessage) {
+                const auto lifecycle = static_cast<EGoTouchTrayIpc::SettingsLifecycle>(wParam);
+                dispatch([lifecycle](MainWindow& mw) {
+                    switch (lifecycle) {
+                    case EGoTouchTrayIpc::SettingsLifecycle::InstallStarted:
+                        mw.Close();
+                        break;
+                    case EGoTouchTrayIpc::SettingsLifecycle::SafeExitCompleted:
+                        mw.m_exitPending = false;
+                        mw.Close();
+                        break;
+                    case EGoTouchTrayIpc::SettingsLifecycle::SafeExitFailed:
+                        if (mw.m_exitPending) {
+                            mw.m_exitPending = false;
+                            mw.SetInteractiveEnabled(mw.m_trayConnected);
+                            if (mw.IsMainUiVisible()) {
+                                mw.ShowError(L"无法安全退出",
+                                             L"未能确认 HuaweiTHP 已恢复，应用将继续运行。");
+                            }
+                        }
+                        break;
+                    }
+                });
+            } else if (message == EGoTouchTrayIpc::kNotificationMessage) {
+                const auto kind = static_cast<EGoTouchTrayIpc::Notification>(wParam);
+                dispatch([kind, lParam](MainWindow& mw) { mw.ShowNotification(kind, lParam); });
+            } else if (message == EGoTouchTrayIpc::kToggleQuickFlyoutMessage) {
+                const bool hasAnchor = (wParam != 0) || (lParam != 0);
+                const int anchorX = static_cast<int16_t>(LOWORD(lParam));
+                const int anchorY = static_cast<int16_t>(HIWORD(lParam));
+                dispatch([hasAnchor, anchorX, anchorY](MainWindow& mw) {
+                    mw.ToggleQuickFlyout(hasAnchor, anchorX, anchorY);
+                });
             }
-            break;
+        } catch (...) {
         }
-        return 0;
-    } else if (message == EGoTouchTrayIpc::kNotificationMessage && self) {
-        self->ShowNotification(static_cast<EGoTouchTrayIpc::Notification>(wParam), lParam);
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -588,6 +736,13 @@ void MainWindow::ShowNotification(EGoTouchTrayIpc::Notification notification, LP
 }
 
 void MainWindow::ActivateWindow() {
+    if (m_quickFlyoutWindow) {
+        auto* flyout = get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow);
+        if (flyout->IsVisible()) {
+            flyout->HideFlyout();
+        }
+    }
+    EnsureMainUiInitialized();
     const HWND hwnd = WindowHandle();
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
     Activate();
@@ -595,8 +750,222 @@ void MainWindow::ActivateWindow() {
     // 托盘的「有新版本」气泡就是经这条路把窗口叫起来的，而更新的弹窗要等窗口真的显示出来
     // 才敢弹。立刻刷一次，用户不必对着面板再等一拍轮询。
     m_lastRenderedValid = false;
+    m_mainUiNeedsRender = true;
     UpdateRefreshPolicy();
-    if (IsMainUiVisible()) RefreshState();
+    if (IsMainUiVisible()) {
+        RefreshState();
+        RefreshBatteryLive();
+    }
+}
+
+QuickFlyoutState MainWindow::BuildQuickFlyoutState() {
+    QuickFlyoutState s{};
+    m_trayConnected = FindTrayWindow() != nullptr;
+    s.trayConnected = m_trayConnected;
+
+    if (!m_reader.IsOpen()) m_reader.Open();
+    if (m_reader.IsOpen()) {
+        s.hasState = m_reader.Read(s.status);
+        if (!s.hasState) m_reader.Close();
+    }
+
+    if (m_providerAwaitingEcho) {
+        s.touchDesired = m_providerRequested;
+    } else if (s.hasState && s.status.hasTouchProvider) {
+        s.touchDesired =
+            s.status.touchProvider == PenStatus::TouchProviderState::EGoTouch ||
+            s.status.touchProvider == PenStatus::TouchProviderState::EGoSuspended ||
+            s.status.touchProvider == PenStatus::TouchProviderState::SwitchingToEGo;
+    }
+
+    s.eyeComfort = ReadUserSetting(L"EyeComfort", 0) != 0;
+
+    const DWORD kelvin = ReadUserSetting(L"ColorTemperature", 0);
+    if (kelvin >= 2000 && kelvin <= 10000) {
+        m_lastColorTemperatureKelvin = static_cast<int>(kelvin);
+        s.colorTemperatureKelvin = m_lastColorTemperatureKelvin;
+        s.colorTemperatureSliderKelvin = m_lastColorTemperatureKelvin;
+    } else {
+        s.colorTemperatureKelvin = 0;
+        s.colorTemperatureSliderKelvin = m_lastColorTemperatureKelvin;
+    }
+
+    s.kbdDetachPending = m_kbdDetachAwaitingEcho;
+    s.kbdDetachPendingValue = m_kbdDetachRequested;
+
+    if (m_chargeLimitAwaitingEcho) {
+        s.hasChargeLimit = true;
+        s.smartCharge = (m_chargeLimitRequested == 0);
+        s.chargeLimitPercent = s.smartCharge
+            ? static_cast<uint8_t>(Gaokun::Power::kSmartChargeStopPercent)
+            : static_cast<uint8_t>(Gaokun::Power::SnapChargeLimit(
+                  static_cast<int>(m_chargeLimitRequested)));
+    } else if (s.hasState && s.status.hasChargeLimit) {
+        s.hasChargeLimit = true;
+        s.smartCharge = !s.status.chargeLimitManual;
+        s.chargeLimitPercent = s.status.chargeLimit;
+    }
+
+    s.hasHostPower =
+        (Gaokun::Power::ReadLiveState(s.hostPower) == Gaokun::Power::Result::Ok &&
+         s.hostPower.batteryPresent);
+    s.powerOverlay = PowerOverlay::Query();
+    const DWORD savedMask = ReadUserSetting(L"QuickFlyoutItems", QuickFlyoutItems::kDefaultMask);
+    if (savedMask & QuickFlyoutItems::kConfiguredBit) {
+        uint32_t migratedMask = static_cast<uint32_t>(savedMask);
+        if ((migratedMask & QuickFlyoutItems::kSmartChargeDefaultMigratedBit) == 0) {
+            if (migratedMask & QuickFlyoutItems::kLegacyPenEraserBit) {
+                migratedMask &= ~QuickFlyoutItems::kLegacyPenEraserBit;
+                migratedMask |= QuickFlyoutItems::kSmartChargeTile;
+            }
+            migratedMask |= QuickFlyoutItems::kSmartChargeDefaultMigratedBit;
+            WriteUserSetting(L"QuickFlyoutItems", migratedMask);
+        }
+        s.itemsMask = migratedMask;
+    } else {
+        s.itemsMask = QuickFlyoutItems::kDefaultMask;
+    }
+    return s;
+}
+
+void MainWindow::ToggleQuickFlyout(bool hasAnchor, int anchorX, int anchorY) {
+    if (m_closed) return;
+    if (!m_quickFlyoutWindow) {
+        m_quickFlyoutWindow = make<winrt::EGoTouchSettings::implementation::QuickFlyoutWindow>();
+        QuickFlyoutCallbacks callbacks;
+        callbacks.readState = [this]() { return BuildQuickFlyoutState(); };
+        callbacks.setTouchProvider = [this](bool enabled) {
+            if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetProviderEnabled, enabled ? 1 : 0)) {
+                return false;
+            }
+            m_providerAwaitingEcho = true;
+            m_providerRequested = enabled;
+            m_providerEchoDeadline = GetTickCount64() + 6000;
+            if (m_mainUiInitialized) {
+                m_updatingControls = true;
+                TouchProviderToggle().IsOn(enabled);
+                HomeTouchToggle().IsOn(enabled);
+                m_updatingControls = false;
+                TouchProviderToggle().IsEnabled(false);
+                HomeTouchToggle().IsEnabled(false);
+                SetBusySpinner(TouchProviderProgress(), true);
+                SetBusySpinner(HomeTouchProgress(), true);
+                const hstring status =
+                    enabled ? L"正在切换到 OpenEGo Hub…" : L"正在交还华为原厂服务…";
+                TouchProviderStatusText().Text(status);
+                HomeTouchStatusText().Text(status);
+                m_mainUiNeedsRender = true;
+            }
+            return true;
+        };
+        callbacks.setEyeComfort = [this](bool enabled) {
+            if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetEyeComfort, enabled)) {
+                return false;
+            }
+            if (m_mainUiInitialized) {
+                m_updatingControls = true;
+                EyeComfortToggle().IsOn(enabled);
+                HomeEyeComfortToggle().IsOn(enabled);
+                m_updatingControls = false;
+                RefreshHomeScreenSummary();
+            }
+            return true;
+        };
+        callbacks.setKeyboardWireless = [this](bool enabled) {
+            if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetKeyboardWirelessOnDetach, enabled)) {
+                return false;
+            }
+            m_kbdDetachAwaitingEcho = true;
+            m_kbdDetachRequested = enabled;
+            m_kbdDetachEchoDeadline = GetTickCount64() + 3000;
+            if (m_mainUiInitialized) {
+                m_updatingControls = true;
+                KeyboardWirelessToggle().IsOn(enabled);
+                HomeKeyboardWirelessToggle().IsOn(enabled);
+                m_updatingControls = false;
+                m_mainUiNeedsRender = true;
+            }
+            return true;
+        };
+        callbacks.setColorTemperature = [this](int kelvin) {
+            if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetColorTemperature,
+                                 static_cast<LPARAM>(kelvin))) {
+                return false;
+            }
+            const bool enabled = kelvin >= 2000 && kelvin <= 10000;
+            if (enabled) {
+                m_lastColorTemperatureKelvin = kelvin;
+            }
+            if (m_mainUiInitialized) {
+                m_updatingControls = true;
+                ColorTemperatureToggle().IsOn(enabled);
+                if (enabled) {
+                    ColorTemperatureSlider().Value(static_cast<double>(kelvin));
+                }
+                m_updatingControls = false;
+                const bool usable = enabled && m_trayConnected && !m_exitPending;
+                ColorTemperatureSliderRow().Visibility(
+                    enabled ? Visibility::Visible : Visibility::Collapsed);
+                ColorTemperatureSlider().IsEnabled(usable);
+                ColorTemperatureResetButton().IsEnabled(usable);
+                ColorTempWarmPresetBtn().IsEnabled(usable);
+                ColorTempStandardPresetBtn().IsEnabled(usable);
+                ColorTempCoolPresetBtn().IsEnabled(usable);
+                ColorTemperatureValueText().Text(
+                    enabled ? winrt::to_hstring(kelvin) + L"K" : winrt::hstring{L"关闭"});
+                RefreshHomeScreenSummary();
+            }
+            return true;
+        };
+        callbacks.setSmartCharge = [this](bool smart) {
+            const uint8_t targetPercent = smart
+                ? 0
+                : static_cast<uint8_t>(Gaokun::Power::SnapChargeLimit(
+                      static_cast<int>(ReadUserSetting(L"ChargeLimit", 100))));
+            if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetChargeLimit,
+                                 static_cast<LPARAM>(targetPercent))) {
+                return false;
+            }
+            BeginChargeLimitEcho(targetPercent);
+            if (m_mainUiInitialized) {
+                m_updatingControls = true;
+                SmartChargeToggle().IsOn(smart);
+                if (!smart) {
+                    ChargeLimitSlider().Value(static_cast<double>(targetPercent));
+                    ChargeLimitValueText().Text(
+                        winrt::to_hstring(static_cast<int>(targetPercent)) + L"%");
+                }
+                m_updatingControls = false;
+                UpdateChargeLimitControls(smart);
+                m_mainUiNeedsRender = true;
+            }
+            return true;
+        };
+        callbacks.setPowerMode = [this](PowerOverlay::Mode mode) {
+            if (!PowerOverlay::Apply(mode)) return false;
+            if (m_mainUiInitialized) RefreshPowerModeControl();
+            return true;
+        };
+        callbacks.setEnergySaver = [this](bool enabled) {
+            if (!PowerOverlay::SetEnergySaverActive(enabled)) return false;
+            if (m_mainUiInitialized) RefreshPowerModeControl();
+            return true;
+        };
+        callbacks.saveItemsMask = [this](uint32_t mask) {
+            WriteUserSetting(
+                L"QuickFlyoutItems",
+                mask | QuickFlyoutItems::kConfiguredBit |
+                    QuickFlyoutItems::kSmartChargeDefaultMigratedBit);
+        };
+        callbacks.openSettings = [this]() { ActivateWindow(); };
+        callbacks.onVisibilityChanged = [this]() { UpdateRefreshPolicy(); };
+        get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow)
+            ->SetCallbacks(std::move(callbacks));
+    }
+
+    auto flyout = get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow);
+    flyout->ApplyTheme(RootLayout().RequestedTheme());
+    flyout->ToggleAt(hasAnchor, anchorX, anchorY);
 }
 
 DWORD MainWindow::ReadUserSetting(const wchar_t* name, DWORD fallback) {
@@ -647,6 +1016,7 @@ void MainWindow::LoadStoredSettings() {
         static_cast<int>(ReadUserSetting(L"ChargeLimit", 100)));
     ChargeLimitSlider().Value(static_cast<double>(chargeLimit));
     ChargeLimitValueText().Text(winrt::to_hstring(chargeLimit) + L"%");
+    UpdateChargeLimitControls(SmartChargeToggle().IsOn());
 
     // 未设定过时选中 Native（索引 0）：那正是没套任何 LUT 的状态，与开机后的实际情况一致。
     ColorModeCombo().SelectedIndex(static_cast<int>(ReadUserSetting(L"ColorMode", 0)));
@@ -656,15 +1026,25 @@ void MainWindow::LoadStoredSettings() {
     // 代价是有人绕过界面直接跑命令行时会不同步。
     const DWORD kelvin = ReadUserSetting(L"ColorTemperature", 0);
     const bool temperatureOn = kelvin >= 2000 && kelvin <= 10000;
-    // 关闭时滑条停在中性点，这样一开启就是 6500K，不会突然跳到某个很暖的值。
-    ColorTemperatureSlider().Value(temperatureOn ? static_cast<double>(kelvin) : 6500);
+    if (temperatureOn) m_lastColorTemperatureKelvin = static_cast<int>(kelvin);
+    // 关闭时滑条停在中性点并折叠滑条行，这样一开启就是上一次调好或默认的色温。
+    ColorTemperatureSlider().Value(
+        static_cast<double>(temperatureOn ? static_cast<int>(kelvin)
+                                          : m_lastColorTemperatureKelvin));
+    ColorTemperatureSliderRow().Visibility(
+        temperatureOn ? Visibility::Visible : Visibility::Collapsed);
     ColorTemperatureSlider().IsEnabled(temperatureOn);
     ColorTemperatureResetButton().IsEnabled(temperatureOn);
+    ColorTempWarmPresetBtn().IsEnabled(temperatureOn);
+    ColorTempStandardPresetBtn().IsEnabled(temperatureOn);
+    ColorTempCoolPresetBtn().IsEnabled(temperatureOn);
     ColorTemperatureToggle().IsOn(temperatureOn);
     ColorTemperatureValueText().Text(
         temperatureOn ? winrt::to_hstring(static_cast<int>(kelvin)) + L"K"
                       : winrt::hstring{L"关闭"});
-    EyeComfortToggle().IsOn(ReadUserSetting(L"EyeComfort", 0) != 0);
+    const bool eyeComfort = ReadUserSetting(L"EyeComfort", 0) != 0;
+    EyeComfortToggle().IsOn(eyeComfort);
+    HomeEyeComfortToggle().IsOn(eyeComfort);
 
     m_vendorHintDismissed = ReadUserSetting(L"VendorHintDismissed", 0) != 0;
 
@@ -685,7 +1065,8 @@ bool MainWindow::SendTrayCommand(EGoTouchTrayIpc::Command command, LPARAM value)
 
 // 优先读取 exe 的版本资源；资源缺失时使用与安装包同源的构建版本。
 void MainWindow::ShowAboutVersion() {
-    AboutVersionText().Text(L"版本 " + CurrentVersionText());
+    const hstring versionText = L"版本 " + CurrentVersionText();
+    AboutVersionText().Text(versionText);
     AboutVersionText().Visibility(Visibility::Visible);
 
     wchar_t module[MAX_PATH]{};
@@ -707,7 +1088,8 @@ void MainWindow::ShowAboutVersion() {
     const auto text = std::to_wstring(HIWORD(info->dwFileVersionMS)) + L"." +
                       std::to_wstring(LOWORD(info->dwFileVersionMS)) + L"." +
                       std::to_wstring(HIWORD(info->dwFileVersionLS));
-    AboutVersionText().Text(L"版本 " + hstring{text});
+    const hstring resolvedVersion = L"版本 " + hstring{text};
+    AboutVersionText().Text(resolvedVersion);
     AboutVersionText().Visibility(Visibility::Visible);
 }
 
@@ -724,6 +1106,7 @@ void MainWindow::FillDevicePage() {
         title += info.family;
     }
     MachineNameText().Text(title.empty() ? hstring{L"本机"} : hstring{title});
+    HomeMachineNameText().Text(title.empty() ? hstring{L"HUAWEI MateBook E Go"} : hstring{title});
 
     std::wstring identity = info.productName;
     if (!info.version.empty()) {
@@ -731,6 +1114,13 @@ void MainWindow::FillDevicePage() {
         identity += info.version;
     }
     MachineIdentityText().Text(hstring{identity});
+    if (!info.processor.empty()) {
+        HomeMachineSubText().Text(hstring{info.processor});
+    } else if (!identity.empty()) {
+        HomeMachineSubText().Text(hstring{identity});
+    } else {
+        HomeMachineSubText().Text(L"Windows 11 ARM64");
+    }
 
     // 核心数单列一行，不并进处理器名。处理器名本身已经带了主频，后面再接一段就要靠分隔符
     // 断句，而每行只放一个事实不需要分隔符。
@@ -742,9 +1132,13 @@ void MainWindow::FillDevicePage() {
     // 总量取自 GlobalMemoryStatusEx 而不是逐条累加：焊死的内存未必在 SMBIOS 里逐条列全，
     // 而规格（类型与频率）各条一致，取第一条即可。
     std::wstring memory = DeviceInfo::FormatBytes(info.memoryTotalBytes);
+    std::wstring shortMem = memory;
     if (!info.memoryModules.empty()) {
         const auto& module = info.memoryModules.front();
-        if (!module.type.empty()) memory += L" " + module.type;
+        if (!module.type.empty()) {
+            memory += L" " + module.type;
+            if (!shortMem.empty()) shortMem += L" " + module.type;
+        }
         if (module.speedMhz > 0) memory += L" " + std::to_wstring(module.speedMhz) + L" MHz";
     }
     SetInfoText(DeviceMemoryText(), memory);
@@ -757,6 +1151,20 @@ void MainWindow::FillDevicePage() {
         }
     }
     SetInfoText(DeviceDisplayText(), display);
+
+    m_hasHomeMemSpec = !shortMem.empty();
+    m_hasHomeDisplaySpec = !display.empty();
+    m_hasHomeModelSpec = !identity.empty();
+    if (m_hasHomeMemSpec) HomeSpecMemoryText().Text(hstring{shortMem});
+    if (m_hasHomeDisplaySpec) HomeSpecDisplayText().Text(hstring{display});
+    if (m_hasHomeModelSpec) HomeSpecModelText().Text(hstring{identity});
+    HomeSpecMemoryItem().Visibility(m_hasHomeMemSpec ? Visibility::Visible : Visibility::Collapsed);
+    HomeSpecDisplayItem().Visibility(m_hasHomeDisplaySpec ? Visibility::Visible : Visibility::Collapsed);
+    HomeSpecModelItem().Visibility(m_hasHomeModelSpec ? Visibility::Visible : Visibility::Collapsed);
+    HomeMachineSpecsRow().Visibility(
+        (m_hasHomeMemSpec || m_hasHomeDisplaySpec || m_hasHomeModelSpec)
+            ? Visibility::Visible
+            : Visibility::Collapsed);
 
     std::wstring os = info.osName;
     if (!info.osVersion.empty()) {
@@ -838,6 +1246,7 @@ fire_and_forget MainWindow::FillBatteryInfoAsync() {
         SetInfoText(BatteryHealthText(), {});
         SetInfoText(BatteryCyclesText(), {});
         SetInfoText(BatteryCapacityText(), {});
+        SetInfoText(BatteryChemistryText(), {});
         SetInfoText(BatteryVoltageText(), {});
         SetInfoText(BatteryModelText(), {});
         SetInfoText(BatteryVendorText(), {});
@@ -859,11 +1268,12 @@ fire_and_forget MainWindow::FillBatteryInfoAsync() {
     std::wstring capacity;
     if (info.fullChargedCapacityMWh > 0 && info.designCapacityMWh > 0) {
         wchar_t text[64]{};
-        std::swprintf(text, std::size(text), L"%.1f / %.1f Wh",
+        std::swprintf(text, std::size(text), L"%.1f Wh（设计 %.1f Wh）",
                       info.fullChargedCapacityMWh / 1000.0, info.designCapacityMWh / 1000.0);
         capacity = text;
     }
     SetInfoText(BatteryCapacityText(), capacity);
+    SetInfoText(BatteryChemistryText(), winrt::to_hstring(info.chemistry).c_str());
 
     std::wstring voltage;
     if (info.voltageMilliVolt > 0) {
@@ -881,72 +1291,140 @@ fire_and_forget MainWindow::FillBatteryInfoAsync() {
 
 // 电池的高频项：电量、充放电、剩余时间。
 void MainWindow::RefreshBatteryLive() {
-    if (!IsMainUiVisible()) return;
+    if (m_closed) return;
+    const bool updateMainUi = IsMainUiVisible() && m_mainUiInitialized;
+    const bool updateFlyout = m_quickFlyoutWindow &&
+        get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow)->IsVisible();
+    if (!updateMainUi && !updateFlyout) return;
+
     Gaokun::Power::LiveState live{};
     const auto result = Gaokun::Power::ReadLiveState(live);
-    if (result != Gaokun::Power::Result::Ok || !live.batteryPresent) {
-        BatteryPercentText().Text(L"—");
-        BatteryStateText().Text(result == Gaokun::Power::Result::NoBattery ? L"未检测到电池"
-                                                                          : L"读取失败");
-        BatteryLevelBar().Value(0);
-        BatteryTimeText().Text(L"");
-        m_smoothedValid = false;
-        return;
+    if (updateMainUi) {
+        if (result != Gaokun::Power::Result::Ok || !live.batteryPresent) {
+            const wchar_t* missingLabel =
+                result == Gaokun::Power::Result::NoBattery ? L"未检测到电池" : L"读取失败";
+            BatteryPercentText().Text(L"—");
+            BatteryStateText().Text(missingLabel);
+            BatteryLevelBar().Value(0);
+            BatteryLevelBar().Visibility(Visibility::Collapsed);
+            BatteryTimeText().Text(L"");
+            BatteryTimeText().Visibility(Visibility::Collapsed);
+            BatteryPowerSourceText().Text(L"—");
+            BatteryLivePowerText().Text(L"—");
+            BatteryRemainingCapText().Text(L"—");
+            BatteryVoltageText().Text(L"—");
+            BatteryHeroIcon().SetState(false, 0, false);
+            HomeBatteryPercentText().Text(L"—");
+            HomeBatteryStateText().Text(missingLabel);
+            HomeBatteryBar().Value(0);
+            HomeBatteryBar().Visibility(Visibility::Collapsed);
+            HomeHostBatteryIcon().SetState(false, 0, false);
+            m_smoothedValid = false;
+        } else {
+            const hstring percentText = live.percent <= 100
+                ? winrt::to_hstring(static_cast<int>(live.percent)) + L"%"
+                : hstring{L"—"};
+            BatteryPercentText().Text(percentText);
+            HomeBatteryPercentText().Text(percentText);
+            if (live.percent <= 100) {
+                BatteryLevelBar().Value(live.percent);
+                BatteryLevelBar().Visibility(Visibility::Visible);
+                BatteryHeroIcon().SetState(true, live.percent, live.charging);
+                HomeBatteryBar().Value(live.percent);
+                HomeBatteryBar().Visibility(Visibility::Visible);
+                HomeHostBatteryIcon().SetState(true, live.percent, live.charging);
+            } else {
+                BatteryLevelBar().Value(0);
+                BatteryLevelBar().Visibility(Visibility::Collapsed);
+                BatteryHeroIcon().SetState(false, 0, false);
+                HomeBatteryBar().Value(0);
+                HomeBatteryBar().Visibility(Visibility::Collapsed);
+                HomeHostBatteryIcon().SetState(false, 0, false);
+            }
+
+            // 方向看功率的符号，不看是否接着电源：充电上限生效时机器插着电却在放电，用 acOnline
+            // 反推会一直显示成充电中。
+            const winrt::hstring watts{FormatPower(live.powerMilliWatt)};
+            BatteryPowerSourceText().Text(live.acOnline ? L"外接电源" : L"电池供电");
+            if (live.charging) {
+                BatteryStateText().Text(L"正在充电 " + watts);
+                BatteryLivePowerText().Text(
+                    live.powerMilliWatt != 0 ? (L"充电 " + watts) : hstring{L"0 W"});
+                HomeBatteryStateText().Text(
+                    live.powerMilliWatt != 0 ? (L"正在充电 " + watts) : hstring{L"正在充电"});
+            } else if (live.discharging) {
+                BatteryStateText().Text((live.acOnline ? L"已接通电源，正在放电 " : L"正在放电 ") +
+                                        watts);
+                BatteryLivePowerText().Text(
+                    live.powerMilliWatt != 0 ? (L"放电 " + watts) : hstring{L"0 W"});
+                HomeBatteryStateText().Text((live.acOnline ? L"插电放电 " : L"使用电池 ") + watts);
+            } else {
+                const wchar_t* idleState = live.acOnline ? L"已接通电源" : L"未在充放电";
+                BatteryStateText().Text(idleState);
+                BatteryLivePowerText().Text(L"0 W");
+                HomeBatteryStateText().Text(idleState);
+            }
+
+            if (live.remainingCapacityMWh > 0) {
+                wchar_t capBuf[32]{};
+                std::swprintf(capBuf, std::size(capBuf), L"%.1f Wh",
+                              live.remainingCapacityMWh / 1000.0);
+                BatteryRemainingCapText().Text(capBuf);
+            } else {
+                BatteryRemainingCapText().Text(L"—");
+            }
+
+            // 充电时优先算「充到上限」而不是「充满」：限到 80% 时后者永远不会兑现，用户等到的是
+            // 充电在 80% 停住、时间还剩一截。拿不到阈值（服务没连上）才退回 hal 给的 ToFull。
+            uint32_t seconds = live.remainingSeconds;
+            const uint8_t kind = static_cast<uint8_t>(live.remainingKind);
+            if (live.charging && m_chargeStopPercent > 0) {
+                const uint32_t toLimit = Gaokun::Power::SecondsToPercent(live, m_chargeStopPercent);
+                if (toLimit != Gaokun::Power::kSecondsUnknown) seconds = toLimit;
+            }
+
+            if (kind == static_cast<uint8_t>(Gaokun::Power::TimeKind::Unknown) ||
+                seconds == Gaokun::Power::kSecondsUnknown) {
+                BatteryTimeText().Text(L"");
+                BatteryTimeText().Visibility(Visibility::Collapsed);
+                m_smoothedValid = false;
+            } else {
+                // 指数平滑，系数 0.1，时间常数约十秒。误差的大头是系统负载让净充电功率在两档之间跳，
+                // 实测预测值会随之在 54 分钟与 18 分钟之间摆——直接印瞬时值，这个数字每秒都在变。
+                //
+                // 不用移动平均：那要留一个窗口的历史，而窗口得开到几十秒才够稳，充放电方向一变那段
+                // 历史反而是错的。指数平滑只有一个状态，方向变了重置即可。
+                if (!m_smoothedValid || kind != m_smoothedKind) {
+                    m_smoothedSeconds = static_cast<double>(seconds);
+                    m_smoothedKind = kind;
+                    m_smoothedValid = true;
+                } else {
+                    constexpr double kAlpha = 0.1;
+                    m_smoothedSeconds = kAlpha * static_cast<double>(seconds) +
+                                        (1.0 - kAlpha) * m_smoothedSeconds;
+                }
+
+                // 一律说「充满」。设了上限时算的是充到上限，但那个点对用户来说就是充满——充电到那里
+                // 会停下，界面再去区分「上限」和「满电」，只是把实现细节推给他。
+                const std::wstring duration = FormatDuration(static_cast<uint32_t>(m_smoothedSeconds));
+                BatteryTimeText().Text(kind == static_cast<uint8_t>(Gaokun::Power::TimeKind::ToFull)
+                                           ? L"距离充满还需 " + winrt::hstring{duration}
+                                           : L"剩余可用 " + winrt::hstring{duration});
+                BatteryTimeText().Visibility(Visibility::Visible);
+            }
+        }
+        if (BatteryPage().Visibility() == Visibility::Visible) {
+            RefreshPowerModeControl();
+        }
     }
 
-    if (live.percent != Gaokun::Power::kPercentUnknown) {
-        BatteryPercentText().Text(winrt::to_hstring(static_cast<int>(live.percent)) + L"%");
-        BatteryLevelBar().Value(live.percent);
+    if (updateFlyout) {
+        auto flyout = get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow);
+        QuickFlyoutState flyoutState = BuildQuickFlyoutState();
+        flyoutState.hasHostPower = (result == Gaokun::Power::Result::Ok && live.batteryPresent);
+        if (flyoutState.hasHostPower) flyoutState.hostPower = live;
+        flyout->UpdateState(flyoutState);
     }
-
-    // 方向看功率的符号，不看是否接着电源：充电上限生效时机器插着电却在放电，用 acOnline
-    // 反推会一直显示成充电中。
-    if (live.charging) {
-        BatteryStateText().Text(L"正在充电 " + winrt::hstring{FormatPower(live.powerMilliWatt)});
-    } else if (live.discharging) {
-        BatteryStateText().Text((live.acOnline ? L"已接通电源，正在放电 " : L"正在放电 ") +
-                                winrt::hstring{FormatPower(live.powerMilliWatt)});
-    } else {
-        BatteryStateText().Text(live.acOnline ? L"已接通电源" : L"未在充放电");
-    }
-
-    // 充电时优先算「充到上限」而不是「充满」：限到 80% 时后者永远不会兑现，用户等到的是
-    // 充电在 80% 停住、时间还剩一截。拿不到阈值（服务没连上）才退回 hal 给的 ToFull。
-    uint32_t seconds = live.remainingSeconds;
-    uint8_t kind = static_cast<uint8_t>(live.remainingKind);
-    if (live.charging && m_chargeStopPercent > 0) {
-        const uint32_t toLimit = Gaokun::Power::SecondsToPercent(live, m_chargeStopPercent);
-        if (toLimit != Gaokun::Power::kSecondsUnknown) seconds = toLimit;
-    }
-
-    if (kind == static_cast<uint8_t>(Gaokun::Power::TimeKind::Unknown) ||
-        seconds == Gaokun::Power::kSecondsUnknown) {
-        BatteryTimeText().Text(L"");
-        m_smoothedValid = false;
-        return;
-    }
-
-    // 指数平滑，系数 0.1，时间常数约十秒。误差的大头是系统负载让净充电功率在两档之间跳，
-    // 实测预测值会随之在 54 分钟与 18 分钟之间摆——直接印瞬时值，这个数字每秒都在变。
-    //
-    // 不用移动平均：那要留一个窗口的历史，而窗口得开到几十秒才够稳，充放电方向一变那段
-    // 历史反而是错的。指数平滑只有一个状态，方向变了重置即可。
-    if (!m_smoothedValid || kind != m_smoothedKind) {
-        m_smoothedSeconds = static_cast<double>(seconds);
-        m_smoothedKind = kind;
-        m_smoothedValid = true;
-    } else {
-        constexpr double kAlpha = 0.1;
-        m_smoothedSeconds = kAlpha * static_cast<double>(seconds) +
-                            (1.0 - kAlpha) * m_smoothedSeconds;
-    }
-
-    // 一律说「充满」。设了上限时算的是充到上限，但那个点对用户来说就是充满——充电到那里
-    // 会停下，界面再去区分「上限」和「满电」，只是把实现细节推给他。
-    const std::wstring duration = FormatDuration(static_cast<uint32_t>(m_smoothedSeconds));
-    BatteryTimeText().Text(kind == static_cast<uint8_t>(Gaokun::Power::TimeKind::ToFull)
-                               ? L"距离充满还需 " + winrt::hstring{duration}
-                               : L"剩余可用 " + winrt::hstring{duration});
 }
 
 // 整机图只解一次。它不像配件图那样跟着连接状态变，所以没有代次校验，也不安排重试：
@@ -966,9 +1444,35 @@ fire_and_forget MainWindow::LoadMachineImage() {
 
         m_machineImageSource = source;
         MachineImage().Source(source);
+        HomeMachineImage().Source(source);
+        HomeMachineImage().Visibility(Visibility::Visible);
+        HomeMachineFallback().Visibility(Visibility::Collapsed);
     } catch (...) {
         // PC Manager 更新组件时会短暂读到不完整的插件文件。
     }
+}
+
+void MainWindow::PlayPageTransition() {
+    if (m_pageStoryboard) m_pageStoryboard.Stop();
+    if (!m_uiReady || !ClientAnimationsEnabled()) {
+        PageHost().Opacity(1.0);
+        return;
+    }
+
+    CubicEase ease;
+    ease.EasingMode(EasingMode::EaseOut);
+    DoubleAnimation fade;
+    fade.From(0.0);
+    fade.To(1.0);
+    fade.Duration(DurationHelper::FromTimeSpan(Windows::Foundation::TimeSpan{120 * 10'000}));
+    fade.EasingFunction(ease);
+    Storyboard::SetTarget(fade, PageHost());
+    Storyboard::SetTargetProperty(fade, L"Opacity");
+
+    Storyboard storyboard;
+    storyboard.Children().Append(fade);
+    m_pageStoryboard = storyboard;
+    storyboard.Begin();
 }
 
 void MainWindow::NavSelectionChanged(
@@ -978,13 +1482,38 @@ void MainWindow::NavSelectionChanged(
     if (!item) return;
     const auto tag = unbox_value_or<hstring>(item.Tag(), L"");
 
+    PageHeaderText().Text(PageHeaderForTag(tag));
+    HomePage().Visibility(tag == L"home" ? Visibility::Visible : Visibility::Collapsed);
     DevicesPage().Visibility(tag == L"devices" ? Visibility::Visible : Visibility::Collapsed);
     BatteryPage().Visibility(tag == L"battery" ? Visibility::Visible : Visibility::Collapsed);
     ScreenPage().Visibility(tag == L"screen" ? Visibility::Visible : Visibility::Collapsed);
     GeneralPage().Visibility(tag == L"general" ? Visibility::Visible : Visibility::Collapsed);
     DevicePage().Visibility(tag == L"device" ? Visibility::Visible : Visibility::Collapsed);
     AboutPage().Visibility(tag == L"about" ? Visibility::Visible : Visibility::Collapsed);
+    if (m_mainUiInitialized) {
+        if (tag == L"screen") RefreshScreenControls();
+        else if (tag == L"battery") RefreshPowerModeControl();
+        else if (tag == L"general") {
+            if (!m_vendorScmProbed || m_vendorDetailsExpanded) {
+                RefreshVendorServicesDetails();
+                SyncVendorServicesDetailsVisibility();
+            }
+        }
+    }
+    PlayPageTransition();
     UpdateRefreshPolicy();
+}
+
+void MainWindow::HomeNavCardClicked(IInspectable const& sender, RoutedEventArgs const&) {
+    const auto button = sender.try_as<Controls::Button>();
+    if (!button) return;
+    const auto tag = unbox_value_or<hstring>(button.Tag(), L"");
+    if (tag == L"devices") NavDevices().IsSelected(true);
+    else if (tag == L"battery") NavBattery().IsSelected(true);
+    else if (tag == L"screen") NavScreen().IsSelected(true);
+    else if (tag == L"general") NavGeneral().IsSelected(true);
+    else if (tag == L"device") NavDevice().IsSelected(true);
+    else if (tag == L"about") NavAbout().IsSelected(true);
 }
 
 void MainWindow::NavItemInvoked(
@@ -1016,6 +1545,10 @@ void MainWindow::ApplyTheme(ElementTheme theme) {
         get_self<winrt::EGoTouchSettings::implementation::NotificationWindow>(
             m_notificationWindow)->ApplyTheme(theme);
     }
+    if (m_quickFlyoutWindow) {
+        get_self<winrt::EGoTouchSettings::implementation::QuickFlyoutWindow>(
+            m_quickFlyoutWindow)->ApplyTheme(theme);
+    }
 }
 
 // 窗框和标题栏按钮不在 XAML 的管辖内，得单独交代深浅。挂在 ActualTheme 上而不是自己去读
@@ -1031,10 +1564,134 @@ void MainWindow::SyncFrameTheme() {
         Microsoft::UI::Windowing::AppWindow::GetFromWindowId(GetWindowIdFromWindow(hwnd)), dark);
 }
 
-void MainWindow::DeviceCardsSizeChanged(IInspectable const&,
-                                        SizeChangedEventArgs const& args) {
-    m_deviceCardsWidth = args.NewSize().Width;
-    ApplyDeviceCardLayout();
+void MainWindow::RefreshScreenControls() {
+    if (!m_mainUiInitialized) return;
+    const auto mode = DisplayModeHelper::QueryPrimary();
+    m_supportedRefreshRates = mode.supportedHz;
+    m_currentRefreshHz = mode.currentHz;
+    m_displayWidth = mode.width;
+    m_displayHeight = mode.height;
+
+    const HWND hwnd = WindowHandle();
+    const UINT rawDpi = hwnd ? GetDpiForWindow(hwnd) : 0;
+    const UINT scalePercent = rawDpi ? static_cast<UINT>(std::lround(rawDpi * 100.0 / 96.0)) : 100;
+
+    if (mode.width > 0 && mode.height > 0) {
+        ScreenModeSpecText().Text(
+            winrt::to_hstring(mode.width) + L" × " + winrt::to_hstring(mode.height) +
+            L" 分辨率，" + winrt::to_hstring(scalePercent) + L"% 缩放");
+    } else {
+        ScreenModeSpecText().Text(L"内置显示器");
+    }
+
+    const bool wasUpdating = m_updatingControls;
+    m_updatingControls = true;
+    ScreenRefreshCombo().Items().Clear();
+    int selectedIdx = -1;
+    for (size_t i = 0; i < m_supportedRefreshRates.size(); ++i) {
+        const uint32_t hz = m_supportedRefreshRates[i];
+        Controls::ComboBoxItem item;
+        item.Content(box_value(winrt::to_hstring(hz) + L" Hz"));
+        ScreenRefreshCombo().Items().Append(item);
+        if (hz == m_currentRefreshHz) selectedIdx = static_cast<int>(i);
+    }
+    if (selectedIdx >= 0) ScreenRefreshCombo().SelectedIndex(selectedIdx);
+    ScreenRefreshCombo().IsEnabled(m_supportedRefreshRates.size() > 1);
+    ScreenRefreshStatusText().Text(
+        m_supportedRefreshRates.size() > 1
+            ? hstring{L"高刷新率带来更顺滑的手写与滚动，60 Hz 可降低屏幕功耗。"}
+            : hstring{L"当前显示模式仅支持单一刷新率。"});
+    m_updatingControls = wasUpdating;
+
+    RefreshHomeScreenSummary();
+}
+
+void MainWindow::RefreshPowerModeControl() {
+    if (!m_mainUiInitialized) return;
+    const auto es = PowerOverlay::QueryEnergySaver();
+    const auto overlay = PowerOverlay::Query();
+    const bool wasUpdating = m_updatingControls;
+    m_updatingControls = true;
+
+    EnergySaverToggle().IsEnabled(true);
+    EnergySaverToggle().IsOn(es.active);
+    EnergySaverStatusText().Text(
+        es.active
+            ? (es.alwaysOn
+                   ? hstring{L"已开启始终节能模式，后台活动与部分视觉效果已受限。"}
+                   : hstring{L"当前已开启节能模式，正在限制后台活动与部分视觉效果。"})
+            : hstring{L"开启后降低后台活动与部分视觉效果，以延长电池续航。"});
+
+    EnergySaverThresholdCombo().IsEnabled(es.supported);
+    EnergySaverThresholdCombo().SelectedIndex(
+        es.supported ? EnergySaverThresholdToIndex(es.autoThresholdPercent) : -1);
+
+    EnergySaverBrightnessToggle().IsEnabled(es.supported);
+    EnergySaverBrightnessToggle().IsOn(es.lowerBrightness);
+
+    if (overlay.supported) {
+        const int idx = overlay.mode == PowerOverlay::Mode::BestEfficiency   ? 0
+                      : overlay.mode == PowerOverlay::Mode::BestPerformance  ? 2
+                                                                             : 1;
+        PowerModeCombo().SelectedIndex(idx);
+        const bool saverOn = overlay.energySaverActive || es.active;
+        PowerModeCombo().IsEnabled(!saverOn);
+        PowerModeStatusText().Text(
+            saverOn ? hstring{L"节能模式开启期间暂由系统接管性能调节。"}
+                    : hstring{L"调节系统在电池续航与性能释放之间的取向。"});
+    } else {
+        PowerModeCombo().IsEnabled(false);
+        PowerModeCombo().SelectedIndex(-1);
+        PowerModeStatusText().Text(L"当前电源计划不支持电源模式覆盖。");
+    }
+    m_updatingControls = wasUpdating;
+}
+
+void MainWindow::BatteryLayoutGridSizeChanged(IInspectable const&,
+                                              SizeChangedEventArgs const& args) {
+    ApplyTwoColumnLayout(
+        BatteryLayoutGrid(), BatteryCol0(), BatteryCol1(), BatterySidePanel(),
+        args.NewSize().Width);
+}
+
+void MainWindow::ScreenLayoutGridSizeChanged(IInspectable const&,
+                                             SizeChangedEventArgs const& args) {
+    ApplyTwoColumnLayout(
+        ScreenLayoutGrid(), ScreenCol0(), ScreenCol1(), ScreenPreviewPanel(),
+        args.NewSize().Width);
+}
+
+void MainWindow::AboutLayoutGridSizeChanged(IInspectable const&,
+                                            SizeChangedEventArgs const& args) {
+    ApplyTwoColumnLayout(
+        AboutLayoutGrid(), AboutCol0(), AboutCol1(), AboutSidePanel(),
+        args.NewSize().Width);
+}
+
+void MainWindow::HomeStatusGridSizeChanged(IInspectable const&,
+                                             SizeChangedEventArgs const& args) {
+    const double width = args.NewSize().Width;
+    constexpr double kThreeColMinWidth = 660.0;
+    const bool threeCol = width >= kThreeColMinWidth;
+
+    HomeStatusGrid().ColumnSpacing(threeCol ? 12.0 : 0.0);
+    HomeStatusCol1().Width(threeCol ? GridLength{1.0, GridUnitType::Star}
+                                    : GridLength{0.0, GridUnitType::Pixel});
+    HomeStatusCol2().Width(threeCol ? GridLength{1.0, GridUnitType::Star}
+                                    : GridLength{0.0, GridUnitType::Pixel});
+    Controls::Grid::SetRow(HomePenCard(), threeCol ? 0 : 1);
+    Controls::Grid::SetColumn(HomePenCard(), threeCol ? 1 : 0);
+    Controls::Grid::SetRow(HomeKeyboardCard(), threeCol ? 0 : 2);
+    Controls::Grid::SetColumn(HomeKeyboardCard(), threeCol ? 2 : 0);
+
+    const bool showMem = m_hasHomeMemSpec && width >= 360.0;
+    const bool showDisplay = m_hasHomeDisplaySpec && width >= 540.0;
+    const bool showModel = m_hasHomeModelSpec && width >= 680.0;
+    HomeSpecMemoryItem().Visibility(showMem ? Visibility::Visible : Visibility::Collapsed);
+    HomeSpecDisplayItem().Visibility(showDisplay ? Visibility::Visible : Visibility::Collapsed);
+    HomeSpecModelItem().Visibility(showModel ? Visibility::Visible : Visibility::Collapsed);
+    HomeMachineSpecsRow().Visibility(
+        (showMem || showDisplay || showModel) ? Visibility::Visible : Visibility::Collapsed);
 }
 
 void MainWindow::ApplyDeviceCardLayout() {
@@ -1042,23 +1699,173 @@ void MainWindow::ApplyDeviceCardLayout() {
         return visible ? Visibility::Visible : Visibility::Collapsed;
     };
 
-    PenGroup().Visibility(show(m_penSeen));
-    KeyboardGroup().Visibility(show(m_kbdSeen));
+    PenHeaderSection().Visibility(show(m_penSeen));
+    KeyboardHeaderSection().Visibility(show(m_kbdSeen));
     DeviceEmptyState().Visibility(show(!m_penSeen && !m_kbdSeen));
+}
 
-    // 两张设备卡片在够宽时并排。阈值按「一张卡片本身需要的宽度」定：低于它并排只会把两边
-    // 都挤扁，不如继续堆叠。用代码切换而不是 AdaptiveTrigger，是因为触发条件要看的是内容区
-    // 宽度，而 AdaptiveTrigger 只认窗口宽度——左侧导航栏展开与折叠会让两者差出 180。
-    constexpr double kSideBySideMinWidth = 900.0;
-    const bool sideBySide =
-        m_penSeen && m_kbdSeen && m_deviceCardsWidth >= kSideBySideMinWidth;
+void MainWindow::SyncPenDetailsVisibility() {
+    PenDetailsToggleButton().Visibility(m_hasPenIdentity ? Visibility::Visible : Visibility::Collapsed);
+    PenDetailsToggleButton().Margin(Thickness{0.0, 0.0, m_penRightSlotVisible ? 12.0 : 0.0, 0.0});
+    PenIdentityGroup().Visibility(
+        (m_hasPenIdentity && m_penDetailsExpanded) ? Visibility::Visible : Visibility::Collapsed);
+    PenDetailsChevron().Glyph(m_penDetailsExpanded ? L"\xE70E" : L"\xE70D");
+}
 
-    DeviceSecondColumn().Width(sideBySide ? GridLength{1.0, GridUnitType::Star}
-                                          : GridLength{0.0, GridUnitType::Pixel});
-    // 笔卡片不在时键盘回到第一行：Grid 的 RowSpacing 照样会在空行之后留出 24，卡片会被
-    // 顶下去一截。
-    Controls::Grid::SetRow(KeyboardGroup(), (m_penSeen && !sideBySide) ? 1 : 0);
-    Controls::Grid::SetColumn(KeyboardGroup(), sideBySide ? 1 : 0);
+void MainWindow::SyncKeyboardDetailsVisibility() {
+    KeyboardDetailsToggleButton().Visibility(
+        m_hasKbdIdentity ? Visibility::Visible : Visibility::Collapsed);
+    KeyboardDetailsToggleButton().Margin(
+        Thickness{0.0, 0.0, m_kbdRightSlotVisible ? 12.0 : 0.0, 0.0});
+    KeyboardIdentityGroup().Visibility(
+        (m_hasKbdIdentity && m_kbdDetailsExpanded) ? Visibility::Visible : Visibility::Collapsed);
+    KeyboardDetailsChevron().Glyph(m_kbdDetailsExpanded ? L"\xE70E" : L"\xE70D");
+}
+
+void MainWindow::PenDetailsToggleClicked(IInspectable const&, RoutedEventArgs const&) {
+    m_penDetailsExpanded = !m_penDetailsExpanded;
+    SyncPenDetailsVisibility();
+}
+
+void MainWindow::KeyboardDetailsToggleClicked(IInspectable const&, RoutedEventArgs const&) {
+    m_kbdDetailsExpanded = !m_kbdDetailsExpanded;
+    SyncKeyboardDetailsVisibility();
+}
+
+void MainWindow::SyncVendorServicesDetailsVisibility() {
+    VendorServicesDetailsButton().Visibility(
+        m_hasVendorServicesInstalled ? Visibility::Visible : Visibility::Collapsed);
+    VendorServicesDetailsGroup().Visibility(
+        (m_hasVendorServicesInstalled && m_vendorDetailsExpanded)
+            ? Visibility::Visible
+            : Visibility::Collapsed);
+    VendorServicesDetailsChevron().Glyph(m_vendorDetailsExpanded ? L"\xE70E" : L"\xE70D");
+}
+
+void MainWindow::VendorServicesDetailsToggleClicked(IInspectable const&, RoutedEventArgs const&) {
+    m_vendorDetailsExpanded = !m_vendorDetailsExpanded;
+    if (m_vendorDetailsExpanded) {
+        RefreshVendorServicesDetails();
+    }
+    SyncVendorServicesDetailsVisibility();
+}
+
+void MainWindow::RefreshVendorServicesDetails() {
+    const SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return;
+
+    struct ServiceRowBinding {
+        const wchar_t* name;
+        FrameworkElement row;
+        Controls::TextBlock stateText;
+    };
+    const std::array<ServiceRowBinding, 7> rows{{
+        {L"HwPCCoreService", VendorSvcRow0(), VendorSvcState0()},
+        {L"HiConnectivityService", VendorSvcRow1(), VendorSvcState1()},
+        {L"HwDistributedMainService", VendorSvcRow2(), VendorSvcState2()},
+        {L"MouseCrossingDaemon", VendorSvcRow3(), VendorSvcState3()},
+        {L"LCD_Service", VendorSvcRow4(), VendorSvcState4()},
+        {L"MBAMainService", VendorSvcRow5(), VendorSvcState5()},
+        {L"WUCSProxy", VendorSvcRow6(), VendorSvcState6()},
+    }};
+
+    std::vector<BYTE> configBuf;
+    size_t installedCount = 0;
+
+    for (const auto& item : rows) {
+        bool canQueryConfig = true;
+        SC_HANDLE svc = OpenServiceW(scm, item.name, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+        if (!svc && GetLastError() == ERROR_ACCESS_DENIED) {
+            canQueryConfig = false;
+            svc = OpenServiceW(scm, item.name, SERVICE_QUERY_STATUS);
+        }
+        if (!svc) {
+            if (GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) {
+                item.row.Visibility(Visibility::Collapsed);
+            } else {
+                ++installedCount;
+                item.row.Visibility(Visibility::Visible);
+                item.stateText.Text(L"无法读取");
+                item.stateText.Opacity(0.6);
+            }
+            continue;
+        }
+
+        ++installedCount;
+        item.row.Visibility(Visibility::Visible);
+
+        SERVICE_STATUS ss{};
+        const bool hasStatus = QueryServiceStatus(svc, &ss) != FALSE;
+
+        DWORD startType = SERVICE_DEMAND_START;
+        bool hasStart = false;
+        if (canQueryConfig) {
+            DWORD needed = 0;
+            (void)QueryServiceConfigW(svc, nullptr, 0, &needed);
+            if (needed > 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                if (configBuf.size() < needed) configBuf.resize(needed);
+                auto* cfg = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(configBuf.data());
+                if (QueryServiceConfigW(svc, cfg, static_cast<DWORD>(configBuf.size()), &needed)) {
+                    startType = cfg->dwStartType;
+                    hasStart = true;
+                }
+            }
+        }
+        CloseServiceHandle(svc);
+
+        hstring stateLabel = L"无法读取";
+        double opacity = 0.6;
+        if (hasStatus) {
+            switch (ss.dwCurrentState) {
+            case SERVICE_RUNNING:
+                stateLabel = (hasStart && startType == SERVICE_DISABLED)
+                    ? L"仍在运行（已设禁用）"
+                    : L"正在运行";
+                opacity = 1.0;
+                break;
+            case SERVICE_STOP_PENDING:
+                stateLabel = L"正在停止…";
+                opacity = 0.75;
+                break;
+            case SERVICE_START_PENDING:
+            case SERVICE_CONTINUE_PENDING:
+                stateLabel = L"正在启动…";
+                opacity = 0.75;
+                break;
+            case SERVICE_PAUSED:
+            case SERVICE_PAUSE_PENDING:
+                stateLabel = L"已暂停";
+                opacity = 0.6;
+                break;
+            default:
+                if (hasStart && startType == SERVICE_DISABLED) {
+                    stateLabel = L"已禁用";
+                    opacity = 0.6;
+                } else if (hasStart &&
+                           (startType == SERVICE_AUTO_START ||
+                            startType == SERVICE_BOOT_START ||
+                            startType == SERVICE_SYSTEM_START)) {
+                    stateLabel = L"已停止（自启）";
+                    opacity = 0.75;
+                } else if (hasStart && startType == SERVICE_DEMAND_START) {
+                    stateLabel = L"已停止（手动）";
+                    opacity = 0.6;
+                } else {
+                    stateLabel = L"已停止";
+                    opacity = 0.6;
+                }
+                break;
+            }
+        }
+
+        item.stateText.Text(stateLabel);
+        item.stateText.Opacity(opacity);
+    }
+
+    CloseServiceHandle(scm);
+    m_hasVendorServicesInstalled = installedCount > 0;
+    m_vendorScmProbed = true;
+    m_lastVendorDetailsQueryTick = GetTickCount64();
 }
 
 void MainWindow::PenDismissClicked(IInspectable const&, RoutedEventArgs const&) {
@@ -1198,11 +2005,16 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
     if (!state) {
         PenStateText().Text(L"服务未运行");
         PenBatteryIndicator().SetState(false, 0, false);
-        PenIdentityGroup().Visibility(Visibility::Collapsed);
+        m_hasPenIdentity = false;
+        m_penRightSlotVisible = false;
+        SyncPenDetailsVisibility();
         KeyboardStateText().Text(L"服务未运行");
         KeyboardBatteryIndicator().SetState(false, 0, false);
-        KeyboardIdentityGroup().Visibility(Visibility::Collapsed);
+        m_hasKbdIdentity = false;
+        m_kbdRightSlotVisible = false;
+        SyncKeyboardDetailsVisibility();
         AccessoryVendorMissingBar().IsOpen(false);
+        AccessoryVendorMissingBar().Visibility(Visibility::Collapsed);
         // 状态未知时不提供移除：这一帧说不清设备在不在场。
         PenDismissButton().Visibility(Visibility::Collapsed);
         KeyboardDismissButton().Visibility(Visibility::Collapsed);
@@ -1214,8 +2026,11 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
 
     // 配件组件缺失的提示直接按当前帧开合，不套用下面那套「整帧空白时保持上次显示」：
     // hostHealth 由服务每轮无条件发布，这里的假值就是「已探测，组件在」，不是缺信息。
-    AccessoryVendorMissingBar().IsOpen(
-        state->hasHostHealth && (state->penVendorMissing || state->kbdVendorMissing));
+    const bool vendorMissing =
+        state->hasHostHealth && (state->penVendorMissing || state->kbdVendorMissing);
+    AccessoryVendorMissingBar().IsOpen(vendorMissing);
+    AccessoryVendorMissingBar().Visibility(
+        vendorMissing ? Visibility::Visible : Visibility::Collapsed);
 
     // ── 笔 ──
     if (state->modelName[0] != '\0') {
@@ -1229,14 +2044,18 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
     //
     // 注意这和「在位但链路还没建立」不是一回事：那种情况下 has 位是有的，只是值为假，
     // 显示「正在检测」才是对的。两者的区别就在有没有任何一个 has 位。
-    const bool penStateKnown =
+    const bool penUnavailable = state->hasHostHealth &&
+        (!state->penHostHealthy || state->penVendorMissing);
+    const bool penStateKnown = penUnavailable ||
         state->hasChargingState || state->hasStylusLink || state->hasDeviceAttached;
 
     // 与托盘面板同一套判据。「未连接」只在设备明确报告不在位时才说——链路状态未知并不等于
     // 没有笔，MCU 常常先给出电量和型号、过一会儿才报链路，这中间说「未连接」是错的。
     // 充电是吸附状态下最直接、也最有用的用户语义；放在活动链路之前，避免笔吸在机身上时
     // 因 0x71 暂时为假而落入一个并非 MCU 原生状态的“待机”。其余分支只陈述已知事实。
-    if (state->hasChargingState && state->charging) {
+    if (penUnavailable) {
+        PenStateText().Text(L"无法读取设备状态");
+    } else if (state->hasChargingState && state->charging) {
         PenStateText().Text(L"正在充电");
     } else if (state->hasStylusLink && state->stylusLinked) {
         PenStateText().Text(L"已连接");
@@ -1246,16 +2065,16 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
         PenStateText().Text(L"正在检测…");
     }
 
-    if (state->hasBatteryLevel) {
+    if (AccessoryBattery::HasPenBattery(*state)) {
         PenBatteryIndicator().SetState(
             true, state->batteryLevel, state->hasChargingState && state->charging);
-    } else if (penStateKnown) {
+    } else if (penStateKnown || state->hasBatteryLevel) {
         // 有别的状态却没有电量，才是真的读不到电量；整帧空白时保持原样，同上。
         PenBatteryIndicator().SetState(false, 0, false);
     }
 
-    // 身份信息同样只在这一帧确实带了笔的信息时才动。整帧空白时把三行全隐藏，这一组就会
-    // 折叠，卡片高度骤变——那才是「卡片重新加载」的观感来源，比状态文字更显眼。
+    // 身份信息同样只在这一帧确实带了笔的信息时才动。默认折叠由 PenDetailsToggleButton
+    // 展开，避免与键盘卡片并排时高度失衡。
     const bool anyPenIdentity =
         (state->hasPenFirmware && state->penFirmware[0]) ||
         (state->hasPenHardware && state->penHardware[0]) ||
@@ -1264,14 +2083,16 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
         SetRowText(PenFirmwareText(), PenFirmwareRow(), state->hasPenFirmware, state->penFirmware);
         SetRowText(PenHardwareText(), PenHardwareRow(), state->hasPenHardware, state->penHardware);
         SetRowText(PenSerialText(), PenSerialRow(), state->hasPenSerial, state->penSerial);
-        PenIdentityGroup().Visibility(anyPenIdentity ? Visibility::Visible
-                                                     : Visibility::Collapsed);
+        m_hasPenIdentity = anyPenIdentity;
+        SyncPenDetailsVisibility();
     }
 
     // ── 键盘 ──
     const bool present = state->hasKbdPresent && state->kbdPresent;
     // 与笔同理：整帧不带任何键盘信息时保持上一次的显示，见上面那段说明。
-    const bool kbdStateKnown = state->hasKbdPresent || state->hasKbdBattery ||
+    const bool kbdUnavailable = state->hasHostHealth &&
+        (!state->kbdHostHealthy || state->kbdVendorMissing);
+    const bool kbdStateKnown = kbdUnavailable || state->hasKbdPresent || state->hasKbdBattery ||
                                state->hasKbdCharging || state->hasKbdDetached;
 
     // 名称：型号判得出就用判出来的，判不出但键盘确实在，就用不带后缀的通用名——能应答
@@ -1284,7 +2105,9 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
     }
     if (present) LoadKeyboardImage();
 
-    if (!kbdStateKnown) {
+    if (kbdUnavailable) {
+        KeyboardStateText().Text(L"无法读取设备状态");
+    } else if (!kbdStateKnown) {
         // 什么都不改。
     } else if (!state->hasKbdPresent) {
         KeyboardStateText().Text(L"正在检测…");
@@ -1299,7 +2122,7 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
         KeyboardStateText().Text(L"已吸附");
     }
 
-    if (present && state->hasKbdBattery) {
+    if (present && AccessoryBattery::HasKeyboardBattery(*state)) {
         KeyboardBatteryIndicator().SetState(
             true, state->kbdBatteryLevel,
             state->hasKbdCharging && state->kbdCharging);
@@ -1307,13 +2130,12 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
         KeyboardBatteryIndicator().SetState(false, 0, false);
     }
 
-    // 身份组同样只在这一帧带了键盘信息时才动。整帧空白时折叠它，卡片高度骤变——那正是
-    // 键盘卡片「重新加载」的观感来源。
+    // 身份组同样只在这一帧带了键盘信息时才动，默认折叠。
     const bool hasKbdFirmware = present && state->kbdFirmware[0] != '\0';
     if (hasKbdFirmware || kbdStateKnown) {
-        KeyboardIdentityGroup().Visibility(hasKbdFirmware ? Visibility::Visible
-                                                          : Visibility::Collapsed);
         if (hasKbdFirmware) KeyboardFirmwareText().Text(to_hstring(state->kbdFirmware));
+        m_hasKbdIdentity = hasKbdFirmware;
+        SyncKeyboardDetailsVisibility();
     }
 
     // ── 卡片可见性 ──
@@ -1335,6 +2157,11 @@ void MainWindow::RefreshDevicePage(const PenStatus::State* state) {
     if (penDismissable) PenBatteryIndicator().SetState(false, 0, false);
     if (kbdDismissable) KeyboardBatteryIndicator().SetState(false, 0, false);
 
+    m_penRightSlotVisible = penDismissable || AccessoryBattery::HasPenBattery(*state);
+    m_kbdRightSlotVisible = kbdDismissable || (present && AccessoryBattery::HasKeyboardBattery(*state));
+    SyncPenDetailsVisibility();
+    SyncKeyboardDetailsVisibility();
+
     // 宿主读不到 MCU 时「未接入」这句就不可靠，设备可能好端端接着。厂商组件缺失不走这里，
     // 那一路由 AccessoryVendorMissingBar 交代。
     const bool hostsUnreadable =
@@ -1353,8 +2180,12 @@ void MainWindow::RefreshState() {
     const bool mainVisible = IsMainUiVisible();
     const bool notifyNeedsRefresh = m_notificationWindow &&
         get_self<implementation::NotificationWindow>(m_notificationWindow)->NeedsStateRefresh();
-    if (mainVisible) m_trayConnected = FindTrayWindow() != nullptr;
-    if (!mainVisible && !notifyNeedsRefresh) return;
+    const bool quickFlyoutVisible = m_quickFlyoutWindow &&
+        get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow)->IsVisible();
+    if (mainVisible || quickFlyoutVisible) {
+        m_trayConnected = FindTrayWindow() != nullptr;
+    }
+    if (!mainVisible && !notifyNeedsRefresh && !quickFlyoutVisible) return;
 
     if (!m_reader.IsOpen()) m_reader.Open();
     PenStatus::State state{};
@@ -1367,42 +2198,172 @@ void MainWindow::RefreshState() {
         m_reader.Close();
     }
 
+    if (m_penModeAwaitingEcho) {
+        const bool echoed = hasState && state.hasPenButtonMode &&
+                            state.penButtonMode == m_penModeRequested;
+        if (echoed || GetTickCount64() >= m_penModeEchoDeadline) {
+            m_penModeAwaitingEcho = false;
+        }
+    }
+
     const bool imageRetryPending =
-        hasState &&
+        mainVisible && m_mainUiInitialized && hasState &&
         ((m_penSeen && !m_penImageSource) || (m_kbdSeen && !m_keyboardImageSource));
     const bool transientActive =
         imageRetryPending ||
         m_chargeLimitAwaitingEcho ||
         m_kbdDetachAwaitingEcho ||
         m_providerAwaitingEcho ||
+        m_penModeAwaitingEcho ||
         m_updateAwaitingEcho ||
         m_vendorTarget != VendorTarget::None ||
         m_exitPending ||
         (m_chargeLimitTimer && m_chargeLimitTimer.IsEnabled());
+    if (!m_lastRenderedValid) m_mainUiNeedsRender = true;
     const bool stateChanged =
         !m_lastRenderedValid ||
         transientActive ||
         hasState != m_lastRenderedHasState ||
-        (hasState && std::memcmp(&state, &m_lastRenderedState, sizeof(state)) != 0) ||
+        (hasState && !PenStatus::SameUiState(state, m_lastRenderedState)) ||
         m_trayConnected != m_lastRenderedTrayConnected ||
         m_penSeen != m_lastRenderedPenSeen ||
         m_kbdSeen != m_lastRenderedKbdSeen;
 
-    if (mainVisible && stateChanged) {
-        const PenStatus::State* statePtr = hasState ? &state : nullptr;
-        RefreshControls(statePtr);
-        if (m_closed) return;
-        RefreshDevicePage(statePtr);
+    if (stateChanged) {
         m_lastRenderedState = state;
         m_lastRenderedHasState = hasState;
         m_lastRenderedTrayConnected = m_trayConnected;
         m_lastRenderedPenSeen = m_penSeen;
         m_lastRenderedKbdSeen = m_kbdSeen;
         m_lastRenderedValid = true;
+        m_mainUiNeedsRender = true;
+    }
+
+    if (mainVisible && m_mainUiInitialized && m_mainUiNeedsRender) {
+        m_mainUiNeedsRender = false;
+        const PenStatus::State* statePtr = hasState ? &state : nullptr;
+        RefreshControls(statePtr);
+        if (m_closed) return;
+        RefreshDevicePage(statePtr);
+        RefreshHomeSummary(statePtr);
     }
     if (notifyNeedsRefresh && hasState && stateChanged) {
         get_self<implementation::NotificationWindow>(m_notificationWindow)->UpdateState(state);
     }
+    if (quickFlyoutVisible && stateChanged) {
+        get_self<implementation::QuickFlyoutWindow>(m_quickFlyoutWindow)
+            ->UpdateState(BuildQuickFlyoutState());
+    }
+}
+
+void MainWindow::RefreshHomeScreenSummary() {
+    if (!m_mainUiInitialized) return;
+    std::wstring modeName = L"Native";
+    const int32_t modeIndex = ColorModeCombo().SelectedIndex();
+    if (modeIndex == 1) modeName = L"sRGB";
+    else if (modeIndex == 2) modeName = L"Display P3";
+
+    const bool tempOn = ColorTemperatureToggle().IsOn();
+    const int kelvin = static_cast<int>(std::lround(ColorTemperatureSlider().Value()));
+    const bool eyeOn = EyeComfortToggle().IsOn();
+
+    std::wstring summary = L"减弱屏幕蓝光，当前色域 " + modeName;
+    if (m_currentRefreshHz > 0) {
+        summary += L"，" + std::to_wstring(m_currentRefreshHz) + L" Hz";
+    }
+    if (tempOn) {
+        summary += L"，色温 " + std::to_wstring(kelvin) + L"K";
+    }
+    HomeScreenSummaryText().Text(hstring{summary});
+
+    ScreenSummaryGamutText().Text(hstring{modeName});
+    ScreenSummaryTempText().Text(tempOn ? winrt::to_hstring(kelvin) + L"K" : hstring{L"关闭"});
+    ScreenSummaryEyeText().Text(eyeOn ? L"开启" : L"关闭");
+    ScreenSummaryRefreshText().Text(
+        m_currentRefreshHz > 0 ? winrt::to_hstring(m_currentRefreshHz) + L" Hz" : hstring{L"—"});
+}
+
+void MainWindow::RefreshHomeSummary(const PenStatus::State* state) {
+    if (!m_mainUiInitialized) return;
+
+    if (state && state->hasChargeLimit) {
+        HomeBatteryLimitText().Text(
+            !state->chargeLimitManual
+                ? hstring{L"智能充电"}
+                : hstring{L"上限 " + std::to_wstring(static_cast<unsigned>(state->chargeLimit)) + L"%"});
+    } else {
+        HomeBatteryLimitText().Text(L"");
+    }
+
+    if (!state) {
+        HomePenNameText().Text(L"HUAWEI M-Pencil");
+        HomePenStateText().Text(L"正在连接服务…");
+        HomePenBattery().SetState(false, 0, false);
+
+        HomeKeyboardNameText().Text(L"HUAWEI 智能磁吸键盘");
+        HomeKeyboardStateText().Text(L"正在连接服务…");
+        HomeKeyboardBattery().SetState(false, 0, false);
+    } else {
+        if (state->modelName[0] != '\0') {
+            HomePenNameText().Text(to_hstring(state->modelName));
+        }
+        const bool penCharging = state->hasChargingState && state->charging;
+        const bool penUnavailable = state->hasHostHealth &&
+            (!state->penHostHealthy || state->penVendorMissing);
+        const bool penStateKnown = penUnavailable ||
+            state->hasChargingState || state->hasStylusLink || state->hasDeviceAttached;
+        if (penUnavailable) {
+            HomePenStateText().Text(L"无法读取设备状态");
+        } else if (penCharging) {
+            HomePenStateText().Text(L"正在充电");
+        } else if (state->hasStylusLink && state->stylusLinked) {
+            HomePenStateText().Text(L"已连接");
+        } else if (state->hasDeviceAttached && !state->deviceAttached) {
+            HomePenStateText().Text(L"未连接");
+        } else if (penStateKnown) {
+            HomePenStateText().Text(L"正在检测…");
+        }
+        if (AccessoryBattery::HasPenBattery(*state)) {
+            HomePenBattery().SetState(true, state->batteryLevel, penCharging);
+        } else if (penStateKnown || state->hasBatteryLevel) {
+            HomePenBattery().SetState(false, 0, false);
+        }
+
+        const bool kbdPresent = state->hasKbdPresent && state->kbdPresent;
+        const bool kbdUnavailable = state->hasHostHealth &&
+            (!state->kbdHostHealthy || state->kbdVendorMissing);
+        const bool kbdStateKnown = kbdUnavailable || state->hasKbdPresent || state->hasKbdBattery ||
+                                   state->hasKbdCharging || state->hasKbdDetached;
+        if (state->kbdModelName[0] != '\0') {
+            HomeKeyboardNameText().Text(to_hstring(state->kbdModelName));
+        } else if (kbdStateKnown) {
+            HomeKeyboardNameText().Text(kbdPresent ? L"HUAWEI 智能磁吸键盘" : L"键盘");
+        }
+        if (kbdUnavailable) {
+            HomeKeyboardStateText().Text(L"无法读取设备状态");
+        } else if (kbdStateKnown) {
+            if (!state->hasKbdPresent) {
+                HomeKeyboardStateText().Text(L"正在检测…");
+            } else if (!kbdPresent) {
+                HomeKeyboardStateText().Text(L"未连接");
+            } else if (state->hasKbdCharging && state->kbdCharging) {
+                HomeKeyboardStateText().Text(L"正在充电");
+            } else if (state->hasKbdDetached && state->kbdDetached) {
+                HomeKeyboardStateText().Text(L"已分离，无线连接中");
+            } else {
+                HomeKeyboardStateText().Text(L"已吸附");
+            }
+        }
+        if (kbdPresent && AccessoryBattery::HasKeyboardBattery(*state)) {
+            HomeKeyboardBattery().SetState(
+                true, state->kbdBatteryLevel,
+                state->hasKbdCharging && state->kbdCharging);
+        } else if (kbdStateKnown) {
+            HomeKeyboardBattery().SetState(false, 0, false);
+        }
+    }
+
+    RefreshHomeScreenSummary();
 }
 
 winrt::hstring MainWindow::ProviderErrorText(uint8_t error) {
@@ -1424,25 +2385,43 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
     m_updatingControls = true;
 
     bool eraserMode = PenModeSelector().SelectedIndex() == 1;
-    if (state && state->hasPenButtonMode) {
+    if (m_penModeAwaitingEcho) {
+        eraserMode = (m_penModeRequested == static_cast<uint8_t>(PenButtonMode::ToggleEraser));
+        const int32_t targetIndex = eraserMode ? 1 : 0;
+        PenModeSelector().SelectedIndex(targetIndex);
+        HomePenModeSelector().SelectedIndex(targetIndex);
+        m_effectivePenMode = m_penModeRequested;
+    } else if (state && state->hasPenButtonMode) {
         // 记下服务当前生效的模式。SelectionChanged 不保证在设值的同一个调用栈里到达，
         // 而 m_updatingControls 是个瞬时标志——事件跨帧才来时它已经清掉了，于是我们会把
         // 刚从服务读到的值又提交回去，把用户刚改的设置覆盖掉。提交前比对这一份才挡得住。
         m_effectivePenMode = state->penButtonMode;
         if (state->penButtonMode == static_cast<uint8_t>(PenButtonMode::WindowsInk)) {
             PenModeSelector().SelectedIndex(0);
+            HomePenModeSelector().SelectedIndex(0);
             eraserMode = false;
         } else if (state->penButtonMode == static_cast<uint8_t>(PenButtonMode::ToggleEraser)) {
             PenModeSelector().SelectedIndex(1);
+            HomePenModeSelector().SelectedIndex(1);
             eraserMode = true;
         }
     }
 
     // 开关一直跟随系统的真实状态，不再因为「本次会话改过」而锁定。两个方向都幂等、也都
     // 立即生效（恢复会把服务起回来），没有需要保护的中间态；改错了当场再改回去就是。
+    bool vendorBusy = false;
     if (!state || !state->hasVendorServices) {
+        SetBusySpinner(VendorServicesProgress(), false);
         VendorServicesStatusText().Text(L"正在连接 OpenEGo Hub 服务…");
+        if (state) {
+            m_hasVendorServicesInstalled = false;
+            m_vendorScmProbed = true;
+        } else if (!m_vendorScmProbed && GeneralPage().Visibility() == Visibility::Visible) {
+            RefreshVendorServicesDetails();
+        }
     } else {
+        m_hasVendorServicesInstalled = true;
+        m_vendorScmProbed = true;
         // 达标判据分两个方向：停用要「全部禁用且没有进程在跑」，恢复要「没有禁用且全部
         // 起来了」。只看启动类型不够——那一步很快，慢的是进程启停。
         const bool disableDone =
@@ -1454,10 +2433,10 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
             m_vendorTarget = VendorTarget::None;
         }
 
-        const bool busy = m_vendorTarget != VendorTarget::None;
-        VendorServicesToggle().IsEnabled(!busy && m_trayConnected && !m_exitPending);
+        vendorBusy = m_vendorTarget != VendorTarget::None;
+        SetBusySpinner(VendorServicesProgress(), m_trayConnected && vendorBusy);
 
-        if (busy) {
+        if (vendorBusy) {
             VendorServicesStatusText().Text(
                 m_vendorTarget == VendorTarget::Disable ? L"正在停用…" : L"正在恢复…");
         } else {
@@ -1474,11 +2453,17 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
 
         // 设置与实际不一致时才提示，而不是笼统地说「改完要重启」——多数情况下并不需要。
         // 操作进行中不提示：那时不一致是正常的中间态。
-        VendorServicesRestartBar().IsOpen(!busy && state->vendorServicesDisabled &&
+        VendorServicesRestartBar().IsOpen(!vendorBusy && state->vendorServicesDisabled &&
                                           state->vendorServicesRunning);
 
-        VendorHintBar().IsOpen(!busy && !state->vendorServicesDisabled &&
+        VendorHintBar().IsOpen(!vendorBusy && !state->vendorServicesDisabled &&
                                !m_vendorHintDismissed);
+    }
+
+    SyncVendorServicesDetailsVisibility();
+    if (m_vendorDetailsExpanded && m_hasVendorServicesInstalled &&
+        (!vendorBusy || GetTickCount64() - m_lastVendorDetailsQueryTick >= 450)) {
+        RefreshVendorServicesDetails();
     }
 
     // 充电阈值。硬件里的真实值只有服务读得到（那条 WMI 要管理员权限），经状态通道回来。
@@ -1517,8 +2502,7 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
         ChargeLimitValueText().Text(winrt::to_hstring(static_cast<int>(state->chargeLimit)) + L"%");
         // 智能模式下的 70% 是固定的，用户改不了，所以滑块置灰。它确实会兑现，只是要等
         // 连续接电满 72 小时，在那之前照常充满——这个条件写在说明文字里。
-        ChargeLimitSlider().IsEnabled(!smart && m_trayConnected && !m_exitPending);
-        ChargeLimitStatusText().Text(ChargeLimitStatusFor(smart));
+        UpdateChargeLimitControls(smart);
     }
 
     const bool providerKnown = state && state->hasTouchProvider;
@@ -1536,40 +2520,52 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
     if (providerKnown && !m_providerAwaitingEcho && !switching) {
         m_updatingControls = true;
         TouchProviderToggle().IsOn(active);
+        HomeTouchToggle().IsOn(active);
         m_updatingControls = false;
     }
+    hstring touchStatus;
     if (!providerKnown) {
-        TouchProviderStatusText().Text(L"正在连接 OpenEGo Hub 服务…");
+        touchStatus = L"正在连接 OpenEGo Hub 服务…";
     } else if (m_providerAwaitingEcho) {
-        TouchProviderStatusText().Text(m_providerRequested
-            ? L"正在切换到 OpenEGo Hub…" : L"正在交还华为原厂服务…");
+        touchStatus = m_providerRequested
+            ? L"正在切换到 OpenEGo Hub…" : L"正在交还华为原厂服务…";
     } else {
         switch (state->touchProvider) {
         case PenStatus::TouchProviderState::EGoTouch:
-            TouchProviderStatusText().Text(L"当前由 OpenEGo Hub 驱动触控与手写笔。");
+            touchStatus = L"当前由 OpenEGo Hub 驱动触控与手写笔。";
             break;
         case PenStatus::TouchProviderState::EGoSuspended:
-            TouchProviderStatusText().Text(L"当前由 OpenEGo Hub 接管（息屏待机中）。");
+            touchStatus = L"当前由 OpenEGo Hub 接管（息屏待机中）。";
             break;
         case PenStatus::TouchProviderState::SwitchingToEGo:
-            TouchProviderStatusText().Text(L"正在切换到 OpenEGo Hub…");
+            touchStatus = L"正在切换到 OpenEGo Hub…";
             break;
         case PenStatus::TouchProviderState::SwitchingToHuawei:
-            TouchProviderStatusText().Text(L"正在交还华为原厂服务…");
+            touchStatus = L"正在交还华为原厂服务…";
             break;
         case PenStatus::TouchProviderState::Huawei:
-            TouchProviderStatusText().Text(L"当前由华为原厂服务驱动。");
+            touchStatus = L"当前由华为原厂服务驱动。";
             break;
         case PenStatus::TouchProviderState::Error:
-            TouchProviderStatusText().Text(ProviderErrorText(state->providerError));
+            touchStatus = ProviderErrorText(state->providerError);
             break;
         default:
-            TouchProviderStatusText().Text(L"正在连接 OpenEGo Hub 服务…");
+            touchStatus = L"正在连接 OpenEGo Hub 服务…";
             break;
         }
     }
+    TouchProviderStatusText().Text(touchStatus);
+    HomeTouchStatusText().Text(touchStatus);
 
+    const bool touchBusy = m_trayConnected && (m_providerAwaitingEcho || switching);
+    SetBusySpinner(TouchProviderProgress(), touchBusy);
+    SetBusySpinner(HomeTouchProgress(), touchBusy);
     SetInteractiveEnabled(m_trayConnected && !m_exitPending);
+    if (touchBusy) {
+        TouchProviderToggle().IsEnabled(false);
+        HomeTouchToggle().IsEnabled(false);
+    }
+    if (vendorBusy) VendorServicesToggle().IsEnabled(false);
     UpdateOneNoteRow(eraserMode);
 
     // 键盘在不在，用 MCU 回报的在位状态判断，不要拿「知不知道无线开关的值」代替：
@@ -1588,13 +2584,19 @@ void MainWindow::RefreshControls(const PenStatus::State* state) {
         // 表现就是开关能关不能开、点了弹回。
         m_updatingControls = true;
         KeyboardWirelessToggle().IsOn(state->kbdDetachSupport);
+        HomeKeyboardWirelessToggle().IsOn(state->kbdDetachSupport);
         m_updatingControls = false;
-        KeyboardStatusText().Text(L"键盘与主机分离后继续通过无线方式使用。");
+        const hstring kbdStatus{L"键盘与主机分离后继续通过无线方式使用。"};
+        KeyboardStatusText().Text(kbdStatus);
+        HomeKeyboardStatusText().Text(kbdStatus);
     } else if (!kbdDetected) {
-        KeyboardStatusText().Text(L"未检测到键盘，分离后无线连接暂不可用。");
+        const hstring kbdStatus{L"未检测到键盘，分离后无线连接暂不可用。"};
+        KeyboardStatusText().Text(kbdStatus);
+        HomeKeyboardStatusText().Text(kbdStatus);
     }
-    KeyboardWirelessToggle().IsEnabled(
-        m_trayConnected && !m_exitPending && kbdDetected);
+    const bool kbdInteractive = m_trayConnected && !m_exitPending && kbdDetected;
+    KeyboardWirelessToggle().IsEnabled(kbdInteractive);
+    HomeKeyboardWirelessToggle().IsEnabled(kbdInteractive);
 
     if (m_exitPending) {
         ShowStatus(InfoBarSeverity::Informational, L"正在安全退出",
@@ -1635,6 +2637,16 @@ void MainWindow::BeginChargeLimitEcho(uint8_t requested) {
     m_chargeLimitEchoDeadline = GetTickCount64() + 2000;
 }
 
+void MainWindow::UpdateChargeLimitControls(bool smart) {
+    const bool usable = !smart && m_trayConnected && !m_exitPending;
+    ChargeLimitSlider().IsEnabled(usable);
+    ChargeLimitPreset70Btn().IsEnabled(usable);
+    ChargeLimitPreset80Btn().IsEnabled(usable);
+    ChargeLimitPreset90Btn().IsEnabled(usable);
+    ChargeLimitPreset100Btn().IsEnabled(usable);
+    ChargeLimitStatusText().Text(ChargeLimitStatusFor(smart));
+}
+
 // UpdateState 到界面的唯一映射：状态文字、两个按钮的可用性、三个动作的显隐都从同一份状态
 // 算出来。分散到各个点击处理里各改一处的话，每加一个状态都要记得改四个地方。
 void MainWindow::RefreshUpdateRow(const PenStatus::State* state) {
@@ -1645,6 +2657,7 @@ void MainWindow::RefreshUpdateRow(const PenStatus::State* state) {
         // 状态通道就说明服务不在，四件事一件也做不成。开关一并置灰：提交必然失败，而失败
         // 的表现是开关自己弹回去，不如一开始就不让点。
         UpdateStatusText().Text(L"未连接服务。");
+        SetBusySpinner(UpdateCheckProgress(), false);
         UpdateCheckButton().IsEnabled(false);
         AutoUpdateCheckToggle().IsEnabled(false);
         return;
@@ -1712,6 +2725,7 @@ void MainWindow::RefreshUpdateRow(const PenStatus::State* state) {
         }
     }
 
+    SetBusySpinner(UpdateCheckProgress(), m_trayConnected && !m_exitPending && busy);
     UpdateCheckButton().IsEnabled(interactive && !busy);
     AutoUpdateCheckToggle().IsEnabled(interactive);
 
@@ -1841,17 +2855,32 @@ void MainWindow::RequestUpdateSkip() {
 
 void MainWindow::SetInteractiveEnabled(bool enabled) {
     TouchProviderToggle().IsEnabled(enabled);
+    HomeTouchToggle().IsEnabled(enabled);
     PenModeSelector().IsEnabled(enabled);
+    HomePenModeSelector().IsEnabled(enabled);
     ColorModeCombo().IsEnabled(enabled);
     SmartChargeToggle().IsEnabled(enabled);
     ColorTemperatureToggle().IsEnabled(enabled);
     // 色温关着的时候滑条与重置按钮一起置灰，与充电上限在智能模式下的处理同理。
     ColorTemperatureSlider().IsEnabled(enabled && ColorTemperatureToggle().IsOn());
     ColorTemperatureResetButton().IsEnabled(enabled && ColorTemperatureToggle().IsOn());
+    ColorTempWarmPresetBtn().IsEnabled(enabled && ColorTemperatureToggle().IsOn());
+    ColorTempStandardPresetBtn().IsEnabled(enabled && ColorTemperatureToggle().IsOn());
+    ColorTempCoolPresetBtn().IsEnabled(enabled && ColorTemperatureToggle().IsOn());
     EyeComfortToggle().IsEnabled(enabled);
-    // 智能模式下上限由系统决定，滑块另外还要置灰。这一条不能只写在 RefreshControls 里：
+    HomeEyeComfortToggle().IsEnabled(enabled);
+    if (!enabled) {
+        KeyboardWirelessToggle().IsEnabled(false);
+        HomeKeyboardWirelessToggle().IsEnabled(false);
+    }
+    // 智能模式下上限由系统决定，滑块与预设按钮另外还要置灰。这一条不能只写在 RefreshControls 里：
     // 托盘断开又恢复时会走到这里，无条件放开就会让滑块在智能模式下重新变成可拖。
-    ChargeLimitSlider().IsEnabled(enabled && !SmartChargeToggle().IsOn());
+    const bool chargeLimitUsable = enabled && !SmartChargeToggle().IsOn();
+    ChargeLimitSlider().IsEnabled(chargeLimitUsable);
+    ChargeLimitPreset70Btn().IsEnabled(chargeLimitUsable);
+    ChargeLimitPreset80Btn().IsEnabled(chargeLimitUsable);
+    ChargeLimitPreset90Btn().IsEnabled(chargeLimitUsable);
+    ChargeLimitPreset100Btn().IsEnabled(chargeLimitUsable);
     VendorServicesToggle().IsEnabled(enabled);
     AutoStartToggle().IsEnabled(enabled);
     // 更新那一格的可用性随后由 RefreshUpdateRow 再收紧一次：服务正在检查或下载时，手动
@@ -1888,14 +2917,23 @@ void MainWindow::ShowError(hstring const& title, hstring const& message) {
 }
 
 void MainWindow::PenModeSelectionChanged(
-    IInspectable const&, SelectionChangedEventArgs const&) {
-    if (m_updatingControls) return;
-    const int32_t index = PenModeSelector().SelectedIndex();
+    IInspectable const& sender, SelectionChangedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    const auto combo = sender.try_as<Controls::ComboBox>();
+    const int32_t index = combo ? combo.SelectedIndex() : PenModeSelector().SelectedIndex();
     if (index < 0) return;
 
     const PenButtonMode mode = index == 1
         ? PenButtonMode::ToggleEraser
         : PenButtonMode::WindowsInk;
+
+    if (PenModeSelector().SelectedIndex() != index ||
+        HomePenModeSelector().SelectedIndex() != index) {
+        m_updatingControls = true;
+        PenModeSelector().SelectedIndex(index);
+        HomePenModeSelector().SelectedIndex(index);
+        m_updatingControls = false;
+    }
 
     // 与服务当前生效的模式相同就不提交。这个事件也会因为我们自己按状态回填下拉项而触发，
     // 而它不保证在设值的同一个调用栈里到达——跨帧才来时 m_updatingControls 已经清掉，
@@ -1908,8 +2946,21 @@ void MainWindow::PenModeSelectionChanged(
     if (!SendTrayCommand(
             EGoTouchTrayIpc::Command::SetPenButtonMode,
             static_cast<LPARAM>(static_cast<uint8_t>(mode)))) {
+        if (m_effectivePenMode != 0xFF) {
+            const int32_t revertIndex =
+                m_effectivePenMode == static_cast<uint8_t>(PenButtonMode::ToggleEraser) ? 1 : 0;
+            m_updatingControls = true;
+            PenModeSelector().SelectedIndex(revertIndex);
+            HomePenModeSelector().SelectedIndex(revertIndex);
+            m_updatingControls = false;
+        }
         ShowError(L"无法修改双击行为", L"服务未连接，设置没有生效。");
+        return;
     }
+    m_penModeAwaitingEcho = true;
+    m_penModeRequested = static_cast<uint8_t>(mode);
+    m_penModeEchoDeadline = GetTickCount64() + 1500;
+    m_effectivePenMode = static_cast<uint8_t>(mode);
     UpdateOneNoteRow(mode == PenButtonMode::ToggleEraser);
 }
 
@@ -1967,7 +3018,11 @@ winrt::fire_and_forget MainWindow::VendorServicesToggled(IInspectable const&,
     // 「做完」因此是个能观察到的状态，不需要拿重启当兜底。
     m_vendorTarget = disable ? VendorTarget::Disable : VendorTarget::Restore;
     VendorServicesToggle().IsEnabled(false);
+    SetBusySpinner(VendorServicesProgress(), true);
     VendorServicesStatusText().Text(disable ? L"正在停用…" : L"正在恢复…");
+    if (m_vendorDetailsExpanded) {
+        RefreshVendorServicesDetails();
+    }
     co_return;
 }
 
@@ -1987,7 +3042,9 @@ void MainWindow::ColorModeChanged(IInspectable const&, SelectionChangedEventArgs
     if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetColorMode,
                          static_cast<LPARAM>(command))) {
         ShowError(L"无法切换色域", L"托盘没有响应，设置没有生效。");
+        return;
     }
+    RefreshHomeScreenSummary();
 }
 
 void MainWindow::ChargeLimitChanged(
@@ -2025,33 +3082,51 @@ void MainWindow::ChargeLimitChanged(
     m_chargeLimitTimer.Start();
 }
 
-void MainWindow::TouchProviderToggled(IInspectable const&, RoutedEventArgs const&) {
+void MainWindow::TouchProviderToggled(IInspectable const& sender, RoutedEventArgs const&) {
     if (!m_uiReady || m_updatingControls) return;
-    const bool requested = TouchProviderToggle().IsOn();
+    const auto toggle = sender.try_as<Controls::ToggleSwitch>();
+    const bool requested = toggle ? toggle.IsOn() : TouchProviderToggle().IsOn();
     if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetProviderEnabled, requested ? 1 : 0)) {
         m_updatingControls = true;
         TouchProviderToggle().IsOn(!requested);
+        HomeTouchToggle().IsOn(!requested);
         m_updatingControls = false;
         ShowError(L"无法切换触控提供方", L"托盘没有响应，设置没有生效。");
         return;
     }
+    m_updatingControls = true;
+    TouchProviderToggle().IsOn(requested);
+    HomeTouchToggle().IsOn(requested);
+    m_updatingControls = false;
     m_providerAwaitingEcho = true;
     m_providerRequested = requested;
     m_providerEchoDeadline = GetTickCount64() + 6000;
-    TouchProviderStatusText().Text(requested
-        ? L"正在切换到 OpenEGo Hub…" : L"正在交还华为原厂服务…");
+    TouchProviderToggle().IsEnabled(false);
+    HomeTouchToggle().IsEnabled(false);
+    SetBusySpinner(TouchProviderProgress(), true);
+    SetBusySpinner(HomeTouchProgress(), true);
+    const hstring status = requested
+        ? L"正在切换到 OpenEGo Hub…" : L"正在交还华为原厂服务…";
+    TouchProviderStatusText().Text(status);
+    HomeTouchStatusText().Text(status);
 }
 
-void MainWindow::KeyboardWirelessToggled(IInspectable const&, RoutedEventArgs const&) {
-    if (m_updatingControls) return;
-    const bool requested = KeyboardWirelessToggle().IsOn();
+void MainWindow::KeyboardWirelessToggled(IInspectable const& sender, RoutedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    const auto toggle = sender.try_as<Controls::ToggleSwitch>();
+    const bool requested = toggle ? toggle.IsOn() : KeyboardWirelessToggle().IsOn();
     if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetKeyboardWirelessOnDetach, requested)) {
         m_updatingControls = true;
         KeyboardWirelessToggle().IsOn(!requested);
+        HomeKeyboardWirelessToggle().IsOn(!requested);
         m_updatingControls = false;
         ShowError(L"无法修改键盘无线连接设置", L"托盘没有响应，设置没有生效。");
         return;
     }
+    m_updatingControls = true;
+    KeyboardWirelessToggle().IsOn(requested);
+    HomeKeyboardWirelessToggle().IsOn(requested);
+    m_updatingControls = false;
     // 回显确认前不跟随状态通道，机制同充电阈值，见 RefreshControls 里的说明。
     m_kbdDetachAwaitingEcho = true;
     m_kbdDetachRequested = requested;
@@ -2081,8 +3156,7 @@ void MainWindow::SmartChargeToggled(IInspectable const&, RoutedEventArgs const&)
     BeginChargeLimitEcho(percent);
     // 立刻反映到滑块的可用性上，不等服务把新状态发回来——那要等下一轮发布，中间这段时间
     // 开关已经动了而滑块还是旧的可用性，看起来像没生效。
-    ChargeLimitSlider().IsEnabled(!smart && m_trayConnected && !m_exitPending);
-    ChargeLimitStatusText().Text(ChargeLimitStatusFor(smart));
+    UpdateChargeLimitControls(smart);
 }
 
 // 色温的开关。滑条本身没有「关闭」这个位置：最左端 2000K 是一个很暖的值，不是关掉。
@@ -2104,16 +3178,148 @@ void MainWindow::ColorTemperatureToggled(IInspectable const&, RoutedEventArgs co
     }
 
     const bool usable = enabled && m_trayConnected && !m_exitPending;
+    ColorTemperatureSliderRow().Visibility(enabled ? Visibility::Visible : Visibility::Collapsed);
     ColorTemperatureSlider().IsEnabled(usable);
     ColorTemperatureResetButton().IsEnabled(usable);
+    ColorTempWarmPresetBtn().IsEnabled(usable);
+    ColorTempStandardPresetBtn().IsEnabled(usable);
+    ColorTempCoolPresetBtn().IsEnabled(usable);
     ColorTemperatureValueText().Text(
         enabled ? winrt::to_hstring(kelvin) + L"K" : winrt::hstring{L"关闭"});
+    RefreshHomeScreenSummary();
+}
+
+void MainWindow::ColorTemperaturePresetClicked(IInspectable const& sender, RoutedEventArgs const&) {
+    if (!m_uiReady) return;
+    const auto button = sender.try_as<Controls::Button>();
+    if (!button) return;
+    const hstring tag = unbox_value_or<hstring>(button.Tag(), L"6500");
+    const int kelvin = tag == L"4000" ? 4000 : (tag == L"8000" ? 8000 : 6500);
+    m_lastColorTemperatureKelvin = kelvin;
+    if (static_cast<int>(std::lround(ColorTemperatureSlider().Value())) == kelvin) {
+        if (m_colorTemperatureTimer) m_colorTemperatureTimer.Stop();
+        m_pendingColorTemperature = kelvin;
+        ColorTemperatureValueText().Text(winrt::to_hstring(kelvin) + L"K");
+        if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetColorTemperature,
+                             static_cast<LPARAM>(kelvin))) {
+            ShowError(L"无法设置色温", L"托盘没有响应，设置没有生效。");
+        }
+        RefreshHomeScreenSummary();
+    } else {
+        ColorTemperatureSlider().Value(static_cast<double>(kelvin));
+    }
+}
+
+void MainWindow::ScreenRefreshSelectionChanged(
+        IInspectable const&, SelectionChangedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    const int32_t idx = ScreenRefreshCombo().SelectedIndex();
+    if (idx < 0 || static_cast<size_t>(idx) >= m_supportedRefreshRates.size()) return;
+    const uint32_t targetHz = m_supportedRefreshRates[static_cast<size_t>(idx)];
+    if (targetHz == m_currentRefreshHz) return;
+
+    if (!DisplayModeHelper::SetPrimaryRefreshRate(targetHz)) {
+        m_updatingControls = true;
+        for (size_t i = 0; i < m_supportedRefreshRates.size(); ++i) {
+            if (m_supportedRefreshRates[i] == m_currentRefreshHz) {
+                ScreenRefreshCombo().SelectedIndex(static_cast<int32_t>(i));
+                break;
+            }
+        }
+        m_updatingControls = false;
+        ShowError(L"无法切换刷新率", L"系统显示设置未接受该刷新率。");
+        return;
+    }
+
+    m_currentRefreshHz = targetHz;
+    if (m_displayWidth > 0 && m_displayHeight > 0) {
+        const std::wstring displayText =
+            std::to_wstring(m_displayWidth) + L" × " + std::to_wstring(m_displayHeight) +
+            L" @ " + std::to_wstring(targetHz) + L" Hz";
+        SetInfoText(DeviceDisplayText(), displayText);
+        if (m_hasHomeDisplaySpec) {
+            HomeSpecDisplayText().Text(hstring{displayText});
+        }
+    }
+    RefreshHomeScreenSummary();
+}
+
+void MainWindow::PowerModeSelectionChanged(
+        IInspectable const&, SelectionChangedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    const int32_t idx = PowerModeCombo().SelectedIndex();
+    if (idx < 0) return;
+
+    const auto mode = idx == 0 ? PowerOverlay::Mode::BestEfficiency
+                    : idx == 2 ? PowerOverlay::Mode::BestPerformance
+                               : PowerOverlay::Mode::Balanced;
+    if (!PowerOverlay::Apply(mode)) {
+        RefreshPowerModeControl();
+        ShowError(L"无法切换电源模式", L"当前系统电源计划未接受该模式。");
+        return;
+    }
+    RefreshPowerModeControl();
+}
+
+void MainWindow::EnergySaverToggled(IInspectable const&, RoutedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    if (!PowerOverlay::SetEnergySaverActive(EnergySaverToggle().IsOn())) {
+        RefreshPowerModeControl();
+        ShowError(L"无法切换节能模式", L"系统未能应用该节能状态。");
+        return;
+    }
+    RefreshPowerModeControl();
+}
+
+void MainWindow::EnergySaverThresholdSelectionChanged(
+        IInspectable const&, SelectionChangedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    const uint32_t threshold =
+        IndexToEnergySaverThreshold(EnergySaverThresholdCombo().SelectedIndex());
+    if (!PowerOverlay::SetEnergySaverAutoThreshold(threshold)) {
+        RefreshPowerModeControl();
+        ShowError(L"无法设置自动开启阈值", L"当前系统电源计划未接受该设置。");
+        return;
+    }
+    RefreshPowerModeControl();
+}
+
+void MainWindow::EnergySaverBrightnessToggled(IInspectable const&, RoutedEventArgs const&) {
+    if (!m_uiReady || m_updatingControls) return;
+    if (!PowerOverlay::SetEnergySaverLowerBrightness(EnergySaverBrightnessToggle().IsOn())) {
+        RefreshPowerModeControl();
+        ShowError(L"无法修改节能亮度设置", L"当前系统电源计划未接受该设置。");
+        return;
+    }
+    RefreshPowerModeControl();
+}
+
+void MainWindow::ChargeLimitPresetClicked(IInspectable const& sender, RoutedEventArgs const&) {
+    if (!m_uiReady) return;
+    const auto button = sender.try_as<Controls::Button>();
+    if (!button) return;
+    const hstring tag = unbox_value_or<hstring>(button.Tag(), L"100");
+    const int raw = tag == L"70" ? 70 : (tag == L"80" ? 80 : (tag == L"90" ? 90 : 100));
+    const auto target = static_cast<uint8_t>(Gaokun::Power::SnapChargeLimit(raw));
+
+    if (m_chargeLimitTimer) m_chargeLimitTimer.Stop();
+    m_pendingChargeLimit = target;
+    if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetChargeLimit, static_cast<LPARAM>(target))) {
+        ShowError(L"无法设置充电上限", L"托盘没有响应，设置没有生效。");
+        return;
+    }
+    BeginChargeLimitEcho(target);
+    m_updatingControls = true;
+    ChargeLimitSlider().Value(static_cast<double>(target));
+    m_updatingControls = false;
+    ChargeLimitValueText().Text(winrt::to_hstring(static_cast<int>(target)) + L"%");
 }
 
 // 重置回 6500K，不是关闭——关闭由上面那个开关负责。设成中性点之后色温这一项仍然在生效，
 // 只是不再往任何一个方向偏。
 void MainWindow::ColorTemperatureResetClicked(IInspectable const&, RoutedEventArgs const&) {
     if (!m_uiReady) return;
+    m_lastColorTemperatureKelvin = 6500;
     if (ColorTemperatureSlider().Value() == 6500.0) {
         // 同值赋值不会触发 ValueChanged；取消旧的防抖提交后直接发送中性值。
         if (m_colorTemperatureTimer) m_colorTemperatureTimer.Stop();
@@ -2122,21 +3328,30 @@ void MainWindow::ColorTemperatureResetClicked(IInspectable const&, RoutedEventAr
         if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetColorTemperature, 6500)) {
             ShowError(L"无法设置色温", L"托盘没有响应，设置没有生效。");
         }
+        RefreshHomeScreenSummary();
     } else {
         // 值有变化时沿用滑条的防抖提交路径。
         ColorTemperatureSlider().Value(6500);
     }
 }
 
-void MainWindow::EyeComfortToggled(IInspectable const&, RoutedEventArgs const&) {
+void MainWindow::EyeComfortToggled(IInspectable const& sender, RoutedEventArgs const&) {
     if (!m_uiReady || m_updatingControls) return;
-    const bool enabled = EyeComfortToggle().IsOn();
+    const auto toggle = sender.try_as<Controls::ToggleSwitch>();
+    const bool enabled = toggle ? toggle.IsOn() : EyeComfortToggle().IsOn();
     if (!SendTrayCommand(EGoTouchTrayIpc::Command::SetEyeComfort, enabled)) {
         m_updatingControls = true;
         EyeComfortToggle().IsOn(!enabled);
+        HomeEyeComfortToggle().IsOn(!enabled);
         m_updatingControls = false;
         ShowError(L"无法切换护眼模式", L"托盘没有响应，设置没有生效。");
+        return;
     }
+    m_updatingControls = true;
+    EyeComfortToggle().IsOn(enabled);
+    HomeEyeComfortToggle().IsOn(enabled);
+    m_updatingControls = false;
+    RefreshHomeScreenSummary();
 }
 
 void MainWindow::ColorTemperatureChanged(
@@ -2151,6 +3366,8 @@ void MainWindow::ColorTemperatureChanged(
     }
     if (!m_uiReady || m_updatingControls) return;
 
+    m_lastColorTemperatureKelvin = kelvin;
+    RefreshHomeScreenSummary();
     // 拖动时每一格都会触发，而每次提交都要拉起一个进程去写 PCC。逐格发既无意义又会让画面
     // 连闪，所以等停下来再发一次。
     m_pendingColorTemperature = kelvin;
@@ -2238,6 +3455,7 @@ winrt::fire_and_forget MainWindow::ExportLogsAsync() {
     if (!destination) co_return;
 
     m_exportInProgress = true;
+    SetBusySpinner(ExportLogsProgress(), true);
     ExportLogsButton().IsEnabled(false);
 
     // 控件只能在 UI 线程上读，取到值再切后台。
@@ -2253,6 +3471,7 @@ winrt::fire_and_forget MainWindow::ExportLogsAsync() {
     co_await ui;
 
     m_exportInProgress = false;
+    SetBusySpinner(ExportLogsProgress(), false);
     ExportLogsButton().IsEnabled(true);
 
     switch (result.status) {

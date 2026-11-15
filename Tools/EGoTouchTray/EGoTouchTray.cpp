@@ -20,7 +20,7 @@
 // 本进程提交过什么——提交可能被服务按枚举校验拒绝，也可能被别处的配置改写。
 
 #include "AppVersion.h"
-#include "ManagedResource.h"
+#include "AccessoryBatteryState.h"
 #include "PenButtonConfig.h"
 #include "PenControlChannel.h"
 #include "PenInkShortcut.h"
@@ -29,12 +29,10 @@
 #include "BrandMark.h"
 
 #include <d2d1.h>
-#include <dwrite.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
 #include <shlobj.h>
-#include <wincodec.h>
 #include <windows.h>
 #include <UIAutomation.h>
 #include <wrl/client.h>
@@ -43,6 +41,7 @@
 #include <atomic>
 #include <array>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -54,10 +53,8 @@
 #include <vector>
 
 #pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "uiautomationcore.lib")
-#pragma comment(lib, "windowscodecs.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace {
@@ -77,46 +74,17 @@ constexpr wchar_t kLastVersionValueName[] = L"LastVersion";
 // display, which is exactly what it did.
 constexpr int   kBaseDpi          = 96;
 
-// 笔照是 17:1 的横条，通栏压在顶部；下面一行左名称、右电量，两端各有分量，中间不空。
-// 状态文字（「正在充电」「已连接」）不单独占行：电量图标本身就带充电闪电，同一件事说两遍。
-// 只在没有电量可显示时，右侧才退回状态词。
-constexpr int   kPadXDip          = 16;
-constexpr int   kPadYDip          = 16;
-// 放得下「HUAWEI M-Pencil（第二代）」加右侧电量组：名称约 182、电量组约 79、中间 8，合计
-// 269。留出余量，别卡在临界值上。
-constexpr int   kContentWidthDip  = 304;
-constexpr int   kPenGapDip        = 12;   // 笔照与下面那行之间
-constexpr int   kInfoRowDip       = 26;
+constexpr UINT_PTR kTimerPoll           = 1;   // channel poll / reconnect
+constexpr UINT_PTR kTimerLease          = 4;   // provider lease heartbeat / safe exit
+constexpr UINT_PTR kTimerUpdateExit     = 5;   // 安装开始，弹完提示再退出
+constexpr UINT_PTR kTimerSettingsBridge = 6;   // 非阻塞等待 WinUI Settings IPC bridge 就绪
 
-// 电量图标原图 54x26，只缩不放——放大会糊。
-constexpr int   kBatteryIconHeightDip = 16;
-// 阴影画在窗口内部，所以窗口要比卡片大一圈，否则会被窗口边缘裁掉。
-constexpr int   kShadowPadDip     = 8;
-// 面板中心在屏幕上的相对位置。横向居中、纵向靠上——与系统自己的音量/亮度提示同区域，
-// 且离底部任务栏和右下角通知区都远。
-constexpr float kAnchorXRatio     = 0.50f;
-constexpr float kAnchorYRatio     = 0.10f;
+constexpr UINT kPollIntervalMs          = 400;
+constexpr UINT kLeaseIntervalMs         = 1000;
+constexpr UINT kSettingsBridgePollMs    = 25;
+constexpr UINT kMaxSettingsBridgeTicks  = 240; // 至多等待 6 秒
+constexpr size_t kMaxPendingNotifications = 8;
 
-
-// 取自 PCManager 选件中心的 CD54PenApp\views\window_battery.baml：卡片圆角 16，投影
-// BlurRadius=5 / ShadowDepth=0 / Opacity=0.3，文字层级靠不透明度（主 0.9、次 0.6）区分而
-// 不是换灰度，强调色 #0A59F7。
-constexpr float kCardRadiusDip    = 16.0f;
-constexpr float kTextPrimaryAlpha   = 0.9f;
-constexpr float kTextSecondaryAlpha = 0.6f;
-
-constexpr UINT_PTR kTimerPoll   = 1;   // channel poll / reconnect
-constexpr UINT_PTR kTimerAnim   = 2;   // fade animation
-constexpr UINT_PTR kTimerDwell  = 3;   // visible hold
-constexpr UINT_PTR kTimerLease  = 4;   // provider lease heartbeat / safe exit
-constexpr UINT_PTR kTimerUpdateExit = 5;   // 安装开始，弹完提示再退出
-
-constexpr UINT kPollIntervalMs = 400;
-constexpr UINT kAnimIntervalMs = 16;
-constexpr UINT kDwellMs        = 3000;
-constexpr UINT kFadeInMs       = 150;
-constexpr UINT kFadeOutMs      = 300;
-constexpr UINT kLeaseIntervalMs = 1000;
 // 安装开始到托盘退出之间留的那点时间。见 BeginUpdateInstallExit：图标一删气泡就跟着消失，
 // 不留这一段，那条「正在安装」等于没弹过。
 constexpr UINT kUpdateExitDelayMs = 2000;
@@ -127,6 +95,7 @@ constexpr ULONGLONG kReaderReconnectMs = 5000;
 constexpr ULONGLONG kKbdDetachPendingMs = 3000;
 
 constexpr UINT WM_TRAYICON = WM_APP + 1;
+constexpr UINT kLaunchResultMessage = WM_APP + 2;
 constexpr UINT kTrayMenuExit = 100;
 constexpr UINT kTrayMenuSettings = 102;
 constexpr UINT kTrayMenuProvider = 103;
@@ -137,13 +106,20 @@ constexpr UINT kTrayMenuEyeComfort = 105;
 constexpr UINT kTrayMenuPenButtonBase = 200;
 constexpr UINT kTrayMenuPenButtonSpan = 256;   // 枚举底层类型是 uint8_t
 
-enum class Phase { Hidden, FadeIn, Dwell, FadeOut };
+struct PendingNotification {
+    EGoTouchTrayIpc::Notification kind{};
+    LPARAM payload = 0;
+};
+
+struct PendingQuickFlyout {
+    bool valid = false;
+    POINT anchor{};
+};
 
 struct App {
     HWND hwnd = nullptr;
     HINSTANCE instance = nullptr;
 
-    // Refreshed whenever the panel is placed, and on WM_DPICHANGED.
     UINT dpi = kBaseDpi;
 
     PenStatus::Reader reader;
@@ -191,32 +167,14 @@ struct App {
     bool exitPending = false;
     ULONGLONG exitDeadlineTick = 0;
 
-    Phase phase = Phase::Hidden;
-    DWORD phaseStartTick = 0;
-    BYTE alpha = 0;
-    bool hovered = false;
-
-    bool darkMode = false;
-
-    // 解码后的 BGRA 预乘像素。D2D 位图绑在渲染目标上，而这里每次绘制都新建一个
-    // DCRenderTarget，所以缓存像素而不是位图，每帧再从像素建一次——图都很小，代价可忽略。
-    struct ImageCache {
-        std::vector<BYTE> pixels;
-        UINT width = 0;
-        UINT height = 0;
-        int  key = -1;              // -1 = 还没加载过
-        bool unavailable = false;   // 文件不存在，别再重试
-    };
-    ImageCache battery;
-    ImageCache pen;
+    bool settingsLaunchInFlight = false;
+    bool settingsLaunchReportError = false;
+    UINT settingsLaunchTicks = 0;
+    bool pendingActivateSettings = false;
+    PendingQuickFlyout pendingQuickFlyout{};
+    std::vector<PendingNotification> pendingNotifications;
 
     ID2D1Factory* d2dFactory = nullptr;
-    IDWriteFactory* dwriteFactory = nullptr;
-    IWICImagingFactory* wicFactory = nullptr;
-    IDWriteTextFormat* fmtTitle = nullptr;
-    IDWriteTextFormat* fmtBody = nullptr;
-    IDWriteTextFormat* fmtPercent = nullptr;
-    IDWriteTextFormat* fmtPercentSign = nullptr;
 
     NOTIFYICONDATAW trayIcon{};
     bool trayIconAdded = false;
@@ -226,6 +184,7 @@ struct App {
     // 当前这个图标是按什么条件画出来的。任务栏的深浅与应用主题是两个开关，图标跟前者走。
     bool trayIconDark = false;
     int  trayIconPx = 0;
+    std::wstring lastTrayTip;
 };
 
 App g_app;
@@ -341,32 +300,6 @@ void LoadUserSettings() {
     (void)SetLoginAutoStart(g_app.autoStart);
 }
 
-// ── DPI ──────────────────────────────────────────────────────────────────────
-
-// Device-independent pixels -> physical pixels at the panel's current DPI.
-int Scaled(int dip) {
-    return MulDiv(dip, static_cast<int>(g_app.dpi), kBaseDpi);
-}
-float ScaledF(float dip) {
-    return dip * (static_cast<float>(g_app.dpi) / static_cast<float>(kBaseDpi));
-}
-// 卡片尺寸按内容算，不写死：产品图取不到时（没装 PCManager，或型号未识别）如果还按含图的
-// 尺寸开窗，左半边就是一大片空白。
-bool PenImageReady();   // 定义在下面的 EnsurePenImage 附近
-
-int PenImageHeightDip();   // 由裁剪后的真实比例算出，定义在 EnsurePenImage 附近
-
-int CardWidthDip() { return kPadXDip * 2 + kContentWidthDip; }
-
-int CardHeightDip() {
-    int h = kPadYDip * 2 + kInfoRowDip;
-    if (PenImageReady()) h += PenImageHeightDip() + kPenGapDip;
-    return h;
-}
-
-int PanelWidth()  { return Scaled(CardWidthDip() + kShadowPadDip * 2); }
-int PanelHeight() { return Scaled(CardHeightDip() + kShadowPadDip * 2); }
-
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 std::wstring Widen(const char* utf8) {
@@ -376,614 +309,6 @@ std::wstring Widen(const char* utf8) {
     std::wstring out(static_cast<size_t>(need - 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out.data(), need);
     return out;
-}
-
-std::wstring DisplayName() {
-    // 服务发布的已经是产品名（见 PenModuleModelId.h 的 ToDisplayName），这里不再拼装。
-    // 型号识别不出来时它是空的——退回不带代数的通用名，而不是显示内部代号。
-    const std::wstring name = Widen(g_app.state.modelName);
-    return name.empty() ? L"HUAWEI M-Pencil" : name;
-}
-
-// ── 配色 ─────────────────────────────────────────────────────────────────────
-
-struct Palette {
-    D2D1_COLOR_F card;
-    D2D1_COLOR_F cardBorder;
-    D2D1_COLOR_F shadow;
-    D2D1_COLOR_F text;       // 主次层级由 kText*Alpha 调不透明度，不换颜色
-    D2D1_COLOR_F accent;
-    D2D1_COLOR_F track;      // 没有 PCManager 图标时自绘电量条的底槽
-};
-
-bool ReadDarkMode() {
-    // 与资源管理器同一个开关：AppsUseLightTheme=0 表示应用使用深色。键不存在时按浅色，
-    // 这也是 Windows 自己的默认。
-    DWORD value = 1, size = sizeof(value), type = 0;
-    if (RegGetValueW(HKEY_CURRENT_USER,
-                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, &type, &value, &size) != ERROR_SUCCESS) {
-        return false;
-    }
-    return value == 0;
-}
-
-Palette CurrentPalette() {
-    if (g_app.darkMode) {
-        return Palette{
-            D2D1::ColorF(0.11f, 0.12f, 0.14f, 0.97f),
-            D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f),
-            D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f),
-            D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
-            // 深色底上 #0A59F7 太暗，提到 HarmonyOS 深色态常用的 #317AF7。这一个值是为对比度
-            // 挑的，不是从 PCManager 抄的——它的悬浮窗只有浅色一种。
-            D2D1::ColorF(0x317AF7, 1.0f),
-            D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f),
-        };
-    }
-    return Palette{
-        D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
-        D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f),
-        D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.30f),
-        D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f),
-        D2D1::ColorF(0x0A59F7, 1.0f),
-        D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f),
-    };
-}
-
-// ── 电量图标（取自已安装的 PCManager）────────────────────────────────────────
-//
-// 图标不随程序分发：它们是华为的美术资源。装了 PCManager 就用，没装就退回自绘电量条，
-// 两条路都可用，不会因为缺资源而显示空白。
-
-// PCManager 只提供这些档位，取不小于当前电量的最小一档。
-// 方向与原厂一致：选件中心是向上取整，15% 用 20 的图标。此处原先向下取整，同一块电量
-// 在我们和华为面板上会显示成不同的图标。
-constexpr int kBatterySteps[] = {5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100};
-
-int BatteryStepFor(uint8_t level) {
-    for (int s : kBatterySteps) {
-        if (level <= s) return s;
-    }
-    return kBatterySteps[std::size(kBatterySteps) - 1];
-}
-
-int MakeIconKey(int step, bool charging, bool dark) {
-    return step * 4 + (charging ? 2 : 0) + (dark ? 1 : 0);
-}
-
-std::wstring PCManagerRes() {
-    wchar_t root[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_PROGRAM_FILES, nullptr, 0, root))) {
-        return L"";
-    }
-    return std::wstring(root) + L"\\Huawei\\PCManager\\";
-}
-
-std::wstring BatteryIconPath(int step, bool charging) {
-    const std::wstring base = PCManagerRes();
-    if (base.empty()) return L"";
-    std::wstring p = base +
-        L"res\\drawable\\iconnect\\commonResources\\discover\\battery\\battery_white";
-    p += std::to_wstring(step);
-    if (charging) p += L"_charge";
-    p += L".png";
-    return p;
-}
-
-// 选件中心的设备卡片图按模组 ID 的十进制值命名：283_00.png 是 CD54 (0x00011B)、
-// 65819_00.png 是 CD54R (0x01011B)、4468738_00.png 是 CD54S (0x443002)。
-// 这是散装文件，一定读得到，但分辨率很低（内容仅 216x12），只作兜底。
-std::wstring PenCardImagePath(uint32_t modelId) {
-    const std::wstring base = PCManagerRes();
-    if (base.empty() || modelId == 0) return L"";
-    return base + L"components\\accessories_center\\res\\drawable\\cards\\" +
-           std::to_wstring(modelId) + L"_00.png";
-}
-
-// 高分辨率的笔照片在选件中心插件 DLL 的 WPF 资源流里，散装文件里没有。
-std::wstring PenPluginPath(uint32_t modelId) {
-    const std::wstring base = PCManagerRes();
-    if (base.empty()) return L"";
-    const wchar_t* dll = L"CD54RPenApp.dll";
-    switch (modelId) {
-    case 0x00011Au: dll = L"CD52PenApp.dll";  break;
-    case 0x00011Bu: dll = L"CD54PenApp.dll";  break;
-    case 0x01011Bu: dll = L"CD54RPenApp.dll"; break;
-    case 0x443002u: dll = L"CD54SPenApp.dll"; break;
-    default: break;   // 各插件都带着同一套共享图，取不到型号时随便挑一个即可
-    }
-    return base + L"components\\accessories_center\\accessories_app\\AccessoryApp\\Lib\\Plugins\\" +
-           dll;
-}
-
-// 横向的笔照。资源名里的编号是 modelId 左移 8 位的 8 位小写十六进制：pic_00011a00 对应
-// 0x00011A (CD52)、pic_00011b00 对应 0x00011B (CD54)、pic_00003100 对应 0x000031（cards 目录
-// 下正好有个 49_00.png，49 = 0x31）——两套命名互相印证。
-std::wstring PenConnectResourceName(uint32_t modelId) {
-    wchar_t buf[64]{};
-    std::swprintf(buf, 64, L"resources/pic_%08x_connect@1.5x.png", modelId << 8);
-    return buf;
-}
-
-// 描边是纯灰阶（R=G=B），电量填充是绿/红。只反转灰阶像素就得到深色底上可用的白色描边版，
-// 彩色填充原样保留——因此不需要第二套资源。
-void InvertGrayscaleStrokes(std::vector<BYTE>& bgra) {
-    for (size_t i = 0; i + 3 < bgra.size(); i += 4) {
-        const BYTE a = bgra[i + 3];
-        if (a == 0) continue;
-        // 像素是预乘的，先还原再判断，否则半透明的黑会被当成彩色。
-        const int b = bgra[i] * 255 / a;
-        const int g = bgra[i + 1] * 255 / a;
-        const int r = bgra[i + 2] * 255 / a;
-        if (r != g || g != b) continue;
-        const int inv = 255 - r;
-        bgra[i]     = BYTE(inv * a / 255);
-        bgra[i + 1] = BYTE(inv * a / 255);
-        bgra[i + 2] = BYTE(inv * a / 255);
-    }
-}
-
-// 按 alpha 裁掉四周的透明边。选件中心的产品图是 240x128 的画布，笔本身只占 216x12——不裁
-// 就等于把大片空气一起缩放，笔会细得像根头发。
-void CropToContent(std::vector<BYTE>& bgra, UINT& w, UINT& h) {
-    if (w == 0 || h == 0) return;
-    UINT x0 = w, y0 = h, x1 = 0, y1 = 0;
-    for (UINT y = 0; y < h; ++y) {
-        for (UINT x = 0; x < w; ++x) {
-            if (bgra[(size_t(y) * w + x) * 4 + 3] == 0) continue;
-            if (x < x0) x0 = x;
-            if (x > x1) x1 = x;
-            if (y < y0) y0 = y;
-            if (y > y1) y1 = y;
-        }
-    }
-    if (x0 > x1 || y0 > y1) return;   // 整张全透明，保持原样
-
-    const UINT nw = x1 - x0 + 1, nh = y1 - y0 + 1;
-    if (nw == w && nh == h) return;
-
-    std::vector<BYTE> out(size_t(nw) * nh * 4);
-    for (UINT y = 0; y < nh; ++y) {
-        std::memcpy(&out[size_t(y) * nw * 4],
-                    &bgra[(size_t(y + y0) * w + x0) * 4],
-                    size_t(nw) * 4);
-    }
-    bgra = std::move(out);
-    w = nw;
-    h = nh;
-}
-
-bool LoadPng(const std::wstring& path, App::ImageCache& cache, int key, bool invertGray,
-             bool cropToContent = false) {
-    if (cache.unavailable) return false;
-    if (cache.key == key && !cache.pixels.empty()) return true;
-    if (!g_app.wicFactory || path.empty()) return false;
-
-    IWICBitmapDecoder* decoder = nullptr;
-    if (FAILED(g_app.wicFactory->CreateDecoderFromFilename(
-            path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder))) {
-        // 一个文件缺失就当整类不可用：混着用会让面板在状态变化时忽然换风格，而且每帧重试
-        // 一个不存在的路径没有意义。
-        cache.unavailable = true;
-        return false;
-    }
-
-    bool ok = false;
-    IWICBitmapFrameDecode* frame = nullptr;
-    IWICFormatConverter* conv = nullptr;
-    if (SUCCEEDED(decoder->GetFrame(0, &frame)) &&
-        SUCCEEDED(g_app.wicFactory->CreateFormatConverter(&conv)) &&
-        SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
-                                   WICBitmapDitherTypeNone, nullptr, 0.0,
-                                   WICBitmapPaletteTypeCustom))) {
-        UINT w = 0, h = 0;
-        if (SUCCEEDED(conv->GetSize(&w, &h)) && w && h) {
-            std::vector<BYTE> pixels(size_t(w) * h * 4);
-            if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4, UINT(pixels.size()), pixels.data()))) {
-                if (invertGray) InvertGrayscaleStrokes(pixels);
-                if (cropToContent) CropToContent(pixels, w, h);
-                cache.pixels = std::move(pixels);
-                cache.width = w;
-                cache.height = h;
-                cache.key = key;
-                ok = true;
-            }
-        }
-    }
-    if (conv) conv->Release();
-    if (frame) frame->Release();
-    decoder->Release();
-    return ok;
-}
-
-bool EnsureBatteryIcon(int step, bool charging, bool dark) {
-    return LoadPng(BatteryIconPath(step, charging), g_app.battery,
-                   MakeIconKey(step, charging, dark), dark);
-}
-
-// 解码一段内存里的 PNG（来自托管资源），与 LoadPng 走同一套后处理。
-bool LoadPngBytes(const std::vector<uint8_t>& png, App::ImageCache& cache, int key) {
-    if (png.empty() || !g_app.wicFactory) return false;
-
-    IWICStream* stream = nullptr;
-    if (FAILED(g_app.wicFactory->CreateStream(&stream)) || !stream) return false;
-    bool ok = false;
-    if (SUCCEEDED(stream->InitializeFromMemory(const_cast<BYTE*>(png.data()),
-                                               static_cast<DWORD>(png.size())))) {
-        IWICBitmapDecoder* decoder = nullptr;
-        if (SUCCEEDED(g_app.wicFactory->CreateDecoderFromStream(
-                stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder))) {
-            IWICBitmapFrameDecode* frame = nullptr;
-            IWICFormatConverter* conv = nullptr;
-            if (SUCCEEDED(decoder->GetFrame(0, &frame)) &&
-                SUCCEEDED(g_app.wicFactory->CreateFormatConverter(&conv)) &&
-                SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
-                                           WICBitmapDitherTypeNone, nullptr, 0.0,
-                                           WICBitmapPaletteTypeCustom))) {
-                UINT w = 0, h = 0;
-                if (SUCCEEDED(conv->GetSize(&w, &h)) && w && h) {
-                    std::vector<BYTE> pixels(size_t(w) * h * 4);
-                    if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4, UINT(pixels.size()),
-                                                   pixels.data()))) {
-                        CropToContent(pixels, w, h);
-                        cache.pixels = std::move(pixels);
-                        cache.width = w;
-                        cache.height = h;
-                        cache.key = key;
-                        ok = true;
-                    }
-                }
-            }
-            if (conv) conv->Release();
-            if (frame) frame->Release();
-            decoder->Release();
-        }
-    }
-    stream->Release();
-    return ok;
-}
-
-bool EnsurePenImage(uint32_t modelId) {
-    if (g_app.pen.key == int(modelId)) {
-        // 这个型号试过了：要么有像素可用，要么已知取不到，两种情况都不必再试。
-        return !g_app.pen.pixels.empty();
-    }
-    // 窗口在 InitGraphics 之前就要算尺寸，那时 WIC 还没建好。这种「还没准备好」不能记成
-    // 「取不到」，否则整条路会被第一次必然失败的调用永久禁用。
-    if (!g_app.wicFactory || modelId == 0) return false;
-
-    // 高分辨率的横向笔照只在插件 DLL 的托管资源里（内容 436x26），散装的卡片图仅 216x12。
-    // 颜色未必对得上——CD54R 没有自己的横向图，退到 CD54 的银色那张——但形状是对的，这一点
-    // 机主确认可以接受。
-    const std::wstring plugin = PenPluginPath(modelId);
-    if (!plugin.empty()) {
-        const std::wstring names[] = {
-            PenConnectResourceName(modelId),
-            PenConnectResourceName(0x00011Bu),            // CD54，同为二代的实物渲染
-            L"resources/pic_vector_connect@1.5x.png",     // 每个插件都带着的通用矢量图
-        };
-        for (const auto& n : names) {
-            std::vector<uint8_t> png;
-            if (ManagedRes::ReadEmbeddedResource(plugin, n, png) &&
-                LoadPngBytes(png, g_app.pen, int(modelId))) {
-                return true;
-            }
-        }
-    }
-
-    // 兜底：散装的卡片图，分辨率低但一定读得到。
-    if (LoadPng(PenCardImagePath(modelId), g_app.pen, int(modelId), false, true)) {
-        return true;
-    }
-    g_app.pen.key = int(modelId);   // 记下这个型号已经试过，别每帧重复读 DLL
-    g_app.pen.pixels.clear();
-    return false;
-}
-
-bool PenImageReady() { return EnsurePenImage(g_app.state.modelId); }
-
-// 通栏宽度固定，高度跟着裁剪后的真实比例走，不预设——不同型号的图裁出来比例未必一样。
-int PenImageHeightDip() {
-    if (!PenImageReady() || g_app.pen.width == 0) return 0;
-    return int(float(kContentWidthDip) * float(g_app.pen.height) / float(g_app.pen.width) + 0.5f);
-}
-
-// 把缓存的像素画到当前渲染目标。位图不能跨帧缓存（绑在渲染目标上），所以每次现建。
-void DrawImage(ID2D1RenderTarget* rt, const App::ImageCache& img, const D2D1_RECT_F& dst) {
-    if (img.pixels.empty()) return;
-    ID2D1Bitmap* bmp = nullptr;
-    const D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-    if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(img.width, img.height), img.pixels.data(),
-                                   img.width * 4, &bp, &bmp)) && bmp) {
-        rt->DrawBitmap(bmp, dst);
-        bmp->Release();
-    }
-}
-
-// 量一段文字的宽度，用于把「图标 + 百分比」当作一个整体居中。
-float MeasureText(const wchar_t* text, IDWriteTextFormat* fmt) {
-    if (!text || !*text || !fmt || !g_app.dwriteFactory) return 0.0f;
-    IDWriteTextLayout* layout = nullptr;
-    if (FAILED(g_app.dwriteFactory->CreateTextLayout(text, UINT32(wcslen(text)), fmt,
-                                                     4096.0f, 4096.0f, &layout)) || !layout) {
-        return 0.0f;
-    }
-    DWRITE_TEXT_METRICS m{};
-    const float w = SUCCEEDED(layout->GetMetrics(&m)) ? m.widthIncludingTrailingWhitespace : 0.0f;
-    layout->Release();
-    return w;
-}
-
-std::wstring StatusLine() {
-    if (!g_app.hasState) return L"未连接";
-    if (g_app.state.hasChargingState && g_app.state.charging) return L"正在充电";
-    if (g_app.state.hasStylusLink && g_app.state.stylusLinked) return L"已连接";
-    if (g_app.state.hasDeviceAttached && !g_app.state.deviceAttached) return L"未连接";
-    return L"待机";
-}
-
-bool CreateTextFormats();
-
-// ── rendering ────────────────────────────────────────────────────────────────
-
-// Draws into a 32bpp premultiplied DIB and hands it to UpdateLayeredWindow. The panel is
-// static for its whole lifetime, so this runs once per state change rather than per frame
-// — the fade is done by changing the layer alpha, not by redrawing.
-void RenderPanel() {
-    if (!g_app.d2dFactory) return;
-
-    HDC screenDc = GetDC(nullptr);
-    HDC memDc = CreateCompatibleDC(screenDc);
-
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    const int pw = PanelWidth();
-    const int ph = PanelHeight();
-    bmi.bmiHeader.biWidth = pw;
-    bmi.bmiHeader.biHeight = -ph;   // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = nullptr;
-    HBITMAP dib = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!dib) {
-        DeleteDC(memDc);
-        ReleaseDC(nullptr, screenDc);
-        return;
-    }
-    HGDIOBJ oldBmp = SelectObject(memDc, dib);
-
-    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-
-    bool drew = false;
-    ID2D1DCRenderTarget* rt = nullptr;
-    if (SUCCEEDED(g_app.d2dFactory->CreateDCRenderTarget(&props, &rt))) {
-        RECT bindRect{0, 0, pw, ph};
-        // 画笔在 BeginDraw 之前建。D2D 允许在绘制块外创建资源，而整帧的每一次上色都走这
-        // 一支画笔——建不出来就放弃这一帧，让上一帧的内容留在窗口上，不能拿着空指针接着画。
-        ID2D1SolidColorBrush* brush = nullptr;
-        if (SUCCEEDED(rt->BindDC(memDc, &bindRect)) &&
-            SUCCEEDED(rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f), &brush)) &&
-            brush) {
-            rt->BeginDraw();
-            rt->Clear(D2D1::ColorF(0, 0.0f));
-
-            const Palette pal = CurrentPalette();
-
-            const float pad = ScaledF(float(kShadowPadDip));
-            const float radius = ScaledF(kCardRadiusDip);
-            const D2D1_RECT_F cardRect =
-                D2D1::RectF(pad, pad, float(pw) - pad, float(ph) - pad);
-
-            // 投影。DCRenderTarget 是 D2D 1.0 的接口，拿不到 DropShadowEffect（那需要
-            // ID2D1DeviceContext），所以用几圈递减透明度的圆角矩形近似。层数少、半径小，
-            // 视觉上与 BlurRadius=5 / ShadowDepth=0 接近，代价可忽略。
-            constexpr int kShadowLayers = 6;
-            for (int i = kShadowLayers; i >= 1; --i) {
-                const float grow = ScaledF(float(i));
-                const float t = float(i) / float(kShadowLayers);
-                D2D1_COLOR_F c = pal.shadow;
-                c.a = pal.shadow.a * (1.0f - t) * 0.5f;
-                brush->SetColor(c);
-                rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(cardRect.left - grow, cardRect.top - grow,
-                                                  cardRect.right + grow, cardRect.bottom + grow),
-                                      radius + grow, radius + grow),
-                    brush);
-            }
-
-            // 卡片
-            D2D1_ROUNDED_RECT card = D2D1::RoundedRect(cardRect, radius, radius);
-            brush->SetColor(pal.card);
-            rt->FillRoundedRectangle(card, brush);
-            brush->SetColor(pal.cardBorder);
-            rt->DrawRoundedRectangle(card, brush, ScaledF(1.0f));
-
-            auto textBrush = [&](float alpha) {
-                D2D1_COLOR_F c = pal.text;
-                c.a = alpha;
-                brush->SetColor(c);
-            };
-
-            // 笔照通栏压顶，下面一行左名称、右电量。
-            const float padX = cardRect.left + ScaledF(float(kPadXDip));
-            const float padR = cardRect.right - ScaledF(float(kPadXDip));
-
-            float y = cardRect.top + ScaledF(float(kPadYDip));
-            if (PenImageReady()) {
-                const float ih = ScaledF(float(PenImageHeightDip()));
-                DrawImage(rt, g_app.pen, D2D1::RectF(padX, y, padR, y + ih));
-                y += ih + ScaledF(float(kPenGapDip));
-            }
-
-            const float rowH = ScaledF(float(kInfoRowDip));
-            const bool charging = g_app.state.hasChargingState && g_app.state.charging;
-            const bool hasBattery = g_app.state.hasBatteryLevel;
-
-            wchar_t pctText[16]{};
-            std::swprintf(pctText, 16, L"%u", unsigned(g_app.state.batteryLevel));
-
-            const bool haveIcon =
-                hasBattery &&
-                EnsureBatteryIcon(BatteryStepFor(g_app.state.batteryLevel), charging, g_app.darkMode);
-
-            const float gap = ScaledF(8.0f);
-            // 只缩不放：图标原图 54x26，按行高拉伸会糊。
-            const float iconH = ScaledF(float(kBatteryIconHeightDip));
-            const float iconW = haveIcon
-                              ? iconH * (float(g_app.battery.width) / float(g_app.battery.height))
-                              : ScaledF(48.0f);   // 自绘电量条的宽度
-
-            // 整组（图标 + 数字 + 百分号）右对齐到内容区右端，先量总宽再定起点。
-            const float numW = MeasureText(pctText, g_app.fmtPercent);
-            const float signW = MeasureText(L"%", g_app.fmtPercentSign) + ScaledF(1.0f);
-            const float groupW = hasBattery ? (iconW + gap + numW + signW) : 0.0f;
-            float x = padR - groupW;
-
-            // 名称占左侧剩余空间，超长省略——名字比电量更容易变长。
-            textBrush(kTextPrimaryAlpha);
-            const std::wstring title = DisplayName();
-            rt->DrawText(title.c_str(), UINT32(title.size()), g_app.fmtTitle,
-                          D2D1::RectF(padX, y, hasBattery ? x - gap : padR, y + rowH), brush);
-
-            if (!hasBattery) {
-                // 没有电量可显示时，右侧才退回状态词——有电量时那句话已经被图标说过了。
-                textBrush(kTextSecondaryAlpha);
-                const std::wstring status = StatusLine();
-                rt->DrawText(status.c_str(), UINT32(status.size()), g_app.fmtBody,
-                              D2D1::RectF(padX, y, padR, y + rowH), brush);
-            } else if (haveIcon) {
-                const float top = y + (rowH - iconH) * 0.5f;
-                DrawImage(rt, g_app.battery, D2D1::RectF(x, top, x + iconW, top + iconH));
-            } else {
-                // 没有 PCManager 资源时自绘：一条圆角进度条，语义与图标一致。
-                const float barH = ScaledF(10.0f);
-                const float barTop = y + (rowH - barH) * 0.5f;
-                brush->SetColor(pal.track);
-                rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(x, barTop, x + iconW, barTop + barH),
-                                      barH * 0.5f, barH * 0.5f), brush);
-                const float pct = std::clamp(float(g_app.state.batteryLevel) / 100.0f, 0.0f, 1.0f);
-                const float fillRight = x + iconW * pct;
-                if (fillRight > x + barH * 0.5f) {
-                    // 低电量即便在充电也显示为红：那才是用户最需要注意到的状态。
-                    brush->SetColor(g_app.state.batteryLevel <= 20
-                                        ? D2D1::ColorF(0xFF3320, 1.0f)
-                                        : D2D1::ColorF(0x8AD63F, 1.0f));
-                    rt->FillRoundedRectangle(
-                        D2D1::RoundedRect(D2D1::RectF(x, barTop, fillRight, barTop + barH),
-                                          barH * 0.5f, barH * 0.5f), brush);
-                }
-            }
-
-            if (hasBattery) {
-                // 数字 18px 加粗、百分号 10px 底对齐——原厂 BatteryValueStyle 与
-                // BatteryPercentStyle 是分开画的两个元素，整体一个字号会失掉这个层次。
-                // 充电时用强调色。
-                x += iconW + gap;
-                if (charging) {
-                    brush->SetColor(pal.accent);
-                } else {
-                    textBrush(kTextPrimaryAlpha);
-                }
-                rt->DrawText(pctText, UINT32(wcslen(pctText)), g_app.fmtPercent,
-                              D2D1::RectF(x, y, padR, y + rowH), brush);
-                rt->DrawText(L"%", 1, g_app.fmtPercentSign,
-                              D2D1::RectF(x + numW + ScaledF(1.0f), y, padR,
-                                          y + rowH - ScaledF(3.0f)),
-                              brush);
-            }
-
-            brush->Release();
-            rt->EndDraw();
-            drew = true;
-        }
-        rt->Release();
-    }
-
-    if (drew) {
-        POINT srcPos{0, 0};
-        SIZE size{pw, ph};
-        RECT wr{};
-        GetWindowRect(g_app.hwnd, &wr);
-        POINT dstPos{wr.left, wr.top};
-        BLENDFUNCTION blend{AC_SRC_OVER, 0, g_app.alpha, AC_SRC_ALPHA};
-        UpdateLayeredWindow(g_app.hwnd, screenDc, &dstPos, &size,
-                            memDc, &srcPos, 0, &blend, ULW_ALPHA);
-    }
-
-    SelectObject(memDc, oldBmp);
-    DeleteObject(dib);
-    DeleteDC(memDc);
-    ReleaseDC(nullptr, screenDc);
-}
-
-void ApplyAlphaOnly() {
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, g_app.alpha, AC_SRC_ALPHA};
-    UpdateLayeredWindow(g_app.hwnd, nullptr, nullptr, nullptr, nullptr, nullptr,
-                        0, &blend, ULW_ALPHA);
-}
-
-void PositionPanel() {
-    // Anchor to the monitor holding the cursor, and adopt that monitor's DPI before
-    // computing any size. SPI_GETWORKAREA only describes the primary display, which would
-    // misplace the panel on a multi-monitor setup.
-    POINT cursor{};
-    GetCursorPos(&cursor);
-    HMONITOR mon = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
-
-    UINT dpiX = kBaseDpi, dpiY = kBaseDpi;
-    if (SUCCEEDED(GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)) &&
-        dpiX != g_app.dpi) {
-        g_app.dpi = dpiX;
-        CreateTextFormats();
-    }
-
-    // 锚在整块屏幕上而不是工作区：工作区会随任务栏的位置和自动隐藏状态伸缩，面板就会跟着跳。
-    MONITORINFO mi{sizeof(mi)};
-    RECT screen{};
-    if (GetMonitorInfoW(mon, &mi)) {
-        screen = mi.rcMonitor;
-    } else {
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &screen, 0);
-    }
-
-    const int w = PanelWidth();
-    const int h = PanelHeight();
-    const int anchorX = screen.left + int((screen.right - screen.left) * kAnchorXRatio);
-    const int anchorY = screen.top + int((screen.bottom - screen.top) * kAnchorYRatio);
-    const int x = anchorX - w / 2;
-    const int y = anchorY - h / 2;
-    SetWindowPos(g_app.hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_NOREDRAW);
-}
-
-void BeginShow() {
-    PositionPanel();
-    g_app.phase = Phase::FadeIn;
-    g_app.phaseStartTick = GetTickCount();
-    g_app.alpha = 0;
-    RenderPanel();
-    // SW_SHOWNOACTIVATE matters: stealing focus mid-stroke would be worse than not
-    // showing the panel at all.
-    ShowWindow(g_app.hwnd, SW_SHOWNOACTIVATE);
-    SetTimer(g_app.hwnd, kTimerAnim, kAnimIntervalMs, nullptr);
-}
-
-void BeginHide() {
-    g_app.phase = Phase::FadeOut;
-    g_app.phaseStartTick = GetTickCount();
-    SetTimer(g_app.hwnd, kTimerAnim, kAnimIntervalMs, nullptr);
-}
-
-void FinishHide() {
-    g_app.phase = Phase::Hidden;
-    KillTimer(g_app.hwnd, kTimerAnim);
-    ShowWindow(g_app.hwnd, SW_HIDE);
 }
 
 // ── 侧键双击 ─────────────────────────────────────────────────────────────────
@@ -1350,6 +675,7 @@ void ShowTrayBalloon(const wchar_t* title, const wchar_t* text, DWORD infoFlags 
                      bool opensSettings = false);
 // 安装开始时托盘要退出，定义在 SubmitProviderLease 之后——它要先把租约放掉。
 void BeginUpdateInstallExit(uint8_t major, uint8_t minor, uint8_t patch);
+void RefreshTrayTooltip();
 
 void NotifySettingsLifecycle(EGoTouchTrayIpc::SettingsLifecycle lifecycle) {
     HWND bridge = FindWindowW(EGoTouchTrayIpc::kSettingsBridgeWindowClass, nullptr);
@@ -1378,6 +704,7 @@ void PollChannel() {
         // The service may start after us, or restart; keep retrying quietly.
         if (!g_app.reader.Open()) {
             g_app.hasState = false;
+            RefreshTrayTooltip();
             return;
         }
         g_app.lastReaderReconnectTick = now;
@@ -1506,6 +833,7 @@ void PollChannel() {
     g_app.prevChargingValid = true;
     g_app.prevNotificationSequence = fresh.notificationSequence;
     g_app.prevNotificationValid = true;
+    RefreshTrayTooltip();
 }
 
 // ── tray icon ────────────────────────────────────────────────────────────────
@@ -1734,6 +1062,61 @@ void ReportVersionChange() {
         ShowTrayBalloon(L"OpenEGo Hub", text.c_str(), NIIF_INFO, true);
     }
     (void)WriteUserStringSetting(kLastVersionValueName, current);
+}
+
+std::wstring BuildTrayTooltipText() {
+    std::wstring tip = L"OpenEGo Hub";
+    if (!g_app.providerDesired) {
+        tip += L"\n未接管触控";
+    }
+    if (!g_app.hasState) {
+        return tip;
+    }
+
+    if (AccessoryBattery::HasPenBattery(g_app.state)) {
+        tip += L"\n手写笔 ";
+        tip += std::to_wstring(g_app.state.batteryLevel);
+        tip += L"%";
+        if (g_app.state.hasChargingState && g_app.state.charging) {
+            tip += L"（充电中）";
+        }
+    } else if (g_app.state.hasDeviceAttached && g_app.state.deviceAttached) {
+        tip += L"\n手写笔 已吸附";
+    } else if (g_app.state.hasStylusLink && g_app.state.stylusLinked) {
+        tip += L"\n手写笔 已连接";
+    }
+
+    if (g_app.state.hasKbdPresent && g_app.state.kbdPresent) {
+        if (g_app.state.hasKbdBattery) {
+            tip += L"\n键盘 ";
+            tip += std::to_wstring(g_app.state.kbdBatteryLevel);
+            tip += L"%";
+            if (g_app.state.hasKbdCharging && g_app.state.kbdCharging) {
+                tip += L"（充电中）";
+            }
+        } else if (g_app.state.hasKbdDetached) {
+            tip += g_app.state.kbdDetached ? L"\n键盘 已分离" : L"\n键盘 已吸附";
+        } else {
+            tip += L"\n键盘 已连接";
+        }
+    }
+    return tip;
+}
+
+void RefreshTrayTooltip() {
+    if (!g_app.trayIconAdded) return;
+    const std::wstring tip = BuildTrayTooltipText();
+    if (tip == g_app.lastTrayTip) return;
+    g_app.lastTrayTip = tip;
+
+    wcsncpy_s(g_app.trayIcon.szTip, tip.c_str(), _TRUNCATE);
+    NOTIFYICONDATAW tipData{};
+    tipData.cbSize = sizeof(tipData);
+    tipData.hWnd = g_app.trayIcon.hWnd;
+    tipData.uID = g_app.trayIcon.uID;
+    tipData.uFlags = NIF_TIP;
+    wcsncpy_s(tipData.szTip, tip.c_str(), _TRUNCATE);
+    (void)Shell_NotifyIconW(NIM_MODIFY, &tipData);
 }
 
 void ReleaseTrayIcon() {
@@ -2234,40 +1617,148 @@ HWND FindSettingsBridge() {
         HWND_MESSAGE, nullptr, EGoTouchTrayIpc::kSettingsBridgeWindowClass, nullptr);
 }
 
-bool LaunchSettingsProcess(bool background, bool reportError) {
-    if (g_app.updateExitPending) return false;
+// 非阻塞启动 OpenEGoHubSettings.exe：CreateProcessW 在后台线程完成，UI 线程用短定时器
+// 等待 IPC bridge 就绪后一次性冲刷挂起的通知、设置窗激活与快捷面板切换请求，避免
+// 启动 WinUI 时把托盘消息泵卡住 2 秒。
+bool EnsureSettingsBridgeAsync(bool background, bool reportError) {
+    if (g_app.updateExitPending || !g_app.hwnd) return false;
+    g_app.settingsLaunchReportError = g_app.settingsLaunchReportError || reportError;
+    if (g_app.settingsLaunchInFlight) return true;
+
     const std::wstring settingsPath = SettingsExecutablePath();
     if (settingsPath.empty()) return false;
 
-    STARTUPINFOW startup{sizeof(startup)};
-    PROCESS_INFORMATION process{};
-    std::wstring commandLine = L"\"" + settingsPath + L"\"";
-    if (background) commandLine += L" --background";
-    if (!CreateProcessW(settingsPath.c_str(), commandLine.data(), nullptr, nullptr, FALSE,
-                        CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
-                        &startup, &process)) {
-        if (reportError) {
-            MessageBoxW(nullptr, L"无法启动 OpenEGo Hub 控制面板。请确认安装文件完整。",
-                        L"OpenEGo Hub", MB_OK | MB_ICONERROR);
+    g_app.settingsLaunchInFlight = true;
+    g_app.settingsLaunchTicks = 0;
+    SetTimer(g_app.hwnd, kTimerSettingsBridge, kSettingsBridgePollMs, nullptr);
+
+    const HWND notifyHwnd = g_app.hwnd;
+    std::thread([notifyHwnd, settingsPath, background]() {
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION process{};
+        std::wstring commandLine = L"\"" + settingsPath + L"\"";
+        if (background) commandLine += L" --background";
+        const BOOL started = CreateProcessW(
+            settingsPath.c_str(), commandLine.data(), nullptr, nullptr, FALSE,
+            CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &startup, &process);
+        if (started) {
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
         }
-        return false;
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+        (void)PostMessageW(notifyHwnd, kLaunchResultMessage, started ? 1 : 0, 0);
+    }).detach();
     return true;
 }
 
-// 设置界面在 OpenEGoHubSettings.exe 里，托盘只负责拉起或激活它。此处原先还有一套 Win32
-// 自绘面板，被 WinUI 取代后整块不可达，已删除。留两条实测结论，避免有人再往回走：
-// 传统子控件是 GDI 表面，把整个客户区扩成 Mica 玻璃后它们不保留 alpha，只能把 Mica 限
-// 在非客户区、客户区另铺一层不透明底色；另外 SetWindowTheme 会同步发出 WM_THEMECHANGED，
-// DWM 的深色标题栏属性必须在子控件换肤之后再设，否则会被那一轮改回浅色。
+void GrantForegroundToBridge(HWND bridge) {
+    if (g_app.hwnd) {
+        ShowWindow(g_app.hwnd, SW_SHOWNOACTIVATE);
+        (void)SetForegroundWindow(g_app.hwnd);
+    }
+    DWORD bridgePid = 0;
+    if (bridge && GetWindowThreadProcessId(bridge, &bridgePid) != 0 && bridgePid != 0) {
+        (void)AllowSetForegroundWindow(bridgePid);
+    } else {
+        (void)AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
+void FlushPendingSettingsActions(HWND bridge) {
+    for (const auto& item : g_app.pendingNotifications) {
+        (void)PostMessageW(bridge, EGoTouchTrayIpc::kNotificationMessage,
+                           static_cast<WPARAM>(item.kind), item.payload);
+    }
+    g_app.pendingNotifications.clear();
+
+    if (g_app.pendingActivateSettings) {
+        g_app.pendingActivateSettings = false;
+        g_app.pendingQuickFlyout.valid = false;
+        GrantForegroundToBridge(bridge);
+        (void)PostMessageW(bridge, EGoTouchTrayIpc::kActivateMessage, 0, 0);
+    } else if (g_app.pendingQuickFlyout.valid) {
+        const POINT pt = g_app.pendingQuickFlyout.anchor;
+        g_app.pendingQuickFlyout.valid = false;
+        GrantForegroundToBridge(bridge);
+        (void)PostMessageW(
+            bridge, EGoTouchTrayIpc::kToggleQuickFlyoutMessage, 1,
+            MAKELPARAM(static_cast<uint16_t>(pt.x), static_cast<uint16_t>(pt.y)));
+    }
+}
+
+void CancelPendingSettingsActions(bool reportLaunchFailure) {
+    if (g_app.hwnd) {
+        KillTimer(g_app.hwnd, kTimerSettingsBridge);
+        if (IsWindowVisible(g_app.hwnd)) {
+            ShowWindow(g_app.hwnd, SW_HIDE);
+        }
+    }
+    g_app.settingsLaunchInFlight = false;
+    g_app.settingsLaunchTicks = 0;
+    const bool shouldReport = reportLaunchFailure && g_app.settingsLaunchReportError;
+    g_app.settingsLaunchReportError = false;
+    g_app.pendingActivateSettings = false;
+    g_app.pendingQuickFlyout.valid = false;
+    g_app.pendingNotifications.clear();
+    if (shouldReport) {
+        MessageBoxW(nullptr, L"无法启动 OpenEGo Hub 控制面板。请确认安装文件完整。",
+                    L"OpenEGo Hub", MB_OK | MB_ICONERROR);
+    }
+}
+
+// 设置界面与快捷飞出窗均在 OpenEGoHubSettings.exe 里，托盘只负责拉起并投递激活或切换消息。
 void ShowSettingsPanel() {
     if (const HWND settings = FindSettingsBridge()) {
+        GrantForegroundToBridge(settings);
         PostMessageW(settings, EGoTouchTrayIpc::kActivateMessage, 0, 0);
         return;
     }
-    (void)LaunchSettingsProcess(false, true);
+    if (g_app.hwnd) {
+        ShowWindow(g_app.hwnd, SW_SHOWNOACTIVATE);
+        (void)SetForegroundWindow(g_app.hwnd);
+    }
+    (void)AllowSetForegroundWindow(ASFW_ANY);
+    g_app.pendingActivateSettings = true;
+    (void)EnsureSettingsBridgeAsync(false, true);
+}
+
+POINT ResolveTrayAnchorPoint() {
+    POINT cursor{};
+    if (GetCursorPos(&cursor)) {
+        return cursor;
+    }
+
+    if (g_app.trayIconAdded) {
+        NOTIFYICONIDENTIFIER identifier{};
+        identifier.cbSize = sizeof(identifier);
+        identifier.hWnd = g_app.trayIcon.hWnd;
+        identifier.uID = g_app.trayIcon.uID;
+        RECT iconRect{};
+        if (SUCCEEDED(Shell_NotifyIconGetRect(&identifier, &iconRect)) &&
+            iconRect.right > iconRect.left &&
+            iconRect.bottom > iconRect.top) {
+            return POINT{
+                iconRect.left + (iconRect.right - iconRect.left) / 2,
+                iconRect.top + (iconRect.bottom - iconRect.top) / 2,
+            };
+        }
+    }
+    return cursor;
+}
+
+void ShowQuickFlyout(POINT pt) {
+    if (const HWND settings = FindSettingsBridge()) {
+        GrantForegroundToBridge(settings);
+        PostMessageW(settings, EGoTouchTrayIpc::kToggleQuickFlyoutMessage, 1,
+                     MAKELPARAM(static_cast<uint16_t>(pt.x), static_cast<uint16_t>(pt.y)));
+        return;
+    }
+    if (g_app.hwnd) {
+        ShowWindow(g_app.hwnd, SW_SHOWNOACTIVATE);
+        (void)SetForegroundWindow(g_app.hwnd);
+    }
+    (void)AllowSetForegroundWindow(ASFW_ANY);
+    g_app.pendingQuickFlyout = {true, pt};
+    (void)EnsureSettingsBridgeAsync(true, true);
 }
 
 void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification, LPARAM payload) {
@@ -2286,20 +1777,24 @@ void ShowWinUiNotification(EGoTouchTrayIpc::Notification notification, LPARAM pa
     // 查清之前不把它单列成一个开关：给不出「什么时候会弹」，这个开关就没法解释。
     if (deviceNotification && !g_app.deviceNotifications) return;
 
-    HWND bridge = FindSettingsBridge();
-    if (!bridge) {
-        if (!LaunchSettingsProcess(true, false)) return;
-        // WinUI bootstrap and XAML construction happen in the new process. This runs only
-        // on the first notification of a session; subsequent notifications reuse the bridge.
-        for (int attempt = 0; attempt < 80 && !bridge; ++attempt) {
-            Sleep(25);
-            bridge = FindSettingsBridge();
-        }
-    }
-    if (bridge) {
+    if (const HWND bridge = FindSettingsBridge()) {
         PostMessageW(bridge, EGoTouchTrayIpc::kNotificationMessage,
                      static_cast<WPARAM>(notification), payload);
+        return;
     }
+
+    if (!g_app.pendingNotifications.empty()) {
+        const auto& last = g_app.pendingNotifications.back();
+        if (last.kind == notification && last.payload == payload) {
+            (void)EnsureSettingsBridgeAsync(true, false);
+            return;
+        }
+    }
+    if (g_app.pendingNotifications.size() >= kMaxPendingNotifications) {
+        g_app.pendingNotifications.erase(g_app.pendingNotifications.begin());
+    }
+    g_app.pendingNotifications.push_back({notification, payload});
+    (void)EnsureSettingsBridgeAsync(true, false);
 }
 
 void RequestSafeExit() {
@@ -2402,8 +1897,11 @@ void ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"退出并交还原厂");
 
     // Required so the menu dismisses when focus moves elsewhere.
-    SetForegroundWindow(g_app.hwnd);
+    ShowWindow(g_app.hwnd, SW_SHOWNOACTIVATE);
+    (void)SetForegroundWindow(g_app.hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_app.hwnd, nullptr);
+    PostMessageW(g_app.hwnd, WM_NULL, 0, 0);
+    ShowWindow(g_app.hwnd, SW_HIDE);
     DestroyMenu(menu);   // 子菜单随父菜单一并销毁
 }
 
@@ -2420,44 +1918,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 「正在安装」那条气泡已经露过面，可以让出 exe 了。
             KillTimer(hwnd, kTimerUpdateExit);
             DestroyWindow(hwnd);
-        } else if (wParam == kTimerAnim) {
-            const DWORD elapsed = GetTickCount() - g_app.phaseStartTick;
-            if (g_app.phase == Phase::FadeIn) {
-                const float t = std::min(1.0f, float(elapsed) / float(kFadeInMs));
-                g_app.alpha = BYTE(t * 255.0f);
-                ApplyAlphaOnly();
-                if (t >= 1.0f) {
-                    g_app.phase = Phase::Dwell;
-                    g_app.phaseStartTick = GetTickCount();
-                    KillTimer(hwnd, kTimerAnim);
-                    SetTimer(hwnd, kTimerDwell, kDwellMs, nullptr);
-                }
-            } else if (g_app.phase == Phase::FadeOut) {
-                const float t = std::min(1.0f, float(elapsed) / float(kFadeOutMs));
-                g_app.alpha = BYTE((1.0f - t) * 255.0f);
-                ApplyAlphaOnly();
-                if (t >= 1.0f) FinishHide();
+        } else if (wParam == kTimerSettingsBridge) {
+            if (const HWND bridge = FindSettingsBridge()) {
+                KillTimer(hwnd, kTimerSettingsBridge);
+                g_app.settingsLaunchInFlight = false;
+                g_app.settingsLaunchReportError = false;
+                g_app.settingsLaunchTicks = 0;
+                FlushPendingSettingsActions(bridge);
+            } else if (++g_app.settingsLaunchTicks >= kMaxSettingsBridgeTicks) {
+                CancelPendingSettingsActions(true);
             }
-        } else if (wParam == kTimerDwell) {
-            KillTimer(hwnd, kTimerDwell);
-            // 悬停时推迟消失，让人能读完。
-            //
-            // 判据是「光标此刻在不在面板上」，不是 WM_MOUSELEAVE 有没有来过。原先靠那条消息
-            // 清 hovered，而它并不保证送达：触摸操作不产生它，光标被别的窗口捕获时也不产生。
-            // 漏掉一次，hovered 就永远是真，这个定时器每 500ms 自我续期，面板再也不消失。
-            // 直接问光标位置没有这个失败模式——它不依赖任何消息按时到达。
-            if (g_app.phase == Phase::Dwell) {
-                POINT cursor{};
-                RECT panel{};
-                const bool over = GetCursorPos(&cursor) && GetWindowRect(hwnd, &panel) &&
-                                  PtInRect(&panel, cursor);
-                g_app.hovered = over;
-                if (over) {
-                    SetTimer(hwnd, kTimerDwell, 500, nullptr);
-                } else {
-                    BeginHide();
-                }
-            }
+        }
+        return 0;
+
+    case kLaunchResultMessage:
+        if (wParam == 0) {
+            CancelPendingSettingsActions(true);
         }
         return 0;
 
@@ -2469,23 +1945,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return TRUE;
 
-    case WM_MOUSEMOVE:
-        if (!g_app.hovered) {
-            g_app.hovered = true;
-            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
-            TrackMouseEvent(&tme);
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) == WA_INACTIVE && IsWindowVisible(hwnd)) {
+            ShowWindow(hwnd, SW_HIDE);
         }
-        return 0;
-
-    case WM_MOUSELEAVE:
-        g_app.hovered = false;
         return 0;
 
     case WM_TRAYICON:
         if (LOWORD(lParam) == WM_RBUTTONUP) {
             ShowTrayMenu();
         } else if (LOWORD(lParam) == WM_LBUTTONUP) {
-            ShowSettingsPanel();
+            ShowQuickFlyout(ResolveTrayAnchorPoint());
         } else if (LOWORD(lParam) == NIN_BALLOONUSERCLICK) {
             // 「有新版本」那条点开控制面板，升级的选项在那边的对话框里。其余几条提示没有
             // 对应的去处，不处理。标志用完即清：提示已经消失，同一条不该被再点一次。
@@ -2505,6 +1975,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_app.providerDesired
                     ? PenControl::ProviderLeaseCommand::AcquireOrRenew
                     : PenControl::ProviderLeaseCommand::Release);
+            RefreshTrayTooltip();
             return 1;
 
         case EGoTouchTrayIpc::Command::SetPenButtonMode: {
@@ -2671,6 +2142,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_app.providerDesired
                     ? PenControl::ProviderLeaseCommand::AcquireOrRenew
                     : PenControl::ProviderLeaseCommand::Release);
+            RefreshTrayTooltip();
         } else if (id == kTrayMenuKbdDetach) {
             // 与双击行为不同，这一项要先显示成用户选的那个值：它的真值在键盘固件里，回读要
             // 走服务、命令管道和 MCU，不显示在途态就会看到对勾原地不动。
@@ -2694,34 +2166,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_DPICHANGED:
-        // Suggested rect arrives in lParam, but the panel is anchored to a screen corner
-        // rather than preserving its position, so recompute placement from scratch.
         g_app.dpi = HIWORD(wParam);
-        CreateTextFormats();
-        if (g_app.phase != Phase::Hidden) {
-            PositionPanel();
-            RenderPanel();
-        }
+        RefreshTrayIconImage(ReadTaskbarDarkMode());
         return 0;
 
     case WM_DISPLAYCHANGE:
-    case WM_SETTINGCHANGE: {
-        // 主题切换也走 WM_SETTINGCHANGE（lParam = "ImmersiveColorSet"）。深浅两套图标是
-        // 由同一份 PNG 改色得来的，所以主题一变缓存就作废。
-        const bool dark = ReadDarkMode();
-        if (dark != g_app.darkMode) {
-            g_app.darkMode = dark;
-            g_app.battery.key = -1;
-        }
-        // 托盘图标跟任务栏主题，与面板的应用主题分开判断。显示配置变化也走这里，图标尺寸
-        // 跟着系统 DPI，所以一并交给它判断。
+    case WM_SETTINGCHANGE:
+        // 主题切换也走 WM_SETTINGCHANGE。托盘图标跟任务栏主题，显示配置变化引起图标尺寸
+        // 改变时 RefreshTrayIconImage 会按系统 DPI 重绘。
         RefreshTrayIconImage(ReadTaskbarDarkMode());
-        if (g_app.phase != Phase::Hidden) {
-            PositionPanel();
-            RenderPanel();
-        }
         return 0;
-    }
 
     case WM_DESTROY:
         ReleaseTrayIcon();
@@ -2748,80 +2202,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-void ReleaseTextFormats() {
-    if (g_app.fmtPercentSign) { g_app.fmtPercentSign->Release(); g_app.fmtPercentSign = nullptr; }
-    if (g_app.fmtPercent) { g_app.fmtPercent->Release(); g_app.fmtPercent = nullptr; }
-    if (g_app.fmtBody)    { g_app.fmtBody->Release();    g_app.fmtBody = nullptr; }
-    if (g_app.fmtTitle)   { g_app.fmtTitle->Release();   g_app.fmtTitle = nullptr; }
-}
-
-// Text formats carry a fixed point size, so they have to be rebuilt whenever the panel
-// moves to a monitor with a different DPI — scaling the layout alone would leave the type
-// at its old physical size.
-bool CreateTextFormats() {
-    if (!g_app.dwriteFactory) return false;
-    ReleaseTextFormats();
-
-    auto makeFormat = [](float sizeDip, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** out) {
-        // Segoe UI Variable falls back cleanly to Segoe UI on older builds, and both
-        // carry the CJK glyphs the status line needs.
-        return g_app.dwriteFactory->CreateTextFormat(
-            L"Segoe UI Variable", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL, ScaledF(sizeDip), L"zh-cn", out);
-    };
-    // 字号取自 window_main.baml 的样式：名称 CardTextNameStyle 14 常规，电量
-    // BatteryValueStyle 18 加粗，百分号 BatteryPercentStyle 10 常规且底对齐——原厂是把数字
-    // 和百分号当两个元素画的，不是整体一个字号。
-    makeFormat(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_app.fmtTitle);
-    makeFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_app.fmtBody);
-    makeFormat(18.0f, DWRITE_FONT_WEIGHT_BOLD, &g_app.fmtPercent);
-    makeFormat(10.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_app.fmtPercentSign);
-
-    // 行内各元素字号不同，靠段落居中让它们的基准一致。
-    for (auto* f : {g_app.fmtTitle, g_app.fmtBody, g_app.fmtPercent}) {
-        if (f) f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    }
-    if (g_app.fmtPercentSign) {
-        g_app.fmtPercentSign->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_FAR);
-    }
-
-    // 文字一律不换行，超长截断加省略号。版式是按单行算高度的，一旦折到第二行整张卡片就乱；
-    // 截断只损失可读性，换行会损失结构。原厂 deviceinfopage.baml 用的也是 CharacterEllipsis。
-    DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
-    for (auto* f : {g_app.fmtTitle, g_app.fmtBody}) {
-        if (!f) continue;
-        f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        IDWriteInlineObject* sign = nullptr;
-        if (SUCCEEDED(g_app.dwriteFactory->CreateEllipsisTrimmingSign(f, &sign)) && sign) {
-            f->SetTrimming(&trimming, sign);
-            sign->Release();
-        }
-    }
-    return g_app.fmtTitle && g_app.fmtBody && g_app.fmtPercent && g_app.fmtPercentSign;
-}
-
 bool InitGraphics() {
-    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_app.d2dFactory))) {
-        return false;
-    }
-    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                   reinterpret_cast<IUnknown**>(&g_app.dwriteFactory)))) {
-        return false;
-    }
-    // WIC 只用于读 PCManager 的电量图标。拿不到不算致命：面板退回自绘电量条。
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&g_app.wicFactory)))) {
-        g_app.wicFactory = nullptr;
-    }
-    g_app.darkMode = ReadDarkMode();
-    return CreateTextFormats();
+    return SUCCEEDED(D2D1CreateFactory(
+        D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_app.d2dFactory));
 }
 
 void ReleaseGraphics() {
-    ReleaseTextFormats();
-    if (g_app.wicFactory) g_app.wicFactory->Release();
-    if (g_app.dwriteFactory) g_app.dwriteFactory->Release();
-    if (g_app.d2dFactory) g_app.d2dFactory->Release();
+    if (g_app.d2dFactory) {
+        g_app.d2dFactory->Release();
+        g_app.d2dFactory = nullptr;
+    }
 }
 
 } // namespace
@@ -2856,7 +2246,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     RegisterApplicationRestart(nullptr, RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT);
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    // WIC 是 COM 组件，读 PCManager 的电量图标要靠它。
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     g_app.instance = instance;
     LoadUserSettings();
@@ -2875,13 +2264,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
 
     const bool classesReady = commonControlsReady && RegisterClassExW(&wc);
     if (classesReady) {
-        // WS_EX_NOACTIVATE keeps the panel from ever taking focus; TOOLWINDOW keeps it out
-        // of Alt-Tab; TRANSPARENT lets clicks fall through to whatever is underneath.
+        // 托盘宿主的隐身顶层消息窗：不能改成 HWND_MESSAGE，因为第二实例及设置进程靠
+        // FindWindowW 查找该类名，且只有顶层窗能收到 WM_SETTINGCHANGE / WM_POWERBROADCAST / WM_ENDSESSION；
+        // 去掉 WS_EX_NOACTIVATE 并配 WS_EX_LAYERED (alpha=0) 后，可在需要转发前台权限时
+        // 临时 ShowWindow(SW_SHOWNOACTIVATE) -> SetForegroundWindow -> AllowSetForegroundWindow。
         g_app.hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             kWindowClass, L"EGoTouch Pen Status", WS_POPUP,
-            0, 0, CardWidthDip() + kShadowPadDip * 2, CardHeightDip() + kShadowPadDip * 2,
+            -32000, -32000, 1, 1,
             nullptr, nullptr, instance, nullptr);
+        if (g_app.hwnd) {
+            SetLayeredWindowAttributes(g_app.hwnd, 0, 0, LWA_ALPHA);
+        }
     }
 
     // 启动的每一步都可能失败，但清理只有一条路径。早先 InitGraphics 失败时直接 return，漏掉

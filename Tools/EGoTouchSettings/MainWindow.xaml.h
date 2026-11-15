@@ -2,6 +2,7 @@
 
 #include "MainWindow.g.h"
 #include "NotificationWindow.xaml.h"
+#include "QuickFlyoutWindow.xaml.h"
 
 namespace winrt::EGoTouchSettings::implementation {
 
@@ -48,11 +49,37 @@ struct MainWindow : MainWindowT<MainWindow> {
         Microsoft::UI::Xaml::Controls::NavigationView const&,
         Microsoft::UI::Xaml::Controls::NavigationViewItemInvokedEventArgs const&);
     void ThemeSelected(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
-    void DeviceCardsSizeChanged(
+    void HomeStatusGridSizeChanged(
         IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
     void PenDismissClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void KeyboardDismissClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
     void ColorReferenceSizeChanged(
+        IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
+    void HomeNavCardClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void PenDetailsToggleClicked(IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void KeyboardDetailsToggleClicked(
+        IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void VendorServicesDetailsToggleClicked(
+        IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void PowerModeSelectionChanged(
+        IInspectable const&, Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const&);
+    void EnergySaverToggled(
+        IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void EnergySaverThresholdSelectionChanged(
+        IInspectable const&, Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const&);
+    void EnergySaverBrightnessToggled(
+        IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void ChargeLimitPresetClicked(
+        IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void BatteryLayoutGridSizeChanged(
+        IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
+    void ScreenRefreshSelectionChanged(
+        IInspectable const&, Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const&);
+    void ColorTemperaturePresetClicked(
+        IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+    void ScreenLayoutGridSizeChanged(
+        IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
+    void AboutLayoutGridSizeChanged(
         IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
 
 private:
@@ -62,9 +89,23 @@ private:
     WNDPROC m_originalWndProc = nullptr;
     bool IsMainUiVisible();
     void UpdateRefreshPolicy();
+    void EnsureMainUiInitialized();
+    void RefreshScreenControls();
+    void RefreshPowerModeControl();
+    void ToggleQuickFlyout(bool hasAnchor, int anchorX, int anchorY);
+    QuickFlyoutState BuildQuickFlyoutState();
+    void RefreshHomeSummary(const PenStatus::State* state);
+    void RefreshHomeScreenSummary();
+    void PlayPageTransition();
+    void SyncPenDetailsVisibility();
+    void SyncKeyboardDetailsVisibility();
+    void SyncVendorServicesDetailsVisibility();
+    void RefreshVendorServicesDetails();
     bool m_closed = false;
+    bool m_mainUiInitialized = false;
+    bool m_mainUiNeedsRender = true;
     bool m_mainUiVisible = false;
-    bool m_batteryPageVisible = false;
+    bool m_liveBatteryActive = false;
     PenStatus::State m_lastRenderedState{};
     bool m_lastRenderedValid = false;
     bool m_lastRenderedHasState = false;
@@ -121,6 +162,7 @@ private:
     void RequestUpdateSkip();
     // 提交充电上限之后进入等回显的状态，见实现处的说明。
     void BeginChargeLimitEcho(uint8_t requested);
+    void UpdateChargeLimitControls(bool smart);
     bool SendTrayCommand(EGoTouchTrayIpc::Command command, LPARAM value = 0);
     void ShowStatus(
         Microsoft::UI::Xaml::Controls::InfoBarSeverity severity,
@@ -180,8 +222,23 @@ private:
     // 键盘保持真直到用户点叉，而重启本身已经把卡片清掉了。
     bool m_penSeen = false;
     bool m_kbdSeen = false;
-    // 最近一次的内容区宽度。可见性变化时要重算两列布局，而那时手上没有 SizeChangedEventArgs。
-    double m_deviceCardsWidth = 0.0;
+    bool m_penDetailsExpanded = false;
+    bool m_kbdDetailsExpanded = false;
+    bool m_hasPenIdentity = false;
+    bool m_hasKbdIdentity = false;
+    bool m_penRightSlotVisible = false;
+    bool m_kbdRightSlotVisible = false;
+    bool m_penModeAwaitingEcho = false;
+    uint8_t m_penModeRequested = 0;
+    ULONGLONG m_penModeEchoDeadline = 0;
+    int m_lastColorTemperatureKelvin = 6500;
+    std::vector<uint32_t> m_supportedRefreshRates;
+    uint32_t m_currentRefreshHz = 0;
+    uint32_t m_displayWidth = 0;
+    uint32_t m_displayHeight = 0;
+    bool m_hasHomeMemSpec = false;
+    bool m_hasHomeDisplaySpec = false;
+    bool m_hasHomeModelSpec = false;
     // 构造完成前不接受任何控件事件：XAML 解析本身就会触发它们，那时控件还没备齐，
     // 而滑块此刻的值是 Minimum，照单提交等于替用户改设置。
     bool m_uiReady = false;
@@ -192,6 +249,10 @@ private:
     // 达标之后自动解锁，不像先前那样锁到重启。
     enum class VendorTarget : uint8_t { None, Disable, Restore };
     VendorTarget m_vendorTarget = VendorTarget::None;
+    bool m_vendorDetailsExpanded = false;
+    bool m_hasVendorServicesInstalled = false;
+    bool m_vendorScmProbed = false;
+    ULONGLONG m_lastVendorDetailsQueryTick = 0;
     // 顶部那条「华为服务仍在运行」的提醒是否已被关掉。持久化，关一次就不再出现。
     bool m_vendorHintDismissed = false;
     HWND m_bridgeWindow = nullptr;
@@ -237,7 +298,9 @@ private:
     winrt::Microsoft::UI::Xaml::Media::ImageSource m_penImageSource{nullptr};
     winrt::Microsoft::UI::Xaml::Media::ImageSource m_keyboardImageSource{nullptr};
     winrt::Microsoft::UI::Xaml::Media::ImageSource m_machineImageSource{nullptr};
+    winrt::Microsoft::UI::Xaml::Media::Animation::Storyboard m_pageStoryboard{nullptr};
     winrt::EGoTouchSettings::NotificationWindow m_notificationWindow{nullptr};
+    winrt::EGoTouchSettings::QuickFlyoutWindow m_quickFlyoutWindow{nullptr};
 };
 
 } // namespace winrt::EGoTouchSettings::implementation

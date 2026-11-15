@@ -27,6 +27,7 @@ Asset ResolveKeyboard();
 Asset ResolveMachine();
 
 // 解码后按 alpha 非透明像素的外接矩形裁掉画布空白，并留出少量抗锯齿安全边距。
+// 在后台线程解码并复用进程内记忆体缓存与 %LOCALAPPDATA%\OpenEGoHub\Cache\<sha256>.bin 磁盘缓存，
 // 这是 Windows Imaging + WinUI 的通用加载路径，不依赖 Direct2D，也不修改源文件。
 winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::Foundation::Size>
 DecodeCroppedAsync(

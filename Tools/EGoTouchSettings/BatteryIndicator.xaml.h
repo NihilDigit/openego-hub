@@ -7,12 +7,19 @@ namespace winrt::EGoTouchSettings::implementation {
 struct BatteryIndicator : BatteryIndicatorT<BatteryIndicator> {
     BatteryIndicator();
 
+    void Configure(bool showText, bool largeGlyph, bool compactText);
     void SetState(bool hasLevel, uint8_t level, bool charging);
 
 private:
-    void ShowStep(int step, bool charging);
-
+    void ApplyMetrics();
     Microsoft::UI::Xaml::Media::Brush BrushFor(const wchar_t* key);
+
+    bool m_showText = true;
+    bool m_largeGlyph = false;
+    bool m_compactText = false;
+    bool m_hasState = false;
+    uint8_t m_level = 0;
+    bool m_charging = false;
 };
 
 } // namespace winrt::EGoTouchSettings::implementation

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     把构建产物部署到 C:\Program Files\OpenEGoHub，让生产服务跑上新代码。
 
@@ -122,6 +122,7 @@ $appFiles = @(
     'OpenEGoHubService.exe', 'OpenEGoHubTray.exe', 'OpenEGoHubSettings.exe',
     'OpenEGoHubSettings.pri', 'EGoTouchSettings.winmd',
     'App.xbf', 'BatteryIndicator.xbf', 'MainWindow.xbf', 'NotificationWindow.xbf',
+    'QuickFlyoutWindow.xbf',
     'Microsoft.WindowsAppRuntime.Bootstrap.dll'
 )
 foreach ($f in $appFiles) {

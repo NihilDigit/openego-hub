@@ -4,6 +4,7 @@ namespace EGoTouchSettings
     runtimeclass BatteryIndicator : Microsoft.UI.Xaml.Controls.UserControl
     {
         BatteryIndicator();
+        void Configure(Boolean showText, Boolean largeGlyph, Boolean compactText);
         void SetState(Boolean hasLevel, UInt8 level, Boolean charging);
     };
 
@@ -11,6 +12,12 @@ namespace EGoTouchSettings
     runtimeclass NotificationWindow : Microsoft.UI.Xaml.Window
     {
         NotificationWindow();
+    };
+
+    [default_interface]
+    runtimeclass QuickFlyoutWindow : Microsoft.UI.Xaml.Window
+    {
+        QuickFlyoutWindow();
     };
 
     [default_interface]

@@ -3,10 +3,29 @@
 #include "App.xaml.h"
 #include "MainWindow.xaml.h"
 
+#include <shellapi.h>
+
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
 
 namespace winrt::EGoTouchSettings::implementation {
+
+namespace {
+
+bool HasCommandLineSwitch(const wchar_t* name) {
+    int count = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!argv) return false;
+
+    bool found = false;
+    for (int i = 1; i < count && !found; ++i) {
+        found = _wcsicmp(argv[i], name) == 0;
+    }
+    LocalFree(argv);
+    return found;
+}
+
+} // namespace
 
 App::App() {
     InitializeComponent();
@@ -28,8 +47,7 @@ App::~App() {
 }
 
 void App::OnLaunched(LaunchActivatedEventArgs const&) {
-    const bool background = GetCommandLineW() &&
-        std::wstring_view{GetCommandLineW()}.find(L"--background") != std::wstring_view::npos;
+    const bool background = HasCommandLineSwitch(L"--background");
     if (m_secondaryInstance) {
         HWND bridge = nullptr;
         for (int attempt = 0; attempt < 10 && !bridge; ++attempt) {
