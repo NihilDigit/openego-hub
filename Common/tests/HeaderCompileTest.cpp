@@ -2,10 +2,12 @@
 #include "config/ConfigKeyId.h"
 #include "config/ConfigKeyMap.h"
 #include "config/ConfigSchemaSnapshot.h"
+#include "AccessoryBitmapCrop.h"
 #include "FrameLayout.h"
 #include "GuiLogSink.h"
 #include "Logger.h"
 #include "PenButtonConfig.h"
+#include "PenStatusUiState.h"
 
 #include <cstdint>
 #include <iostream>

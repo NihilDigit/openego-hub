@@ -7,6 +7,7 @@
 // never reported at all, or the panel would show a confident wrong state.
 
 #include "PenStatusChannel.h"
+#include "PenStatusUiState.h"
 
 #include <atomic>
 #include <chrono>
@@ -301,6 +302,32 @@ void TestNoTornReadUnderConcurrentWrites() {
     Require(mixed == 0, "no read mixed fields from two different publishes");
 }
 
+void TestSameUiStateIgnoresTimestamp() {
+    PenStatus::State a = MakeState(80, true, false);
+    a.updatedAtUnixMs = 1000;
+    PenStatus::State b = a;
+    b.updatedAtUnixMs = 5000;
+    Require(PenStatus::SameUiState(a, b),
+            "SameUiState ignores updatedAtUnixMs heartbeat ticks");
+
+    // NUL 之后的残留字节不应导致固定字符串误判不等，而有效内容变化必须触发刷新。
+    // MakeState 默认把 modelName 填满到最后一字节才放 NUL，先把字符串收短再改写尾部。
+    a.modelName[8] = '\0';
+    b = a;
+    b.modelName[sizeof(b.modelName) - 1] = 'X';
+    Require(PenStatus::SameUiState(a, b),
+            "SameUiState ignores trailing junk past NUL terminator");
+
+    b.batteryLevel = 81;
+    Require(!PenStatus::SameUiState(a, b),
+            "SameUiState detects meaningful scalar UI state change");
+
+    b = a;
+    b.kbdModelName[0] = 'Z';
+    Require(!PenStatus::SameUiState(a, b),
+            "SameUiState detects meaningful string UI state change");
+}
+
 } // namespace
 
 int main() {
@@ -311,6 +338,7 @@ int main() {
         TestKbdDetachSupportUnknownVsDisabled();
         TestEventChannelIsUsable();
         TestNoTornReadUnderConcurrentWrites();
+        TestSameUiStateIgnoresTimestamp();
         std::cout << "[TEST] Pen status channel tests passed.\n";
         return 0;
     } catch (const std::exception& ex) {
