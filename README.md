@@ -1,85 +1,112 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/brand/openego-hub-256.png" alt="" width="96">
+  <img src="Assets/brand/openego-hub-256.png" alt="OpenEGo Hub" width="88">
 </p>
 
 <h1 align="center">OpenEGo Hub</h1>
 
+<p align="center">HUAWEI MateBook E Go 硬件控制中心</p>
+
 <p align="center">
-  <a href="https://github.com/NihilDigit/openego-hub/releases/latest"><img src="https://img.shields.io/github/v/release/NihilDigit/openego-hub?display_name=tag&label=release" alt="Release"></a>
-  <a href="https://github.com/NihilDigit/openego-hub/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/NihilDigit/openego-hub/build.yml?branch=main&label=build" alt="Build"></a>
-  <img src="https://img.shields.io/badge/Windows%20on%20ARM-ARM64-0078D4?logo=arm&logoColor=white" alt="Windows on ARM">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/NihilDigit/openego-hub" alt="License"></a>
+  <a href="https://github.com/NihilDigit/openego-hub/releases/latest"><img src="https://img.shields.io/github/v/release/NihilDigit/openego-hub?style=flat-square&display_name=tag&label=Release&labelColor=334155&color=317AF7" alt="Release"></a>
+  <a href="#硬件支持"><img src="https://img.shields.io/badge/Platform-Windows%2011%20ARM64-64748B?style=flat-square&labelColor=334155" alt="Platform"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/NihilDigit/openego-hub?style=flat-square&label=License&labelColor=334155&color=64748B" alt="License"></a>
 </p>
 
-<p align="center">中文 | <a href="README.en.md">English</a></p>
+<p align="center"><sub><strong>中文</strong> | <a href="README.en.md">English</a></sub></p>
 
-OpenEGo Hub 是面向 HUAWEI MateBook E Go（Windows 11 ARM64）的硬件控制中心，提供触控管理、手写笔与键盘配置、电池电源管理及显示色彩调节等功能。
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/overview-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/overview-light.avif">
+    <img src="Assets/screenshots/overview-light.avif" alt="概览界面" width="820">
+  </picture>
+</p>
 
-系统架构由原生 ARM64 服务与 ARM64EC 宿主进程组成，直接调用原厂功能模块执行底层算法，接管硬件交互，支持在停用华为电脑管家及后台服务的情况下正常使用全部硬件特性。
+OpenEGo Hub 以原生 ARM64 实现 MateBook E Go 的日常硬件管理，涵盖触控与手写笔、智能磁吸键盘、电池充电限制及屏幕显示设置。停用华为电脑管家的常驻 x64 服务后，上述硬件功能仍可正常使用。
 
 > [!IMPORTANT]
-> 系统中必须保留完整的华为电脑管家安装。触控、配件状态、电池阈值与色彩管理等功能均直接依赖电脑管家自带的底层 DLL，删除相关组件会导致对应功能失效。
->
-> 该依赖不会增加后台常驻开销：OpenEGo Hub 会停用电脑管家的官方 x64 服务，并移除其登录自启项，相关进程不再常驻后台，消除了原有的转译开销；所需 DLL 仅由本项目的宿主进程按需加载。
+> 系统中需保留原装华为驱动与华为电脑管家安装目录。触控、手写笔、键盘、充电限制与屏幕校色均需调用电脑管家附带的 DLL，卸载电脑管家会导致相应功能失效。电脑管家的后台服务与登录自启项可在「服务」页停用，无需常驻运行。
 
 ---
 
 ## 主要功能
 
-- **触控管理**：支持多点触控与书写防误触，落笔时自动屏蔽手指触摸。
-- **手写笔支持**：支持 HUAWEI M-Pencil 压感与倾角检测；支持自定义侧键双击动作（系统笔快捷方式或书写/橡皮擦切换），内置 OneNote 兼容模式。
-- **磁吸键盘配置**：支持键盘脱离主机后的无线连接开关控制。
-- **电池与电源**：支持智能充电模式与自定义充放电阈值；提供电池健康度、充放电循环次数及剩余续航时间查询。
-- **色彩与显示**：支持 sRGB 与 P3 色域切换、色温调节及护眼模式，参数直接通过显示驱动应用面板出厂校准数据。
-- **服务管理**：提供华为后台服务的状态监控与启停控制。
-- **自动更新**：定期检查新版本，确认后在应用内完成下载、校验与安装，不必手动下载安装包；可关闭自动检查，也可跳过指定版本。
-- **设备信息**：实时显示手写笔与键盘的电量、充放电状态、磁吸连接状态、固件版本和硬件序列号；显示主机型号、处理器规格、内存容量及系统版本。
+- **概览与快捷面板**：汇总主机硬件信息、电源状态及手写笔、磁吸键盘电量；左键点击托盘图标弹出快捷控制面板，用于切换常用功能、电源模式与屏幕色温。
+- **触控与手写笔**：支持多点触控、书写防误触及 HUAWEI M-Pencil 压感与倾角检测；支持配置笔侧键双击动作（系统笔快捷方式或切换书写与橡皮擦），内置桌面版 OneNote 兼容模式。
+- **智能磁吸键盘**：显示吸附状态、充放电状态、电量与固件版本，控制键盘分离后的无线连接，并在手写笔或键盘接入时显示顶部状态提示。
+- **电池与电源**：集成 Windows 11 节能模式与电源模式设置，支持智能充电与六档充电上限（50%–100%），实时显示充放电功率、电压、容量、循环次数与电池健康度。
+- **屏幕与色彩**：切换内屏刷新率（120 Hz / 60 Hz）、出厂校准色域（原生 / sRGB / Display P3）、色温与护眼模式，内置色彩与灰阶对照条。
+- **服务管理**：支持停用或恢复华为电脑管家后台服务与登录自启项；运行期间接管触控，退出、卸载或异常终止时自动交还华为触控服务。
+- **更新与诊断**：支持定期检查更新并在应用内完成下载、SHA-256 校验与静默安装，支持打包导出运行日志。
 
 ---
 
 ## 界面展示
 
+### 快捷面板与连接提示
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/flyout-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/flyout-light.avif">
+    <img src="Assets/screenshots/flyout-light.avif" alt="快捷控制面板" width="340">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/popup-pen-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/popup-pen-light.avif">
+    <img src="Assets/screenshots/popup-pen-light.avif" alt="手写笔连接提示" width="340">
+  </picture>
+  &nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/popup-keyboard-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/popup-keyboard-light.avif">
+    <img src="Assets/screenshots/popup-keyboard-light.avif" alt="磁吸键盘连接提示" width="340">
+  </picture>
+</p>
+
 ### 配件管理
-显示手写笔与键盘的电量、连接状态、固件版本及序列号，并提供侧键功能配置。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/accessories.png" alt="配件管理界面" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/accessories-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/accessories-light.avif">
+    <img src="Assets/screenshots/accessories-light.avif" alt="配件管理界面" width="820">
+  </picture>
 </p>
 
-### 状态托盘与连接提示
-常驻任务栏托盘显示配件状态，并在手写笔或键盘连接时显示状态提示。
+### 电池与屏幕
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-pen.png" alt="手写笔连接提示" width="340">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/popup-keyboard.png" alt="磁吸键盘连接提示" width="340">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/battery-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/battery-light.avif">
+    <img src="Assets/screenshots/battery-light.avif" alt="电池设置界面" width="404">
+  </picture>
+  &nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/screen-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/screen-light.avif">
+    <img src="Assets/screenshots/screen-light.avif" alt="屏幕设置界面" width="404">
+  </picture>
 </p>
 
-### 电池与电源
-提供智能充电模式与自定义充电阈值，并显示电池健康度、循环次数及剩余续航时间。
+### 服务与设备
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/battery.png" alt="电池设置界面" width="820">
-</p>
-
-### 色彩与显示
-提供色域切换、色温调节与护眼模式配置。
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/screen.png" alt="显示设置界面" width="820">
-</p>
-
-### 服务管理
-提供华为后台服务的状态监控与启停控制。
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/services.png" alt="服务管理界面" width="820">
-</p>
-
-### 设备信息
-显示主机型号、处理器规格、内存容量及系统版本等硬件信息。
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/NihilDigit/openego-hub/main/Assets/screenshots/device.png" alt="设备信息界面" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/services-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/services-light.avif">
+    <img src="Assets/screenshots/services-light.avif" alt="服务管理界面" width="404">
+  </picture>
+  &nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Assets/screenshots/device-dark.avif">
+    <source media="(prefers-color-scheme: light)" srcset="Assets/screenshots/device-light.avif">
+    <img src="Assets/screenshots/device-light.avif" alt="设备信息界面" width="404">
+  </picture>
 </p>
 
 ---
@@ -87,122 +114,78 @@ OpenEGo Hub 是面向 HUAWEI MateBook E Go（Windows 11 ARM64）的硬件控制�
 ## 硬件支持
 
 - **主机**：HUAWEI MateBook E Go（Windows 11 ARM64）
-- **手写笔**：HUAWEI M-Pencil（支持 CD52、CD54、CD54R、CD54S；其中 CD54R 已完成真机测试）
-- **键盘**：华为智能磁吸键盘
+- **手写笔**：HUAWEI M-Pencil（支持 CD52、CD54、CD54R、CD54S，已在 CD54R 真机验证）
+- **键盘**：HUAWEI 智能磁吸键盘
 
 ---
 
 ## 安装与使用
 
-### 前置依赖
-运行环境需保留系统原装的华为硬件驱动及华为电脑管家组件，触控、屏幕色彩校准、电池阈值及键盘无线连接均依赖其底层动态链接库。
-
-### 安装步骤
-1. 前往 [Releases](https://github.com/NihilDigit/openego-hub/releases/latest) 页面下载最新版安装包 `OpenEGoHubSetup_arm64_vX.Y.Z.msi`。
-2. 运行安装程序完成部署（注册系统服务需要管理员权限）。
-3. 安装完成后，后台服务将随系统启动，用户可通过开始菜单打开设置中心。
+1. 前往 [Releases](https://github.com/NihilDigit/openego-hub/releases/latest) 下载最新版 `OpenEGoHubSetup_arm64_vX.Y.Z.msi`。
+2. 运行安装程序（注册系统服务需管理员权限）。
+3. 安装完成后后台服务随系统启动，可通过任务栏托盘图标或开始菜单打开控制中心。
 
 ### 升级与卸载
-- 安装包自带清理流程：安装前自动移除旧版本（含改名前的早期版本与测试版）遗留的服务、程序文件与快捷方式，无需先手动卸载。
-- 用户配置在升级中保留，包括各项设置、日志与华为服务及自启项的还原记录。
-- 设置中心可直接升级：确认后由后台服务下载、校验并安装，托盘与设置窗口在安装期间退出，装完自动恢复。
-- 曾在设置中心停用的华为组件，升级后保持停用。从 v0.4.0 及更早版本升级时仍会被还原一次，那些版本的卸载流程已固化在本机。
-- 卸载时触控自动交还华为触控服务；曾通过设置中心禁用的华为后台服务与登录自启项会一并恢复。
 
-### 运行机制
-- **触控接管**：程序运行期间接管触控输入通道；程序退出或异常终止时，触控控制权自动归还系统原生触控服务。
-- **服务切换**：如需恢复使用华为原厂触控服务，在设置界面中退出 OpenEGo Hub 即可。
+- 安装程序会自动替换旧版服务与程序文件，无需预先卸载；用户配置、日志及华为组件的停用状态均会保留。
+- 控制中心内确认更新后，后台服务自动完成下载、校验与静默安装，完成后重新拉起托盘与界面。
+- 卸载时触控自动交还华为触控服务，此前在控制中心停用的华为后台服务与登录自启项同步恢复。
 
 ---
 
 ## 源码构建
 
 ### 环境要求
-- CMake 3.20 或更高版本
-- Ninja 构建系统
-- Visual Studio ARM64 MSVC 工具链（`cl.exe`）
-- WiX Toolset v4（用于生成 MSI 安装包）
 
-### 构建步骤
+- Windows 11 ARM64
+- Visual Studio 2022（ARM64 与 ARM64EC MSVC 工具链、MSBuild）
+- CMake 3.20+ 与 Ninja
+- WiX Toolset v7（仅打包 MSI 安装包时需要）
 
-构建前需在 PowerShell 中加载 ARM64 编译环境。主构建脚本 `scripts\build.ps1` 会自动配置环境：
+### 编译与打包
+
+`hal/` 需先于主工程编译：
 
 ```powershell
-# 编译 Release 版本
+# 1. 编译 HAL（Debug 或 Release）
+.\hal\scripts\build.ps1 -Config Release
+
+# 2. 编译主工程（Debug 配置可附加 -Test 运行测试）
 .\scripts\build.ps1 -Config Release
 
-# 编译 Debug 版本并执行自动化测试
-.\scripts\build.ps1 -Config Debug -Test
-```
-
-在已执行 `vcvarsarm64.bat` 的环境中，可直接使用 CMake Presets：
-
-```powershell
-cmake --preset arm64-Release
-cmake --build --preset arm64-Release
-```
-
-### HAL 模块独立编译
-`hal/` 目录下的硬件抽象层与宿主程序需优先独立编译，主工程依赖其生成的 `GaokunHal.lib`：
-
-```powershell
-cd hal
-.\scripts\build.ps1 -Config Debug
-cd ..
-```
-
-> 注：核心服务为原生 ARM64 程序；`hal/` 目录下用于加载 x64 DLL 的宿主程序编译为 ARM64EC，由 HAL 专属构建脚本生成。
-
-### 调试与开发流程
-在开发机上以管理员权限注册 Debug 服务后，可使用开发脚本进行迭代：
-
-```powershell
-# 注册 Debug 服务
-scripts\install_debug_service.bat
-
-# 快速更新与重启服务（需管理员权限）
-pwsh -File scripts\dev-cycle.ps1
-
-# 恢复运行已安装的 Release 服务
-pwsh -File scripts\dev-cycle.ps1 -RestoreRelease
-```
-
-### 安装包制作
-使用 WiX 生成 ARM64 MSI 安装包：
-
-```powershell
-dotnet tool install --global wix
-wix extension add -g WixToolset.UI.wixext
-wix build -ext WixToolset.UI.wixext -arch arm64 -d BuildVersion=1.2.3 `
-    -d BuildOutputDir=build\arm64-Release -d HalOutputDir=hal\build\Release `
-    scripts\OpenEGoHubSetup.wxs -loc scripts\zh-CN.wxl `
-    -out build\OpenEGoHubSetup_arm64_v1.2.3.msi
-```
-
-或直接执行自动化打包脚本：
-
-```powershell
+# 3. 打包 Release MSI（依次编译 HAL、主工程并生成 build\OpenEGoHubSetup.msi）
 scripts\pack_release_version.bat
+```
+
+本机部署与调试：
+
+```powershell
+# 将构建产物部署到 C:\Program Files\OpenEGoHub
+pwsh -File scripts\deploy.ps1 -Config Release
+
+# 注册 Debug 服务后迭代调试（需管理员权限）
+scripts\install_debug_service.bat
+pwsh -File scripts\dev-cycle.ps1
 ```
 
 ---
 
 ## 项目结构
 
-- `EGoTouchService/`：核心系统服务源码（`Device/` 硬件采集与虚拟 HID 注入、`Tsa/` 厂商算法适配、`Host/` 系统服务接口）。
-- `hal/`：硬件抽象层与 ARM64EC 宿主进程，负责隔离并调用华为 x64 动态链接库。
-- `Common/`：跨进程通信接口定义、共享内存数据结构及公共配置模块。
-- `Tools/`：用户态应用程序，包含托盘监控程序（`EGoTouchTray`）与 WinUI 3 设置界面（`EGoTouchSettings`）。
-- `docs/`：协议逆向文档与技术设计规格说明。
-- `scripts/`：自动化编译、测试、安装打包与开发辅助脚本。
+- `EGoTouchService/`：原生 ARM64 系统服务，负责触控切换、配件状态同步与电源管理。
+- `hal/`：硬件抽象层，以及用于加载华为 x64 DLL 的 ARM64EC 辅助进程。
+- `Common/`：跨进程共享内存协议、配置定义与公共工具库。
+- `Tools/`：用户态组件，包含托盘程序（`EGoTouchTray`）、WinUI 3 控制中心（`EGoTouchSettings`）与安装清理工具（`EGoTouchCleanup`）。
+- `docs/`、`hal/docs/`：协议逆向记录、生命周期设计与底层模块分析文档。
+- `scripts/`：构建、测试、部署与 MSI 打包脚本。
 
 ---
 
-## 致谢与衍生说明
+## 致谢
 
-本项目基于 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT License，© Detach2233）派生开发，继承了其 Himax 帧采集逻辑、手写笔 MCU 通信机制、VHF 虚拟 HID 注入架构及服务运行框架。完整授权声明参见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+本项目派生自 **[EGoTouchRev](https://github.com/awarson2233/EGoTouchRev)**（MIT License，© Detach2233），第三方组件与版权声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
-开发过程中参考了以下开源项目及社区成果：
+开发过程中参考了以下开源项目与社区成果：
 
 - [MateBook-E-Pen](https://github.com/eiyooooo/MateBook-E-Pen)（by eiyooooo）
 - [goodies](https://github.com/matebook-e-go/goodies)（by dantmnf）
@@ -213,14 +196,12 @@ scripts\pack_release_version.bat
 
 ## 开源协议
 
-本项目基于 [MIT License](LICENSE) 开源。
-
-依据协议条款，任何形式的代码或二进制分发均须保留 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 中的版权声明。
+本项目基于 [MIT License](LICENSE) 开源。任何形式的源码或二进制分发均须保留 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 中的版权声明。
 
 ---
 
 ## 免责声明
 
-- **商标与产权**：本项目与 HUAWEI、Himax 及其他相关权利方无官方关联或授权。文档中提及的产品名称、商标及公司名称均属其合法权利人所有。
-- **第三方资产**：托盘程序在运行时尝试加载本地已安装华为电脑管家中的手写笔与状态图标资源；未检测到安装时自动回退至内置矢量绘制。受版权保护的原厂素材不包含在本项目的源码或发布包中。
-- **风险提示**：本项目涉及底层硬件驱动与系统服务交互，主要用于互操作性研究与技术交流。用户须自行承担使用风险，作者及贡献者对使用过程中可能导致的硬件故障、数据丢失或系统不稳定不承担法律责任。
+- **商标与产权**：本项目与 HUAWEI、Himax 及其他相关权利方无任何官方关联或授权。提及的产品名称、商标与公司名称均归各自权利人所有。
+- **第三方资产**：托盘程序与控制中心在运行时按需从本机已安装的华为电脑管家目录读取设备渲染图与状态图标，未检测到时自动回退至内置矢量或系统图标；受版权保护的原厂素材不包含在本仓库或安装包中。
+- **风险提示**：本项目涉及底层硬件驱动与系统服务交互，仅用于互操作性研究与技术交流。使用本软件产生的硬件故障、数据丢失或系统不稳定风险由用户自行承担，作者及贡献者不承担相关法律责任。
