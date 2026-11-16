@@ -7,7 +7,7 @@
 //
 // .rc 与 .cpp 都能包含这个头:资源编译器只认预处理指令,这里除了 #define 什么都不能有。
 
-#define OPENEGO_VERSION_MAJOR 0
-#define OPENEGO_VERSION_MINOR 5
-#define OPENEGO_VERSION_PATCH 3
-#define OPENEGO_VERSION_STRING "0.5.3"
+#define OPENEGO_VERSION_MAJOR 1
+#define OPENEGO_VERSION_MINOR 0
+#define OPENEGO_VERSION_PATCH 0
+#define OPENEGO_VERSION_STRING "1.0.0"
